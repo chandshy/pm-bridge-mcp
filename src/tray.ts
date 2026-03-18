@@ -21,6 +21,11 @@ import { deflateSync }   from "zlib";
 import { loadConfig }    from "./config/loader.js";
 import { startSettingsServer } from "./settings/server.js";
 import { openBrowser }   from "./settings/tui.js";
+// Type-only imports from the ambient module in src/types/systray2.d.ts.
+// The actual runtime value is loaded lazily via _require() below to avoid a
+// hard dependency on the optional systray2 package.
+import type SysTrayClass from "systray2";
+import type { MenuItem }  from "systray2";
 
 const _require = createRequire(import.meta.url);
 
@@ -126,8 +131,6 @@ const ICON_B64 = process.platform === "win32"
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-type MenuItem = { title: string; tooltip: string; checked: boolean; enabled: boolean };
-
 function item(title: string, tooltip = "", enabled = true): MenuItem {
   return { title, tooltip, checked: false, enabled };
 }
@@ -150,9 +153,12 @@ async function main(): Promise<void> {
   const settingsUrl = `${scheme}://localhost:${port}`;
 
   // ── Try loading systray2 (optional dependency) ─────────────────────────────
-  let SysTray: any;
+  // The package is optional: if absent the settings server still runs.
+  // We assert the module shape via the ambient types in src/types/systray2.d.ts.
+  type SysTrayConstructor = typeof SysTrayClass;
+  let SysTray: SysTrayConstructor | undefined;
   try {
-    SysTray = _require("systray2").default;
+    SysTray = (_require("systray2") as { default: SysTrayConstructor }).default;
   } catch {
     // systray2 not installed — start server and open browser, no tray icon
     openBrowser(settingsUrl);
@@ -162,9 +168,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  const sep = SysTray.separator as MenuItem;
+  // After the catch block's early return, SysTray is guaranteed to be defined.
+  const ST = SysTray!;
+  const sep: MenuItem = ST.separator;
 
-  const tray: any = new SysTray({
+  const tray: InstanceType<SysTrayConstructor> = new ST({
     menu: {
       icon:    ICON_B64,
       title:   "",
