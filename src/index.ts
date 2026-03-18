@@ -1562,6 +1562,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // RFC 2822 §2.1.1 hard limit: a single header line MUST NOT exceed 998 chars.
   // Enforced for the 'subject' field in send_email, save_draft, and schedule_email.
   const MAX_SUBJECT_LENGTH = 998;
+  // Upper bound on outbound email body length.  100 MB bodies would exhaust
+  // Node.js heap and cause silent OOM or SMTP timeout.  10 MB is well above
+  // any legitimate use case (typical email bodies are <100 KB); Proton Bridge
+  // itself enforces a lower limit but the handler-level guard gives the caller
+  // a clear McpError(InvalidParams) rather than an opaque delivery failure.
+  const MAX_BODY_LENGTH = 10 * 1024 * 1024; // 10 MB
 
   try {
     switch (name) {
@@ -1580,6 +1586,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Mirrors the guard added to reply_to_email in Cycle #23.
         if (!args.body || typeof args.body !== "string" || !(args.body as string).trim()) {
           throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string.");
+        }
+        // Guard body max length — a 100 MB body would exhaust Node.js heap and
+        // cause OOM or SMTP timeout with no useful error.  Fail early with a clear
+        // McpError(InvalidParams) instead of an opaque delivery failure downstream.
+        if ((args.body as string).length > MAX_BODY_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `'body' must not exceed ${MAX_BODY_LENGTH} bytes (${MAX_BODY_LENGTH / 1024 / 1024} MB).`);
+        }
+        // Guard 'isHtml' type — must be boolean when provided.  A non-boolean truthy
+        // value (e.g. "yes" or 1) passes silently through `as boolean | undefined`
+        // and is forwarded to nodemailer where it is treated as truthy (HTML mode).
+        if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isHtml' must be a boolean when provided.");
         }
         // RFC 2822 §2.1.1 — header lines SHOULD be ≤998 characters (hard limit).
         // A multi-kilobyte subject causes header bloat and may be rejected by MTAs.
@@ -1637,6 +1655,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // caller error; fail early with a clear message rather than sending a blank.
         if (!args.body || typeof args.body !== "string" || !(args.body as string).trim()) {
           throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string.");
+        }
+        // Guard 'isHtml' type — must be boolean when provided.  Consistent with
+        // the guard added to send_email; prevents a non-boolean truthy value (e.g.
+        // "yes" or 1) from silently enabling HTML mode in the SMTP call.
+        if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isHtml' must be a boolean when provided.");
         }
         const original = await imapService.getEmailById(emailId);
         if (!original) {
@@ -1955,6 +1979,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.body !== undefined && (typeof args.body !== "string" || !(args.body as string).trim())) {
           throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string when provided.");
         }
+        // Guard body max length — same cap as send_email; a multi-megabyte draft body
+        // would exhaust IMAP append limits or Node.js heap before reaching the server.
+        if (args.body !== undefined && (args.body as string).length > MAX_BODY_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `'body' must not exceed ${MAX_BODY_LENGTH} bytes (${MAX_BODY_LENGTH / 1024 / 1024} MB).`);
+        }
+        // Guard 'isHtml' type — must be boolean when provided.  Consistent with
+        // the guard added to send_email; prevents a non-boolean truthy value (e.g.
+        // "yes" or 1) from silently enabling HTML mode in the IMAP saveDraft call.
+        if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isHtml' must be a boolean when provided.");
+        }
         // Type guard for optional 'cc' and 'bcc' — must be strings when provided.
         // Mirrors the same guard added to send_email (Cycle #31); a non-string value
         // (e.g. an array) would be silently cast and forwarded to the IMAP layer.
@@ -1993,6 +2028,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Mirrors the guard added to send_email and reply_to_email.
         if (!args.body || typeof args.body !== "string" || !(args.body as string).trim()) {
           throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string.");
+        }
+        // Guard body max length — for scheduled emails this is especially important:
+        // an oversized body is stored in the scheduler JSON file and then fed to the
+        // SMTP layer when the job fires, compounding the resource cost.
+        if ((args.body as string).length > MAX_BODY_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `'body' must not exceed ${MAX_BODY_LENGTH} bytes (${MAX_BODY_LENGTH / 1024 / 1024} MB).`);
+        }
+        // Guard 'isHtml' type — must be boolean when provided.  Consistent with
+        // the guard added to send_email; prevents a non-boolean truthy value (e.g.
+        // "yes" or 1) from silently enabling HTML mode when the scheduled job fires.
+        if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isHtml' must be a boolean when provided.");
         }
         // RFC 2822 subject length cap (shared with send_email / save_draft).
         // Type guard first: a non-string subject (e.g. a number) would silently bypass

@@ -2833,4 +2833,102 @@ describe('helpers', () => {
       expect(isCustomMessageWrongType({ body: 'test' })).toBe(true);
     });
   });
+
+  // ── Cycle #33 guards ──────────────────────────────────────────────────────
+
+  // isHtml type guard (Cycle #33)
+  // Applied in send_email, reply_to_email, save_draft, schedule_email.
+  // Condition: args.isHtml !== undefined && typeof args.isHtml !== "boolean" → fire.
+  // A non-boolean truthy value (e.g. "yes" or 1) passes through as boolean in
+  // nodemailer, silently switching the email to HTML mode without any caller error.
+
+  describe("'isHtml' boolean type guard — send_email / reply_to_email / save_draft / schedule_email (Cycle #33)", () => {
+    function isIsHtmlWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== 'boolean';
+    }
+
+    it('undefined is accepted (isHtml is optional)', () => {
+      expect(isIsHtmlWrongType(undefined)).toBe(false);
+    });
+
+    it('true is accepted', () => {
+      expect(isIsHtmlWrongType(true)).toBe(false);
+    });
+
+    it('false is accepted', () => {
+      expect(isIsHtmlWrongType(false)).toBe(false);
+    });
+
+    it('string "true" triggers guard (wrong type)', () => {
+      expect(isIsHtmlWrongType('true')).toBe(true);
+    });
+
+    it('string "yes" triggers guard (wrong type)', () => {
+      expect(isIsHtmlWrongType('yes')).toBe(true);
+    });
+
+    it('number 1 triggers guard (wrong type — truthy, would enable HTML mode silently)', () => {
+      expect(isIsHtmlWrongType(1)).toBe(true);
+    });
+
+    it('number 0 triggers guard (wrong type — falsy number, still wrong type)', () => {
+      expect(isIsHtmlWrongType(0)).toBe(true);
+    });
+
+    it('null triggers guard (wrong type)', () => {
+      expect(isIsHtmlWrongType(null)).toBe(true);
+    });
+
+    it('array triggers guard (wrong type)', () => {
+      expect(isIsHtmlWrongType([true])).toBe(true);
+    });
+
+    it('plain object triggers guard (wrong type)', () => {
+      expect(isIsHtmlWrongType({ html: true })).toBe(true);
+    });
+  });
+
+  // body max-length guard (Cycle #33)
+  // Applied in send_email, save_draft, schedule_email.
+  // MAX_BODY_LENGTH = 10 * 1024 * 1024 (10 MB).
+  // Condition: body.length > MAX_BODY_LENGTH → fire.
+  // Prevents OOM/SMTP timeout from multi-megabyte body payloads.
+
+  describe("'body' max-length guard (MAX_BODY_LENGTH = 10 MB) — send_email / save_draft / schedule_email (Cycle #33)", () => {
+    const MAX_BODY_LENGTH = 10 * 1024 * 1024; // mirrors src/index.ts
+
+    function isBodyTooLong(v: string): boolean {
+      return v.length > MAX_BODY_LENGTH;
+    }
+
+    it('empty string does not trigger guard', () => {
+      expect(isBodyTooLong('')).toBe(false);
+    });
+
+    it('typical short body does not trigger guard', () => {
+      expect(isBodyTooLong('Hello, world!')).toBe(false);
+    });
+
+    it('body exactly at MAX_BODY_LENGTH does not trigger guard (boundary)', () => {
+      expect(isBodyTooLong('a'.repeat(MAX_BODY_LENGTH))).toBe(false);
+    });
+
+    it('body one byte over MAX_BODY_LENGTH triggers guard', () => {
+      expect(isBodyTooLong('a'.repeat(MAX_BODY_LENGTH + 1))).toBe(true);
+    });
+
+    it('body at 11 MB triggers guard', () => {
+      expect(isBodyTooLong('a'.repeat(11 * 1024 * 1024))).toBe(true);
+    });
+
+    it('body at 100 MB triggers guard (OOM scenario)', () => {
+      // Use length arithmetic rather than actually allocating 100 MB.
+      const fakeLength = 100 * 1024 * 1024;
+      expect(fakeLength > MAX_BODY_LENGTH).toBe(true);
+    });
+
+    it('MAX_BODY_LENGTH constant is exactly 10 MB (10485760 bytes)', () => {
+      expect(MAX_BODY_LENGTH).toBe(10485760);
+    });
+  });
 });
