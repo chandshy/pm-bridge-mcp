@@ -65,16 +65,16 @@ export function wipeObject(obj: Record<string, any>, keys: string[]): void {
 
 /** Overwrite sensitive fields in an EmailMessage. */
 function scrubEmail(email: EmailMessage): void {
-  if (email.body) (email as any).body = "";
-  if (email.subject) (email as any).subject = "";
-  if (email.from) (email as any).from = "";
+  if (email.body) email.body = "";
+  if (email.subject) email.subject = "";
+  if (email.from) email.from = "";
   if (email.attachments) {
     for (const att of email.attachments) {
       if (att.content && Buffer.isBuffer(att.content)) {
         (att.content as Buffer).fill(0);
       }
-      (att as any).content = undefined;
-      (att as any).filename = "";
+      att.content = undefined;
+      att.filename = "";
     }
   }
 }

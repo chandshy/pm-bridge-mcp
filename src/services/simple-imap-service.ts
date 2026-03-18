@@ -1224,6 +1224,7 @@ export class SimpleIMAPService {
     }
   }
 
+  /** Clear all in-memory email and folder caches, forcing fresh IMAP fetches on next access. */
   clearCache(): void {
     this.emailCache.clear();
     this.folderCache.clear();
