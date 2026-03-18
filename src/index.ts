@@ -1572,6 +1572,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "send_email": {
         const seAttErr = validateAttachments(args.attachments);
         if (seAttErr) throw new McpError(ErrorCode.InvalidParams, seAttErr);
+        // Guard empty/whitespace-only 'to' field before reaching SMTP layer.
+        if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
+        }
         const result = await smtpService.sendEmail({
           to: args.to as string,
           cc: args.cc as string | undefined,
@@ -1591,6 +1595,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "reply_to_email": {
         const emailId = requireNumericEmailId(args.emailId);
+        // Guard empty/whitespace-only body — an empty reply is almost always a
+        // caller error; fail early with a clear message rather than sending a blank.
+        if (!args.body || typeof args.body !== "string" || !(args.body as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string.");
+        }
         const original = await imapService.getEmailById(emailId);
         if (!original) {
           return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true, structuredContent: { success: false, reason: "Original email not found" } };
@@ -1638,6 +1647,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "forward_email": {
         const fwdId = requireNumericEmailId(args.emailId);
+        // Guard empty/whitespace-only 'to' field before fetching the original email.
+        if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
+        }
         const fwdOriginal = await imapService.getEmailById(fwdId);
         if (!fwdOriginal) {
           return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true, structuredContent: { success: false, reason: "Original email not found" } };
@@ -2017,7 +2030,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "bulk_mark_read": {
-        const bmrIds = Array.isArray(args.emailIds) ? args.emailIds : [];
+        if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
+        }
+        const bmrIds = args.emailIds as unknown[];
         const bmrEmailIds: string[] = bmrIds
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
@@ -2039,7 +2055,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "bulk_star": {
-        const bsIds = Array.isArray(args.emailIds) ? args.emailIds : [];
+        if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
+        }
+        const bsIds = args.emailIds as unknown[];
         const bsEmailIds: string[] = bsIds
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
@@ -2064,8 +2083,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validate targetFolder before touching any email — same guards as move_email.
         const bmValidErr = validateTargetFolder(args.targetFolder);
         if (bmValidErr) throw new McpError(ErrorCode.InvalidParams, bmValidErr);
+        if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
+        }
         // Validate and sanitize input — reject non-string and non-numeric IDs, cap array size
-        const rawIds = Array.isArray(args.emailIds) ? args.emailIds : [];
+        const rawIds = args.emailIds as unknown[];
         const emailIds: string[] = rawIds
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
@@ -2100,7 +2122,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "bulk_move_to_label": {
-        const rawIds2 = Array.isArray(args.emailIds) ? args.emailIds : [];
+        if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
+        }
+        const rawIds2 = args.emailIds as unknown[];
         const emailIds2: string[] = rawIds2
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
@@ -2141,7 +2166,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "bulk_remove_label": {
-        const brlIds = Array.isArray(args.emailIds) ? args.emailIds : [];
+        if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
+        }
+        const brlIds = args.emailIds as unknown[];
         const brlEmailIds: string[] = brlIds
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
@@ -2177,7 +2205,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "bulk_delete":
       case "bulk_delete_emails": {
-        const rawIds3 = Array.isArray(args.emailIds) ? args.emailIds : [];
+        if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
+        }
+        const rawIds3 = args.emailIds as unknown[];
         const emailIds3: string[] = rawIds3
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);

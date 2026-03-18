@@ -1392,4 +1392,130 @@ describe('helpers', () => {
       expect(validateTargetFolder('Labels/MyLabel')).toBeNull();
     });
   });
+
+  // ── Cycle #23: send_email / forward_email 'to' field guard ────────────────
+  // Guards: !args.to || typeof args.to !== "string" || !(args.to as string).trim()
+  // Mirrors the new handler-level validation added in Cycle #23.
+
+  describe('send_email / forward_email "to" field guard', () => {
+    // Replicates the inline guard condition:
+    //   !args.to || typeof args.to !== "string" || !(args.to as string).trim()
+    // Returns true → guard triggers → McpError(InvalidParams) thrown.
+    function isInvalidTo(v: unknown): boolean {
+      return !v || typeof v !== 'string' || !(v as string).trim();
+    }
+
+    it('passes for a valid address "user@example.com"', () => {
+      expect(isInvalidTo('user@example.com')).toBe(false);
+    });
+
+    it('passes for a comma-separated pair "a@b.com, c@d.com"', () => {
+      expect(isInvalidTo('a@b.com, c@d.com')).toBe(false);
+    });
+
+    it('triggers for an empty string', () => {
+      expect(isInvalidTo('')).toBe(true);
+    });
+
+    it('triggers for a whitespace-only string "   "', () => {
+      expect(isInvalidTo('   ')).toBe(true);
+    });
+
+    it('triggers for undefined', () => {
+      expect(isInvalidTo(undefined)).toBe(true);
+    });
+
+    it('triggers for null', () => {
+      expect(isInvalidTo(null)).toBe(true);
+    });
+
+    it('triggers for a number (wrong type)', () => {
+      expect(isInvalidTo(42)).toBe(true);
+    });
+  });
+
+  // ── Cycle #23: reply_to_email 'body' field guard ──────────────────────────
+  // Guards: !args.body || typeof args.body !== "string" || !(args.body as string).trim()
+  // Prevents blank replies from being sent.
+
+  describe('reply_to_email "body" field guard', () => {
+    // Replicates the inline guard condition (same shape as the 'to' guard above).
+    function isInvalidBody(v: unknown): boolean {
+      return !v || typeof v !== 'string' || !(v as string).trim();
+    }
+
+    it('passes for a non-empty body "Hello"', () => {
+      expect(isInvalidBody('Hello')).toBe(false);
+    });
+
+    it('passes for a multi-line body', () => {
+      expect(isInvalidBody('Line 1\nLine 2')).toBe(false);
+    });
+
+    it('triggers for an empty string', () => {
+      expect(isInvalidBody('')).toBe(true);
+    });
+
+    it('triggers for a whitespace-only string "  \\n  "', () => {
+      expect(isInvalidBody('  \n  ')).toBe(true);
+    });
+
+    it('triggers for undefined', () => {
+      expect(isInvalidBody(undefined)).toBe(true);
+    });
+
+    it('triggers for null', () => {
+      expect(isInvalidBody(null)).toBe(true);
+    });
+  });
+
+  // ── Cycle #23: bulk operations empty emailIds array guard ─────────────────
+  // Guard added to all 6 bulk tools (bulk_mark_read, bulk_star, bulk_move_emails,
+  // bulk_move_to_label, bulk_remove_label, bulk_delete_emails / bulk_delete):
+  //   !Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0
+  // An empty array previously returned {success:0, failed:0, errors:[]}; now
+  // it returns McpError(InvalidParams) so callers get explicit feedback.
+
+  describe('bulk operations empty emailIds array guard', () => {
+    // Replicates the inline guard:
+    //   !Array.isArray(v) || (v as unknown[]).length === 0
+    // Returns true → guard triggers → McpError(InvalidParams) thrown.
+    function isInvalidBulkIds(v: unknown): boolean {
+      return !Array.isArray(v) || (v as unknown[]).length === 0;
+    }
+
+    it('passes for a non-empty array ["42"]', () => {
+      expect(isInvalidBulkIds(['42'])).toBe(false);
+    });
+
+    it('passes for a multi-element array ["1","2","3"]', () => {
+      expect(isInvalidBulkIds(['1', '2', '3'])).toBe(false);
+    });
+
+    it('triggers for an empty array []', () => {
+      expect(isInvalidBulkIds([])).toBe(true);
+    });
+
+    it('triggers for undefined', () => {
+      expect(isInvalidBulkIds(undefined)).toBe(true);
+    });
+
+    it('triggers for null', () => {
+      expect(isInvalidBulkIds(null)).toBe(true);
+    });
+
+    it('triggers for a plain string (not an array)', () => {
+      expect(isInvalidBulkIds('42')).toBe(true);
+    });
+
+    it('triggers for a number (not an array)', () => {
+      expect(isInvalidBulkIds(42)).toBe(true);
+    });
+
+    it('passes for an array of invalid IDs (the array itself is non-empty; downstream filter handles per-item validity)', () => {
+      // The guard only checks array non-emptiness; the per-item /^\d+$/ filter
+      // runs after the guard and may still produce an empty processed list.
+      expect(isInvalidBulkIds(['abc', '', null])).toBe(false);
+    });
+  });
 });
