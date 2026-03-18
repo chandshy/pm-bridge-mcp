@@ -21,7 +21,7 @@ import {
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { ProtonMailConfig, EmailMessage, EmailAttachment } from "./types/index.js";
+import { ProtonMailConfig, EmailMessage, EmailAttachment, EmailFolder } from "./types/index.js";
 import { SMTPService } from "./services/smtp-service.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
@@ -1213,6 +1213,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   level: { type: "string", enum: ["debug", "info", "warn", "error"] },
                   context: { type: "string" },
                   message: { type: "string" },
+                  data: { description: "Optional structured metadata attached to the log entry (sensitive fields redacted)" },
                 },
                 required: ["timestamp", "level", "context", "message"],
               },
@@ -1743,6 +1744,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!isValidEmail(args.to as string)) {
           throw new McpError(ErrorCode.InvalidParams, `Invalid recipient email address: ${args.to}`);
         }
+        // Type guard for optional 'customMessage' — must be a string when provided.
+        // A non-string value (e.g. a number or object) is truthy, would pass the
+        // SMTP service's `customMessage || <default>` check, and be silently coerced
+        // to a string via template literal, producing a garbled HTML body.
+        // Consistent with the type guards added for 'message' in forward_email (Cycle #31)
+        // and 'body' in save_draft (Cycle #28).
+        if (args.customMessage !== undefined && typeof args.customMessage !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'customMessage' must be a string when provided.");
+        }
         const result = await smtpService.sendTestEmail(
           args.to as string,
           args.customMessage as string | undefined
@@ -1877,7 +1887,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "list_labels": {
         const allFolders = await imapService.getFolders();
-        const labels = allFolders.filter((f: any) => f.path?.startsWith("Labels/"));
+        const labels = allFolders.filter((f: EmailFolder) => f.path.startsWith("Labels/"));
         return ok({ labels, count: labels.length });
       }
 

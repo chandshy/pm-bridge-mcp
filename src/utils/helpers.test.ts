@@ -2775,4 +2775,62 @@ describe('helpers', () => {
       expect(isMessageWrongType({ text: 'see below' })).toBe(true);
     });
   });
+
+  // ── Cycle #32: send_test_email 'customMessage' field type guard ────────────
+  // send_test_email accepts customMessage as optional, but cast it directly as
+  // `string | undefined` with no type check.  A non-string value (e.g. a number
+  // or array) is truthy, satisfies `customMessage || <default>` in the SMTP
+  // service, and is silently coerced to a string via template literal, producing
+  // garbled HTML in the test email body without any error to the caller.
+  //
+  // New guard (consistent with forward_email 'message' guard from Cycle #31):
+  //   if (args.customMessage !== undefined && typeof args.customMessage !== "string")
+  //     throw new McpError(ErrorCode.InvalidParams, "'customMessage' must be a string when provided.")
+
+  describe("send_test_email 'customMessage' field type guard (Cycle #32)", () => {
+    // Replicates: args.customMessage !== undefined && typeof args.customMessage !== "string" → fire
+    function isCustomMessageWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== 'string';
+    }
+
+    it('undefined is accepted (customMessage is optional)', () => {
+      expect(isCustomMessageWrongType(undefined)).toBe(false);
+    });
+
+    it('non-empty string is accepted', () => {
+      expect(isCustomMessageWrongType('<p>Hello from test</p>')).toBe(false);
+    });
+
+    it('empty string is accepted (type is correct; semantics are a service concern)', () => {
+      expect(isCustomMessageWrongType('')).toBe(false);
+    });
+
+    it('plain text string is accepted', () => {
+      expect(isCustomMessageWrongType('Custom test message body')).toBe(false);
+    });
+
+    it('number 42 triggers guard (wrong type — would be coerced to "42")', () => {
+      expect(isCustomMessageWrongType(42)).toBe(true);
+    });
+
+    it('number 0 triggers guard (falsy number but still wrong type)', () => {
+      expect(isCustomMessageWrongType(0)).toBe(true);
+    });
+
+    it('boolean true triggers guard (wrong type)', () => {
+      expect(isCustomMessageWrongType(true)).toBe(true);
+    });
+
+    it('null triggers guard (wrong type)', () => {
+      expect(isCustomMessageWrongType(null)).toBe(true);
+    });
+
+    it('array triggers guard (wrong type)', () => {
+      expect(isCustomMessageWrongType(['Custom message'])).toBe(true);
+    });
+
+    it('plain object triggers guard (wrong type)', () => {
+      expect(isCustomMessageWrongType({ body: 'test' })).toBe(true);
+    });
+  });
 });
