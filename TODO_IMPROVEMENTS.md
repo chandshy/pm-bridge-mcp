@@ -1,7 +1,7 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #19 (2026-03-18) — FINAL CODE CYCLE
-NOTE: Cycle #19 is the last code-change cycle. Cycle #20 will be the final summary/audit report.
+Last updated: Cycle #20 (2026-03-18) — FINAL AUDIT CYCLE — ALL CYCLES COMPLETE
+NOTE: Cycle #19 was the last code-change cycle. Cycle #20 is the final summary/audit report. No further cycles planned.
 
 ---
 
@@ -212,10 +212,14 @@ Added `name`, `firstInteraction`, `averageResponseTime`, `isFavorite` to the con
 **File:** `src/index.ts` cursor encode/decode
 **Issue:** The cursor is base64url-encoded JSON `{folder, offset, limit}`. Adding HMAC would bind the cursor to the server instance (prevents cursor forgery across restarts).
 **Effort:** Low-medium, low security impact
+**Status:** DEFERRED — low risk (folder field already traversal-validated; no sensitive data in cursor). Revisit if multi-instance deployment is planned.
 
 ### 6. IMAP connection health check / reconnect on error
 **File:** `src/services/simple-imap-service.ts`
 **Issue:** `ensureConnection()` only checks `isConnected` flag. If IMAP server drops without a 'close' event (TCP RST), `isConnected` stays true and next op throws. Proactive NOOP check would be more robust.
 **Effort:** Medium, moderate risk
+**Status:** PARTIALLY ADDRESSED — `healthCheck()` NOOP probe added (Cycle 13), surfaced in `get_connection_status` (Cycle 14). Full proactive background reconnect deferred: read-path catches errors; write-path maps to safeErrorMessage. Low marginal value.
 
 ---
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 20 cycles
