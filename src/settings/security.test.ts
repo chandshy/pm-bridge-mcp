@@ -375,6 +375,7 @@ describe('getPrimaryLanIP', () => {
     // Either a valid IPv4 address or empty string (no external interface in CI)
     expect(ip).toMatch(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^$/);
   });
+
 });
 
 // ─── clientIP ────────────────────────────────────────────────────────────────

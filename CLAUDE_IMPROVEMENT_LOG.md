@@ -4,6 +4,46 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #48 — Massive coverage boost: analytics, scheduler, security, escalation
+**Timestamp:** 2026-03-18
+**Branch:** main
+**Commits:** 00d2b19, cc0eb83, 5dc4d3a, 8e505b4
+
+### Work Completed
+**Sub-cycle a** — analytics, scheduler, security.ts basics:
+1. `analytics-service.test.ts` — +41 tests: wipeData, contact clamping, attachment stats with typed contentTypes, storageUsedMB with attachments, topRecipients, cache hit paths, getVolumeTrends clamping
+2. `scheduler.test.ts` — +5 tests: malformed-record skipping, JSON parse error, pruneHistory cap (1001→1000), persist() error path, processDue thrown-exception catch branch
+3. `settings/security.test.ts` — +35 tests: readBodySafe (4 paths), generateAccessToken, hasValidAccessToken (6 paths), getPrimaryLanIP, clientIP, LAN mode isValidOrigin with RFC-1918
+
+**Sub-cycle b** — escalation module from 5% to ~87%:
+4. `escalation.test.ts` — +25 tests: getPendingFilePath/getAuditLogPath env overrides, requestEscalation workflow, rate-limit (5/hour), MAX_PENDING=1 block, getEscalationStatus, getPendingEscalations, approveEscalation, denyEscalation, getAuditLog, expired eviction
+
+**Sub-cycle c** — edge case coverage for analytics + escalation:
+5. Analytics: wipeData falsy fields, responseTimeStats edge cases (unmatched, negative diff, >30 day), array message-id header, empty to, MAX_CONTACTS cap
+6. Escalation: getAuditLog outer catch, loadPendingFile JSON error, savePendingFile normal
+
+**Sub-cycle d** — escalation 100% functions:
+7. `escalation.test.ts` — supervised→full unthrottledTools.filter path (line 167), MAX_HISTORY cap with 101 old records (line 193)
+
+### Coverage Result
+| File | Before | After |
+|---|---|---|
+| analytics-service.ts | 80%/54%/83%/84% | **99%/99%/98%/100%** |
+| scheduler.ts | 82%/70%/86%/88% | **92%/84%/90%/99%** |
+| settings/security.ts | 39%/42%/42%/41% | **78%/78%/85%/79%** |
+| escalation.ts | 5%/0%/4%/6% | **89%/78%/100%/99%** |
+| **All files** | 52%/46%/61%/54% | **64%/57%/75%/66%** |
+
+### Validation
+- `npm run build` — ✅ clean
+- `npm test` — ✅ 1021/1021 passed (was 944; +77 new tests)
+- `npm test -- --coverage` — ✅ all thresholds met (raised to statements 62%, branches 54%, functions 72%, lines 63%)
+
+### Git Status
+Pushed. Commits `00d2b19`, `cc0eb83`, `5dc4d3a`, `8e505b4` on `main`.
+
+---
+
 ## Cycle #47 — 100% utility test coverage (logger, tracer, helpers)
 **Timestamp:** 2026-03-18
 **Branch:** main
