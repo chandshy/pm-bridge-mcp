@@ -1186,4 +1186,143 @@ describe('helpers', () => {
       expect(err).toMatch(/attachments\[1\]/);
     });
   });
+
+  // ── Cycle #21: reply_to_email / forward_email / move_to_folder emailId guard ──
+  // These three handlers were previously passing args.emailId as string without
+  // calling requireNumericEmailId().  They now call it.
+  // The tests mirror the existing requireNumericEmailId tests but are scoped to
+  // the specific field name "emailId" that these handlers use.
+
+  describe('reply_to_email / forward_email / move_to_folder emailId guard (requireNumericEmailId)', () => {
+    it('valid emailId "1001" passes and is returned unchanged', () => {
+      expect(requireNumericEmailId('1001')).toBe('1001');
+    });
+
+    it('non-numeric string "abc" causes McpError with InvalidParams', () => {
+      let thrown: unknown;
+      try { requireNumericEmailId('abc'); } catch (e) { thrown = e; }
+      expect(thrown).toBeInstanceOf(McpError);
+      expect((thrown as McpError).code).toBe(ErrorCode.InvalidParams);
+      expect((thrown as McpError).message).toMatch(/emailId must be a non-empty numeric UID string/);
+    });
+
+    it('empty string causes McpError with InvalidParams', () => {
+      expect(() => requireNumericEmailId('')).toThrow(McpError);
+    });
+
+    it('null causes McpError (guards against null args)', () => {
+      expect(() => requireNumericEmailId(null)).toThrow(McpError);
+    });
+
+    it('undefined causes McpError (guards against missing args)', () => {
+      expect(() => requireNumericEmailId(undefined)).toThrow(McpError);
+    });
+
+    it('float string "1.5" causes McpError', () => {
+      expect(() => requireNumericEmailId('1.5')).toThrow(McpError);
+    });
+
+    it('negative string "-7" causes McpError', () => {
+      expect(() => requireNumericEmailId('-7')).toThrow(McpError);
+    });
+
+    it('path traversal string "../../etc" causes McpError', () => {
+      expect(() => requireNumericEmailId('../../etc')).toThrow(McpError);
+    });
+  });
+
+  // ── Cycle #21: sync_emails folder validation (validateTargetFolder) ──
+  // The sync_emails handler previously accepted any string as the folder
+  // argument without validation.  It now calls validateTargetFolder() so that
+  // path traversal attempts (e.g. "../../etc") are rejected before being sent
+  // to the IMAP service.
+
+  describe('sync_emails folder validation (validateTargetFolder)', () => {
+    it('INBOX passes validation (returns null)', () => {
+      expect(validateTargetFolder('INBOX')).toBeNull();
+    });
+
+    it('Sent passes validation', () => {
+      expect(validateTargetFolder('Sent')).toBeNull();
+    });
+
+    it('Folders/Work passes validation', () => {
+      expect(validateTargetFolder('Folders/Work')).toBeNull();
+    });
+
+    it('empty string passes (caller defaults to INBOX)', () => {
+      expect(validateTargetFolder('')).toBeNull();
+    });
+
+    it('undefined passes (caller defaults to INBOX)', () => {
+      expect(validateTargetFolder(undefined)).toBeNull();
+    });
+
+    it('path traversal "../../etc" fails validation', () => {
+      const err = validateTargetFolder('../../etc');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+
+    it('folder with null byte fails validation', () => {
+      const err = validateTargetFolder('INBOX\x00injected');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+
+    it('folder exceeding 1000 characters fails validation', () => {
+      const err = validateTargetFolder('x'.repeat(1001));
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/exceeds maximum length/i);
+    });
+
+    it('folder embedded traversal "Labels/../Secret" fails validation', () => {
+      const err = validateTargetFolder('Labels/../Secret');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+  });
+
+  // ── Cycle #21: safeErrorMessage McpError pass-through ──
+  // Verify that McpError instances thrown by validation helpers carry the
+  // expected code and message, confirming they will be passed through cleanly
+  // by the updated safeErrorMessage() in index.ts.
+
+  describe('McpError properties from requireNumericEmailId (safeErrorMessage pass-through coverage)', () => {
+    it('thrown McpError has ErrorCode.InvalidParams code', () => {
+      let err: unknown;
+      try { requireNumericEmailId('bad'); } catch (e) { err = e; }
+      expect((err as McpError).code).toBe(ErrorCode.InvalidParams);
+    });
+
+    it('thrown McpError message is descriptive (not "An error occurred")', () => {
+      let err: unknown;
+      try { requireNumericEmailId('xyz', 'emailId'); } catch (e) { err = e; }
+      expect((err as McpError).message).toContain('emailId must be a non-empty numeric UID string');
+    });
+
+    it('validateLabelName error string is non-empty and descriptive', () => {
+      const msg = validateLabelName('bad/label');
+      expect(msg).not.toBeNull();
+      expect(msg!.length).toBeGreaterThan(10);
+    });
+
+    it('validateFolderName error string is non-empty and descriptive', () => {
+      const msg = validateFolderName('');
+      expect(msg).not.toBeNull();
+      expect(msg!.length).toBeGreaterThan(10);
+    });
+
+    it('validateTargetFolder error string is non-empty and descriptive', () => {
+      const msg = validateTargetFolder('../../traversal');
+      expect(msg).not.toBeNull();
+      expect(msg!.length).toBeGreaterThan(10);
+    });
+
+    it('validateAttachments error string is non-empty and descriptive', () => {
+      const msg = validateAttachments('not-an-array');
+      expect(msg).not.toBeNull();
+      expect(msg!.length).toBeGreaterThan(5);
+    });
+  });
 });

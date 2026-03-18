@@ -1,7 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #20 (2026-03-18) — FINAL AUDIT CYCLE — ALL CYCLES COMPLETE
-NOTE: Cycle #19 was the last code-change cycle. Cycle #20 is the final summary/audit report. No further cycles planned.
+Last updated: Cycle #22 (2026-03-18)
 
 ---
 
@@ -222,4 +221,20 @@ Added `name`, `firstInteraction`, `averageResponseTime`, `isFavorite` to the con
 
 ---
 
-IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 21 cycles (Cycle #21: documentation accuracy fixes)
+## NEW — Cycle #22 Findings (all completed in Cycle #22)
+
+### [DONE - Cycle 22] `safeErrorMessage` swallowed `McpError` validation messages
+Added `if (error instanceof McpError) return error.message;` as the first guard in `safeErrorMessage()`. Previously, any `McpError(InvalidParams)` thrown by `requireNumericEmailId`, `validateLabelName`, etc. inside the handler `switch` was caught by the outer `catch` block and had its message discarded (returned "An error occurred"). All validation errors now surface their descriptive text to callers.
+
+### [DONE - Cycle 22] `reply_to_email` / `forward_email` missing `requireNumericEmailId`
+Both handlers were casting `args.emailId as string` directly to `imapService.getEmailById()` without the numeric UID guard. Added `requireNumericEmailId(args.emailId)` to both, consistent with all other single-email action handlers.
+
+### [DONE - Cycle 22] `move_to_folder` missing `requireNumericEmailId`
+The `emailId` argument was cast directly without validation. Added `requireNumericEmailId(args.emailId)` and threaded the result to `moveEmail()`.
+
+### [DONE - Cycle 22] `sync_emails` folder argument not validated against traversal
+Added `validateTargetFolder(folder)` call in the `sync_emails` handler. All other folder-accepting handlers already validated their folder inputs; `sync_emails` was the sole omission.
+
+---
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 22 cycles

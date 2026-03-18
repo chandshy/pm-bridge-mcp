@@ -185,6 +185,9 @@ const MAX_BULK_IDS = 200;
 
 function safeErrorMessage(error: unknown): string {
   if (!(error instanceof Error)) return "An error occurred";
+  // McpError instances originate from our own validated handlers — their
+  // messages are already safe to surface directly to the caller.
+  if (error instanceof McpError) return error.message;
   const msg = error.message.toLowerCase();
   if (
     msg.includes("invalid email") ||
@@ -1587,7 +1590,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "reply_to_email": {
-        const emailId = args.emailId as string;
+        const emailId = requireNumericEmailId(args.emailId);
         const original = await imapService.getEmailById(emailId);
         if (!original) {
           return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true, structuredContent: { success: false, reason: "Original email not found" } };
@@ -1634,7 +1637,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "forward_email": {
-        const fwdId = args.emailId as string;
+        const fwdId = requireNumericEmailId(args.emailId);
         const fwdOriginal = await imapService.getEmailById(fwdId);
         if (!fwdOriginal) {
           return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true, structuredContent: { success: false, reason: "Original email not found" } };
@@ -1980,12 +1983,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "move_to_folder": {
+        const mtfEmailId = requireNumericEmailId(args.emailId);
         const folderName = args.folder as string;
         // Validate folder name before constructing the IMAP folder path — prevents
         // path traversal attacks like "Folders/../INBOX".
         const folderValidErr = validateFolderName(folderName);
         if (folderValidErr) throw new McpError(ErrorCode.InvalidParams, folderValidErr);
-        await imapService.moveEmail(args.emailId as string, `Folders/${folderName}`);
+        await imapService.moveEmail(mtfEmailId, `Folders/${folderName}`);
         return actionOk();
       }
 
@@ -2226,6 +2230,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "sync_emails": {
         const folder = (args.folder as string) || "INBOX";
+        // Validate folder to prevent path traversal via the folder argument.
+        const seValidErr = validateTargetFolder(folder);
+        if (seValidErr) throw new McpError(ErrorCode.InvalidParams, seValidErr);
         const limit = Math.min(Math.max(1, (args.limit as number) || 100), 500);
         const emails = await imapService.getEmails(folder, limit);
         analyticsCache = null; analyticsCacheInflight = null; // force analytics refresh on next request

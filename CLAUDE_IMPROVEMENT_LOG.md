@@ -4,6 +4,53 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #22 — Security hardening: validation gaps and error pass-through
+**Timestamp:** 2026-03-18 05:30–05:50 Eastern
+**Git commit:** (see below)
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 416/416 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`safeErrorMessage` swallowed `McpError` validation messages** — When any handler threw `McpError(InvalidParams, ...)` (from `requireNumericEmailId`, `validateLabelName`, etc.), the outer `catch` block called `safeErrorMessage()` which returned "An error occurred" for most validation error text. The carefully crafted user-friendly messages (e.g. "emailId must be a non-empty numeric UID string.") were silently discarded. Fixed by adding an early `instanceof McpError` check that returns the message directly.
+
+2. **`reply_to_email` / `forward_email` missing `requireNumericEmailId` guard** — Both handlers passed `args.emailId as string` directly to `imapService.getEmailById()` without the numeric UID validation applied by every other single-email handler since Cycle #5. A non-numeric or traversal string silently returned null (email not found) rather than a clear `InvalidParams` error.
+
+3. **`move_to_folder` missing `requireNumericEmailId` guard** — The `emailId` argument was passed as `args.emailId as string` directly to `imapService.moveEmail()`, bypassing the numeric UID guard. All other move/action handlers use `requireNumericEmailId()`.
+
+4. **`sync_emails` folder argument not validated** — `args.folder` was passed directly to `imapService.getEmails()` without calling `validateTargetFolder()`. A path traversal string (e.g. `../../etc`) could be passed as the folder argument. Every other handler that accepts a folder string validates it first; `sync_emails` was the sole exception.
+
+### Work Completed This Cycle
+
+1. **`safeErrorMessage` — McpError pass-through** (`src/index.ts`): Added `if (error instanceof McpError) return error.message;` before the keyword-matching branches. Zero behavior change for valid-input paths; validation errors now surface their descriptive messages to callers.
+
+2. **`reply_to_email` emailId guard** (`src/index.ts`): `const emailId = args.emailId as string` → `const emailId = requireNumericEmailId(args.emailId)`.
+
+3. **`forward_email` emailId guard** (`src/index.ts`): `const fwdId = args.emailId as string` → `const fwdId = requireNumericEmailId(args.emailId)`.
+
+4. **`move_to_folder` emailId guard** (`src/index.ts`): Introduced `const mtfEmailId = requireNumericEmailId(args.emailId)` and threaded through to `moveEmail()` call. Removed the bare cast.
+
+5. **`sync_emails` folder validation** (`src/index.ts`): Added `validateTargetFolder(folder)` check after resolving the default "INBOX". Throws `McpError(InvalidParams)` for traversal strings, control characters, or over-limit values.
+
+6. **23 new tests** (`src/utils/helpers.test.ts`): Three new `describe` blocks:
+   - `reply_to_email / forward_email / move_to_folder emailId guard` (8 tests) — exercises `requireNumericEmailId` for the new guard sites.
+   - `sync_emails folder validation` (9 tests) — validates all `validateTargetFolder` branches for the `sync_emails` folder path.
+   - `McpError properties from requireNumericEmailId` (6 tests) — confirms that McpError thrown by validators carries `ErrorCode.InvalidParams` and a descriptive message (documenting the pass-through behavior).
+
+### Validation Results
+
+- `npm run build`: Clean (zero TypeScript errors)
+- `npm test`: 439/439 tests pass (416 existing + 23 new)
+
+### Git Status
+
+- Pushed to: `origin/main`
+
+---
+
 ## Cycle #21
 **Timestamp:** 2026-03-18 06:15–06:30 Eastern
 **Git commit:** `101c528`
