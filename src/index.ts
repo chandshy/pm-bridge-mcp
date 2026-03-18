@@ -1604,6 +1604,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "send_test_email": {
+        // Validate recipient address at handler level for a clear early error,
+        // consistent with the validation applied in send_email via smtpService.
+        if (!isValidEmail(args.to as string)) {
+          throw new McpError(ErrorCode.InvalidParams, `Invalid recipient email address: ${args.to}`);
+        }
         const result = await smtpService.sendTestEmail(
           args.to as string,
           args.customMessage as string | undefined
@@ -1844,6 +1849,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "move_email": {
+        // Validate targetFolder before passing to IMAP — prevents path traversal
+        // attacks such as "../../etc/passwd" style folder names.
+        const mvValidErr = validateTargetFolder(args.targetFolder);
+        if (mvValidErr) throw new McpError(ErrorCode.InvalidParams, mvValidErr);
         await imapService.moveEmail(args.emailId as string, args.targetFolder as string);
         return actionOk();
       }
@@ -1918,6 +1927,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "bulk_move_emails": {
+        // Validate targetFolder before touching any email — same guards as move_email.
+        const bmValidErr = validateTargetFolder(args.targetFolder);
+        if (bmValidErr) throw new McpError(ErrorCode.InvalidParams, bmValidErr);
         // Validate and sanitize input — reject non-string IDs, cap array size
         const rawIds = Array.isArray(args.emailIds) ? args.emailIds : [];
         const emailIds: string[] = rawIds

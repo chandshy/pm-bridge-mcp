@@ -3,6 +3,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { logger } from "./logger.js";
 
 /**
  * Validate email address format.
@@ -34,17 +35,26 @@ export function isValidEmail(email: string): boolean {
 }
 
 /**
- * Parse comma-separated email addresses
+ * Parse comma-separated email addresses.
+ * Invalid or malformed addresses are skipped; a warning is logged for each
+ * so that callers can detect misconfigured CC/BCC lists without hard-failing.
  */
 export function parseEmails(emailString: string): string[] {
   if (!emailString || emailString.trim() === "") {
     return [];
   }
 
-  return emailString
-    .split(",")
-    .map((email) => email.trim())
-    .filter((email) => email.length > 0 && isValidEmail(email));
+  const valid: string[] = [];
+  for (const raw of emailString.split(",")) {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) continue;
+    if (isValidEmail(trimmed)) {
+      valid.push(trimmed);
+    } else {
+      logger.warn("parseEmails: dropping invalid address", "helpers", { address: sanitizeForLog(trimmed, 80) });
+    }
+  }
+  return valid;
 }
 
 /**
