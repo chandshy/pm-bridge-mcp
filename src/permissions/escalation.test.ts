@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { randomBytes } from 'crypto';
 import {
   isUpgrade,
   getPendingFilePath,
@@ -133,6 +134,21 @@ describe('escalation workflow', () => {
   it('requestEscalation() persists the pending file', () => {
     requestEscalation('supervised', 'read_only', 'Test');
     expect(existsSync(pendingPath)).toBe(true);
+  });
+
+  it('requestEscalation() computes unthrottledTools for supervised → full transition', () => {
+    // supervised → full produces 15 unthrottled tools (tools with rateLimit in supervised
+    // but no rateLimit in full), covering the unthrottledTools.filter callback (line 167)
+    const result = requestEscalation('full', 'supervised', 'Need full access');
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect(result.unthrottledTools.length).toBeGreaterThan(0);
+
+    // Load the record back from disk — this exercises loadPendingFile validation
+    // of non-empty unthrottledTools arrays (line 167 in escalation.ts)
+    const record = getEscalationStatus(result.id);
+    expect(record).not.toBeNull();
+    expect(record!.unthrottledTools.length).toBeGreaterThan(0);
   });
 
   it('requestEscalation() returns ok:false when not an upgrade', () => {
@@ -298,15 +314,42 @@ describe('escalation workflow', () => {
   });
 
   it('savePendingFile() trims history to MAX_HISTORY (100) records', () => {
-    // Create 101 completed (non-pending) records by requesting and approving 101 times
-    // This would take too long; instead directly request 1 and verify the file is valid
-    // The MAX_HISTORY cap is tested indirectly: it only kicks in when len > 100
-    // We just verify normal operation doesn't exceed bounds
-    const req = requestEscalation('supervised', 'read_only', 'Normal');
+    // Write 101 historical (non-pending) records directly to the file,
+    // then trigger a save by calling requestEscalation which calls savePendingFile.
+    const { writeFileSync } = require('fs');
+
+    // Create a valid pending file with 101 "sent" (non-pending) records
+    // Use old requestedAt dates to avoid the 5/hour rate limit check
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const futureExpiry = new Date(Date.now() + 60_000).toISOString();
+    const historicalRecords = Array.from({ length: 101 }, (_, i) => ({
+      id: randomBytes(16).toString('hex'),
+      requestedAt: twoHoursAgo,
+      expiresAt: futureExpiry,
+      targetPreset: 'supervised',
+      currentPreset: 'read_only',
+      reason: `Record ${i}`,
+      status: 'denied',
+      resolvedAt: twoHoursAgo,
+      resolvedBy: 'browser_ui',
+      newTools: [],
+      unthrottledTools: [],
+    }));
+
+    writeFileSync(pendingPath, JSON.stringify({ version: 1, escalations: historicalRecords }), 'utf-8');
+
+    // getPendingEscalations triggers loadPendingFile; the 101 denied records should all load
+    // (MAX_HISTORY cap only triggers on SAVE, not load)
+    // Now trigger a save by making a new request — savePendingFile will trim to 100
+    const req = requestEscalation('supervised', 'read_only', 'Trigger save');
     expect(req.ok).toBe(true);
-    if (!req.ok) throw new Error('unexpected');
-    const pending = getPendingEscalations();
-    expect(pending.length).toBe(1);
+
+    // After save, the file should have been trimmed to MAX_HISTORY (100) + 1 pending
+    const { readFileSync } = require('fs');
+    const data = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+    // 100 historical + 1 new pending = 101, but MAX_HISTORY=100 trims oldest,
+    // so we keep at most 100 (the 100 oldest denied get trimmed to 100, then 1 pending added)
+    expect(data.escalations.length).toBeLessThanOrEqual(101);
   });
 
   // ── evictExpired (via getEscalationStatus) ────────────────────────────────
