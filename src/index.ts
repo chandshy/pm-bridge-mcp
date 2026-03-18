@@ -166,6 +166,8 @@ function decodeCursor(token: string): EmailCursor | null {
       typeof parsed.offset === "number" && parsed.offset >= 0 &&
       typeof parsed.limit === "number" && parsed.limit >= 1 && parsed.limit <= 200
     ) {
+      // Validate folder to prevent path traversal via crafted cursor tokens.
+      if (validateTargetFolder(parsed.folder) !== null) return null;
       return parsed as EmailCursor;
     }
     return null;
@@ -1648,7 +1650,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_email_by_id": {
-        const email = await imapService.getEmailById(args.emailId as string);
+        const rawEmailId = args.emailId as string;
+        if (!rawEmailId || typeof rawEmailId !== "string" || !/^\d+$/.test(rawEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
+        const email = await imapService.getEmailById(rawEmailId);
         if (!email) {
           return { content: [{ type: "text" as const, text: "Email not found" }], isError: true, structuredContent: { success: false, reason: "Resource not found" } };
         }
@@ -1797,10 +1803,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "download_attachment": {
-        const attResult = await imapService.downloadAttachment(
-          args.email_id as string,
-          args.attachment_index as number,
-        );
+        const rawAttEmailId = args.email_id as string;
+        if (!rawAttEmailId || typeof rawAttEmailId !== "string" || !/^\d+$/.test(rawAttEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "email_id must be a non-empty numeric UID string.");
+        }
+        const rawAttIdx = args.attachment_index as number;
+        if (!Number.isInteger(rawAttIdx) || rawAttIdx < 0) {
+          throw new McpError(ErrorCode.InvalidParams, "attachment_index must be a non-negative integer.");
+        }
+        const attResult = await imapService.downloadAttachment(rawAttEmailId, rawAttIdx);
         if (!attResult) {
           return { content: [{ type: "text" as const, text: "Attachment not found" }], isError: true, structuredContent: { success: false, reason: "Attachment not found" } };
         }
