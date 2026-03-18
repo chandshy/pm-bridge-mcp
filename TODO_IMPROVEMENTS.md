@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #29 (2026-03-18)
+Last updated: Cycle #31 (2026-03-18)
 
 ---
 
@@ -328,4 +328,14 @@ The length cap (Cycle #26) used `typeof args.subject === "string"` in the condit
 ### [DONE - Cycle 30] `save_draft` — `to` field type guard when provided
 `save_draft` accepted `to` as optional with no type check. A non-string `to` (array, number) was silently cast and forwarded to the IMAP saveDraft layer. Added `if (args.to !== undefined && typeof args.to !== "string") throw McpError(InvalidParams, "'to' must be a string when provided.")`.
 
-IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 30 cycles
+---
+
+## NEW — Cycle #31 Findings (all completed in Cycle #31)
+
+### [DONE - Cycle 31] `send_email` / `save_draft` / `schedule_email` — `cc` and `bcc` fields missing type guards
+All three handlers cast `args.cc` and `args.bcc` directly as `string | undefined` with no type check. A caller supplying an array (e.g. `cc: ["a@b.com"]`) or a number (`cc: 42`) would have the value silently coerced to a malformed string and forwarded unchecked. For `schedule_email` the value is stored in the scheduler and only fails at send-time. Added `if (args.cc !== undefined && typeof args.cc !== "string") throw McpError(InvalidParams)` and an equivalent `bcc` guard in all three handlers, consistent with the `to` type guard pattern already present in each handler.
+
+### [DONE - Cycle 31] `forward_email` — `message` field missing type guard
+The optional `message` parameter was used as `args.message ? \`${args.message as string}\n\n\` : ""` with no type check. A non-string value (number, array) is truthy, passes the ternary, and is silently coerced via template literal. Added `if (args.message !== undefined && typeof args.message !== "string") throw McpError(InvalidParams, "'message' must be a string when provided.")` before the template-literal use, consistent with all other optional string fields in the codebase.
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 31 cycles

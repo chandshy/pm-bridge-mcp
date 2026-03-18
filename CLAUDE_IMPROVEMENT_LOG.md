@@ -4,6 +4,33 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #31 — cc/bcc type guards across sending handlers, forward_email message type guard
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 683/683 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`send_email` / `save_draft` / `schedule_email` — `cc` and `bcc` fields missing type guards** — All three handlers cast `args.cc` and `args.bcc` directly as `string | undefined` with no type check, immediately before passing them to the SMTP service, IMAP saveDraft, or scheduler. A caller supplying `cc: ["a@b.com", "c@d.com"]` (an array) or `cc: 42` (a number) would have the value silently coerced to a malformed string (`"a@b.com,c@d.com"` or `"42"`) by the TypeScript `as string` cast and forwarded unchecked. For `schedule_email` the problem is compounded: the malformed value is stored in the scheduler and only fails when the job fires, with no feedback to the caller. The `to` field in these same handlers already has type guards (Cycles #20/#30), making `cc`/`bcc` an inconsistent gap. Added `if (args.cc !== undefined && typeof args.cc !== "string") throw new McpError(ErrorCode.InvalidParams, "'cc' must be a string when provided.")` and the equivalent `bcc` guard in all three handlers, consistent with the `to` type guard pattern.
+
+2. **`forward_email` — `message` field missing type guard** — The optional `message` parameter (prepended to the forwarded body) was used as `args.message ? \`${args.message as string}\n\n\` : ""` with no type check. A non-string value (e.g. `42` or `["Please see below"]`) is truthy, passes the ternary condition, and is silently coerced to a string via the template literal (`"42\n\n"` or `"Please see below\n\n"`). While this is lower-severity than the `cc`/`bcc` issue (the SMTP service processes it without error), it is an inconsistency with all other optional string fields in the codebase that carry explicit type guards. Added `if (args.message !== undefined && typeof args.message !== "string") throw new McpError(ErrorCode.InvalidParams, "'message' must be a string when provided.")` before the template-literal use, consistent with Cycle #30 patterns.
+
+### Changes
+
+- `src/index.ts`: Added `cc` type guard in `send_email` (4 lines + comment). Added `bcc` type guard in `send_email` (3 lines). Added `cc` type guard in `save_draft` (4 lines + comment). Added `bcc` type guard in `save_draft` (3 lines). Added `cc` type guard in `schedule_email` (5 lines + comment). Added `bcc` type guard in `schedule_email` (3 lines). Added `message` type guard in `forward_email` (5 lines + comment).
+- `src/utils/helpers.test.ts`: Added 27 new tests covering all four new guard paths: `cc` type guard (9 tests), `bcc` type guard (9 tests), `forward_email` message type guard (9 tests).
+
+### Test Results
+
+**Before:** 683 tests passing
+**After:** 710 tests passing (+27)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #30 — replyTo handler-level validation, subject non-string type guard, save_draft to type guard
 **Timestamp:** 2026-03-18
 **Branch:** main

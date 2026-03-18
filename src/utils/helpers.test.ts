@@ -2624,4 +2624,155 @@ describe('helpers', () => {
       expect(isToWrongType({ address: 'user@example.com' })).toBe(true);
     });
   });
+
+  // ── Cycle #31: send_email / save_draft / schedule_email 'cc' and 'bcc' type guards ──
+  // All three handlers previously cast args.cc and args.bcc directly as
+  // `string | undefined` with no type check.  A caller supplying cc: ["a@b.com"]
+  // (an array) or cc: 42 (a number) would have the value silently cast to a
+  // malformed string and forwarded to the SMTP/IMAP/scheduler layer unchecked.
+  //
+  // New guards (mirroring the 'to' type guard already present in these handlers):
+  //   if (args.cc !== undefined && typeof args.cc !== "string")
+  //     throw new McpError(ErrorCode.InvalidParams, "'cc' must be a string when provided.")
+  //   if (args.bcc !== undefined && typeof args.bcc !== "string")
+  //     throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.")
+
+  describe("send_email / save_draft / schedule_email 'cc' type guard (Cycle #31)", () => {
+    // Replicates: args.cc !== undefined && typeof args.cc !== "string" → fire
+    function isCcWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== 'string';
+    }
+
+    it('undefined is accepted (cc is optional)', () => {
+      expect(isCcWrongType(undefined)).toBe(false);
+    });
+
+    it('comma-separated string is accepted', () => {
+      expect(isCcWrongType('a@example.com, b@example.com')).toBe(false);
+    });
+
+    it('single email string is accepted', () => {
+      expect(isCcWrongType('user@example.com')).toBe(false);
+    });
+
+    it('empty string is accepted (emptiness is separate from type guard)', () => {
+      expect(isCcWrongType('')).toBe(false);
+    });
+
+    it('array of strings triggers guard (must be comma-separated, not array)', () => {
+      expect(isCcWrongType(['a@b.com', 'c@d.com'])).toBe(true);
+    });
+
+    it('number 42 triggers guard (wrong type)', () => {
+      expect(isCcWrongType(42)).toBe(true);
+    });
+
+    it('boolean true triggers guard (wrong type)', () => {
+      expect(isCcWrongType(true)).toBe(true);
+    });
+
+    it('null triggers guard (wrong type)', () => {
+      expect(isCcWrongType(null)).toBe(true);
+    });
+
+    it('plain object triggers guard (wrong type)', () => {
+      expect(isCcWrongType({ email: 'user@example.com' })).toBe(true);
+    });
+  });
+
+  describe("send_email / save_draft / schedule_email 'bcc' type guard (Cycle #31)", () => {
+    // Replicates: args.bcc !== undefined && typeof args.bcc !== "string" → fire
+    function isBccWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== 'string';
+    }
+
+    it('undefined is accepted (bcc is optional)', () => {
+      expect(isBccWrongType(undefined)).toBe(false);
+    });
+
+    it('comma-separated string is accepted', () => {
+      expect(isBccWrongType('secret@example.com, other@example.com')).toBe(false);
+    });
+
+    it('single email string is accepted', () => {
+      expect(isBccWrongType('hidden@example.com')).toBe(false);
+    });
+
+    it('empty string is accepted (emptiness is a separate concern)', () => {
+      expect(isBccWrongType('')).toBe(false);
+    });
+
+    it('array of strings triggers guard (must be comma-separated, not array)', () => {
+      expect(isBccWrongType(['secret@example.com'])).toBe(true);
+    });
+
+    it('number 0 triggers guard (wrong type)', () => {
+      expect(isBccWrongType(0)).toBe(true);
+    });
+
+    it('boolean false triggers guard (wrong type)', () => {
+      expect(isBccWrongType(false)).toBe(true);
+    });
+
+    it('null triggers guard (wrong type)', () => {
+      expect(isBccWrongType(null)).toBe(true);
+    });
+
+    it('plain object triggers guard (wrong type)', () => {
+      expect(isBccWrongType({ address: 'hidden@example.com' })).toBe(true);
+    });
+  });
+
+  // ── Cycle #31: forward_email 'message' field type guard ──────────────────────
+  // forward_email uses `args.message ? \`${args.message as string}\n\n\` : ""`
+  // without type-checking args.message.  A non-string (number, array, object)
+  // is truthy, bypasses the `|| ""` fallback, and is silently template-coerced
+  // to a string prepended to the forwarded body without error.
+  //
+  // New guard:
+  //   if (args.message !== undefined && typeof args.message !== "string")
+  //     throw new McpError(ErrorCode.InvalidParams, "'message' must be a string when provided.")
+
+  describe("forward_email 'message' field type guard (Cycle #31)", () => {
+    // Replicates: args.message !== undefined && typeof args.message !== "string" → fire
+    function isMessageWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== 'string';
+    }
+
+    it('undefined is accepted (message is optional)', () => {
+      expect(isMessageWrongType(undefined)).toBe(false);
+    });
+
+    it('non-empty string is accepted', () => {
+      expect(isMessageWrongType('Please see the forwarded message below.')).toBe(false);
+    });
+
+    it('empty string is accepted (type is correct even if semantically empty)', () => {
+      expect(isMessageWrongType('')).toBe(false);
+    });
+
+    it('multi-line string is accepted', () => {
+      expect(isMessageWrongType('Line 1\nLine 2')).toBe(false);
+    });
+
+    it('number 42 triggers guard (wrong type)', () => {
+      expect(isMessageWrongType(42)).toBe(true);
+    });
+
+    it('boolean true triggers guard (wrong type)', () => {
+      expect(isMessageWrongType(true)).toBe(true);
+    });
+
+    it('null triggers guard (wrong type)', () => {
+      expect(isMessageWrongType(null)).toBe(true);
+    });
+
+    it('array triggers guard (wrong type)', () => {
+      expect(isMessageWrongType(['Please see below'])).toBe(true);
+    });
+
+    it('plain object triggers guard (wrong type)', () => {
+      expect(isMessageWrongType({ text: 'see below' })).toBe(true);
+    });
+  });
 });

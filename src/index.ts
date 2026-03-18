@@ -1604,6 +1604,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.replyTo !== undefined && (typeof args.replyTo !== "string" || !isValidEmail(args.replyTo as string))) {
           throw new McpError(ErrorCode.InvalidParams, `'replyTo' must be a valid email address.`);
         }
+        // Type guard for optional 'cc' and 'bcc' — must be strings when provided.
+        // An array (e.g. ["a@b.com"]) or a number would be silently cast to a
+        // malformed string and forwarded to the SMTP service unchecked.
+        if (args.cc !== undefined && typeof args.cc !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'cc' must be a string when provided.");
+        }
+        if (args.bcc !== undefined && typeof args.bcc !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.");
+        }
         const result = await smtpService.sendEmail({
           to: args.to as string,
           cc: args.cc as string | undefined,
@@ -1705,6 +1714,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           "",
         ].join("\n");
 
+        // Type guard for optional 'message' — must be a string when provided.
+        // A non-string value (e.g. a number or array) would be silently cast to
+        // string via template literal and prepended to the forwarded body without
+        // error.  Consistent with the type guards on other optional string fields.
+        if (args.message !== undefined && typeof args.message !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'message' must be a string when provided.");
+        }
         const userMessage = args.message ? `${args.message as string}\n\n` : "";
         const fwdBody = `${userMessage}${fwdHeader}\n${fwdOriginal.body ?? ""}`;
 
@@ -1929,6 +1945,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.body !== undefined && (typeof args.body !== "string" || !(args.body as string).trim())) {
           throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string when provided.");
         }
+        // Type guard for optional 'cc' and 'bcc' — must be strings when provided.
+        // Mirrors the same guard added to send_email (Cycle #31); a non-string value
+        // (e.g. an array) would be silently cast and forwarded to the IMAP layer.
+        if (args.cc !== undefined && typeof args.cc !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'cc' must be a string when provided.");
+        }
+        if (args.bcc !== undefined && typeof args.bcc !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.");
+        }
         const draftResult = await imapService.saveDraft({
           to: args.to as string | undefined,
           cc: args.cc as string | undefined,
@@ -1978,6 +2003,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // rather than a silent scheduled-job failure.
         if (args.replyTo !== undefined && (typeof args.replyTo !== "string" || !isValidEmail(args.replyTo as string))) {
           throw new McpError(ErrorCode.InvalidParams, `'replyTo' must be a valid email address.`);
+        }
+        // Type guard for optional 'cc' and 'bcc' — must be strings when provided.
+        // Mirrors the guard added to send_email and save_draft (Cycle #31).  A
+        // non-string value would be silently cast and stored in the scheduler,
+        // only failing when the job eventually fires — giving no feedback to the caller.
+        if (args.cc !== undefined && typeof args.cc !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'cc' must be a string when provided.");
+        }
+        if (args.bcc !== undefined && typeof args.bcc !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.");
         }
         // Validate send_at as a parseable ISO date string.
         if (!args.send_at || typeof args.send_at !== "string") {
