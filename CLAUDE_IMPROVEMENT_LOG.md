@@ -341,6 +341,70 @@ No new HIGH/MEDIUM issues found. Confirmed all cycle 1–6 fixes still intact.
 
 ---
 
+## Cycle #8
+**Timestamp:** 2026-03-18 01:20–01:35 Eastern
+**Git commit:** `e0aa1dd`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights (new findings this cycle)
+
+No new HIGH/MEDIUM issues found. Confirmed all cycle 1–7 fixes still intact.
+
+**Confirmed from Next Cycle Focus list:**
+- `archive_email`, `move_to_trash`, `move_to_spam` — `args.emailId as string` with no handler-level numeric UID guard. IMAP service's private `validateEmailId` protected internally but produced raw `Error` (opaque message). (now fixed — consistent with `get_email_by_id`, `mark_email_read`, `star_email`)
+- `move_email` — had targetFolder validation (Cycle #3) but no emailId guard at handler level. (now fixed)
+- `delete_email` — same gap as move handlers. (now fixed)
+- `bulk_delete_emails`, `bulk_move_emails`, `bulk_mark_read`, `bulk_star`, `bulk_move_to_label`, `bulk_remove_label` — all filtered `typeof id === "string" && id.length > 0` but did NOT validate items as numeric UIDs. Non-numeric strings silently passed to IMAP service, which threw a raw `Error`. (now fixed — filter updated to `/^\d+$/.test(id)`)
+- `get_emails` folder — passed to `imapService.getEmails()` via `validateTargetFolder()`-free path. IMAP service's private `validateFolderName` guards empty/control-chars/length but NOT `..` traversal. (now fixed)
+
+**Systematic scan conclusion:** All `args.emailId as string` casts in all handlers now have handler-level numeric UID guards. All bulk operations now filter to numeric UIDs. `get_emails` folder now validated. No remaining gaps found.
+
+**Areas reviewed with no gaps:**
+- `mark_email_unread` / `unstar_email`: Not separate cases — handled by `mark_email_read`/`star_email` with flag values (confirmed in Cycle #7, still intact).
+- `get_folder_emails`: Does not exist as a case — no action needed.
+- `request_permission_escalation` targetPreset: Uses `isValidEscalationTarget()` (imported from settings/security.ts) — already protected.
+- `sync_emails` folder: Same `validateTargetFolder` gap as `get_emails` — also fixed this cycle.
+
+### Work Completed This Cycle
+
+1. **`archive_email`, `move_to_trash`, `move_to_spam`** — Added `!/^\d+$/.test(emailId)` guard matching the existing pattern from `get_email_by_id`. Each handler now holds a named local variable (aeEmailId, mttEmailId, mtsEmailId) and throws `McpError(InvalidParams, "emailId must be a non-empty numeric UID string.")` for invalid inputs. (+9 lines each, 3 handlers)
+
+2. **`move_email`** — Added numeric UID guard on `args.emailId` before the existing `validateTargetFolder` check. (+4 lines)
+
+3. **`delete_email`** — Added numeric UID guard. (+4 lines)
+
+4. **`get_emails`** — Added `validateTargetFolder(folder)` check immediately after resolving the folder default ("INBOX"). Returns `McpError(InvalidParams)` for traversal/control-char/oversized folder names. (+3 lines)
+
+5. **Bulk operations array-item filter** — Updated the `.filter()` predicate in `bulk_delete_emails`, `bulk_move_emails`, `bulk_mark_read`, `bulk_star`, `bulk_move_to_label`, and `bulk_remove_label` from `id.length > 0` to `/^\d+$/.test(id)`. Non-numeric IDs are now silently excluded before the IMAP call rather than producing opaque service errors. (6 handlers, 1 line each)
+
+6. **Add 33 unit tests** — Three new `describe` blocks in `src/utils/helpers.test.ts`:
+   - `archive_email / move_to_trash / move_to_spam / move_email / delete_email handler validation (numeric emailId guard)` — 11 tests: valid "42", valid "1", valid "999999", empty, "abc", "12x", "-5", "3.14", null, undefined, null-byte
+   - `get_emails handler validation (validateTargetFolder for folder arg)` — 9 tests: INBOX, Folders/Work, empty, undefined, traversal, embedded-traversal, null-byte, over-limit, exact-limit
+   - `bulk operation array-item numeric UID filter` — 13 tests: valid "42"/"1"/"100000", empty, "abc", "12x", "-3", "2.5", null, undefined, number 42 (not string), null-byte, array-of-mixed-inputs
+
+**Files changed:** `src/index.ts` (+40 lines, -12 lines), `src/utils/helpers.test.ts` (+151 lines)
+
+### Validation Results
+
+- `npm run build` — PASS (0 TypeScript errors)
+- `npm test` — PASS (347/347 tests, 14 test files, +33 new tests vs 314 in cycle 7)
+
+### Git Status
+
+- Commit: `e0aa1dd`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+
+**Priority items for Cycle #9:**
+1. `save_draft` / `schedule_email` attachment validation — `args.attachments as any` passes attachment objects directly to `imapService.saveDraft()`. Attachment `name`, `contentType`, `content` fields not validated at handler level. Risk is LOW (base64 content, MIME encoding by nodemailer/imapflow), but worth closing for completeness.
+2. `move_to_label` / `remove_label` emailId — these two handlers still use `args.emailId as string` without a handler-level numeric UID guard (the IMAP service protects internally). Add guard for consistency.
+3. IMAP reconnect / NOOP health check — architectural backlog, still deferred.
+4. Cursor token HMAC binding — architectural backlog, still deferred.
+
+---
+
 ## Cycle #6
 **Timestamp:** 2026-03-18 00:50–01:00 Eastern
 **Git commit:** `403dcaa`

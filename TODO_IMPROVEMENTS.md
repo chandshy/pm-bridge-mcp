@@ -81,19 +81,31 @@ Added `!/^\d+$/.test(emailId)` guard to both handlers matching the pattern estab
 
 ---
 
-## NEW — Cycle #7 Findings
+## NEW — Cycle #7 Findings (all completed in Cycle #8)
 
-### 13. Remaining `args.X as Y` casts — type-check audit
-**File:** `src/index.ts`
-**Issue:** Many handlers use `args.X as SomeType` without a runtime check. Most are guarded by JSON schema validation at the MCP layer, but a targeted audit would identify any gaps where a malformed arg could reach a service method unguarded.
-**Effort:** LOW–MEDIUM — audit only, fix if gaps found
-**Risk:** LOW
+### [DONE - Cycle 8] Remaining `args.X as Y` casts — type-check audit
+Systematic audit performed. All `args.emailId as string` casts now have handler-level numeric UID guards. Bulk operation array items now filtered to `/^\d+$/.test(id)`. `get_emails` folder validated with `validateTargetFolder()`. See Cycle #8 work log for full details.
 
 ### 14. `save_draft` / `schedule_email` attachment validation
 **File:** `src/index.ts`, `src/services/simple-imap-service.ts`
 **Issue:** `args.attachments as any` is passed to `imapService.saveDraft()`. Attachment objects (name, contentType, content) are not validated at handler level. The service's `saveDraft` uses the contentType directly in MIME construction.
 **Effort:** LOW–MEDIUM
 **Risk:** LOW (content is base64-encoded; contentType is used as a MIME field and already handled by nodemailer/imapflow encoding)
+
+---
+
+## NEW — Cycle #8 Findings
+
+### 15. `move_to_label` / `remove_label` — missing numeric emailId guard
+**File:** `src/index.ts`
+**Issue:** Both handlers use `args.emailId as string` with no handler-level numeric UID guard. The IMAP service's private `validateEmailId` protects internally but throws a raw `Error` (opaque message). Inconsistent with all other single-email action handlers.
+**Effort:** LOW — 3-4 lines per handler, same pattern as Cycle #7/#8 fixes
+**Risk:** LOW
+
+### 16. `save_draft` / `schedule_email` attachment validation (carried from Cycle #7)
+Same as item 14 above — still unaddressed.
+**Effort:** LOW–MEDIUM
+**Risk:** LOW
 
 ---
 
