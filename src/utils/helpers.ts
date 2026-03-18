@@ -274,3 +274,45 @@ export function requireNumericEmailId(raw: unknown, fieldName: string = "emailId
   }
   return raw;
 }
+
+/**
+ * Validate the shape of an `attachments` argument before passing it to a service.
+ *
+ * Each element must be a plain object with:
+ *   - `filename`: a non-empty string
+ *   - `content`: a string (base64) or Buffer
+ *   - `contentType`: optional — if present, must be a string
+ *
+ * The service layer performs deeper sanitization (MIME-type format, CRLF
+ * stripping, size limits).  This guard only ensures the handler receives
+ * structurally valid objects so that service-layer errors are not confusingly
+ * attributed to malformed inputs.
+ *
+ * @param attachments - Raw value of `args.attachments` from the tool call.
+ * @returns `null` on success, or an error message string describing the problem.
+ */
+export function validateAttachments(attachments: unknown): string | null {
+  if (attachments === undefined || attachments === null) {
+    return null; // omitted — fine, attachments are optional
+  }
+  if (!Array.isArray(attachments)) {
+    return "attachments must be an array.";
+  }
+  for (let i = 0; i < attachments.length; i++) {
+    const att = attachments[i];
+    if (!att || typeof att !== "object" || Array.isArray(att)) {
+      return `attachments[${i}] must be an object.`;
+    }
+    const { filename, content, contentType } = att as Record<string, unknown>;
+    if (!filename || typeof filename !== "string") {
+      return `attachments[${i}].filename must be a non-empty string.`;
+    }
+    if (content === undefined || content === null || (typeof content !== "string" && !Buffer.isBuffer(content))) {
+      return `attachments[${i}].content must be a base64 string or Buffer.`;
+    }
+    if (contentType !== undefined && typeof contentType !== "string") {
+      return `attachments[${i}].contentType must be a string when provided.`;
+    }
+  }
+  return null;
+}

@@ -14,6 +14,7 @@ import {
   validateFolderName,
   validateTargetFolder,
   requireNumericEmailId,
+  validateAttachments,
 } from './helpers.js';
 
 describe('helpers', () => {
@@ -1042,6 +1043,147 @@ describe('helpers', () => {
 
     it('throws for null-byte string "5\\x006"', () => {
       expect(() => requireNumericEmailId('5\x006')).toThrow(McpError);
+    });
+  });
+
+  // ── Cycle #15: validateAttachments ─────────────────────────────────────────
+
+  describe('validateAttachments', () => {
+    // null / undefined — attachment field is optional
+    it('returns null for undefined (omitted field)', () => {
+      expect(validateAttachments(undefined)).toBeNull();
+    });
+
+    it('returns null for null (omitted field)', () => {
+      expect(validateAttachments(null)).toBeNull();
+    });
+
+    // non-array
+    it('returns error for a plain object (not an array)', () => {
+      expect(validateAttachments({ filename: 'x.txt', content: 'abc' })).not.toBeNull();
+    });
+
+    it('returns error for a string', () => {
+      expect(validateAttachments('file.txt')).not.toBeNull();
+    });
+
+    it('returns error for a number', () => {
+      expect(validateAttachments(42)).not.toBeNull();
+    });
+
+    // empty array — valid (no attachments)
+    it('returns null for an empty array', () => {
+      expect(validateAttachments([])).toBeNull();
+    });
+
+    // well-formed attachments
+    it('returns null for a valid attachment with string content', () => {
+      expect(validateAttachments([
+        { filename: 'report.pdf', content: 'base64data==', contentType: 'application/pdf' },
+      ])).toBeNull();
+    });
+
+    it('returns null for a valid attachment with Buffer content', () => {
+      expect(validateAttachments([
+        { filename: 'image.png', content: Buffer.from('data'), contentType: 'image/png' },
+      ])).toBeNull();
+    });
+
+    it('returns null when contentType is omitted', () => {
+      expect(validateAttachments([
+        { filename: 'data.bin', content: 'abc123' },
+      ])).toBeNull();
+    });
+
+    it('returns null for multiple valid attachments', () => {
+      expect(validateAttachments([
+        { filename: 'a.txt', content: 'hello' },
+        { filename: 'b.pdf', content: Buffer.from('pdf'), contentType: 'application/pdf' },
+      ])).toBeNull();
+    });
+
+    // malformed array items
+    it('returns error for a primitive item in array (string)', () => {
+      const err = validateAttachments(['not-an-object']);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/attachments\[0\]/);
+    });
+
+    it('returns error for a null item in array', () => {
+      const err = validateAttachments([null]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/attachments\[0\]/);
+    });
+
+    it('returns error for a number item in array', () => {
+      expect(validateAttachments([42])).not.toBeNull();
+    });
+
+    // missing/invalid filename
+    it('returns error when filename is missing', () => {
+      const err = validateAttachments([{ content: 'abc' }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/filename/);
+    });
+
+    it('returns error when filename is an empty string', () => {
+      const err = validateAttachments([{ filename: '', content: 'abc' }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/filename/);
+    });
+
+    it('returns error when filename is a number', () => {
+      const err = validateAttachments([{ filename: 123, content: 'abc' }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/filename/);
+    });
+
+    // missing/invalid content
+    it('returns error when content is missing', () => {
+      const err = validateAttachments([{ filename: 'file.txt' }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/content/);
+    });
+
+    it('returns error when content is null', () => {
+      const err = validateAttachments([{ filename: 'file.txt', content: null }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/content/);
+    });
+
+    it('returns error when content is a number', () => {
+      const err = validateAttachments([{ filename: 'file.txt', content: 42 }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/content/);
+    });
+
+    it('returns error when content is a plain object (stream-like)', () => {
+      const err = validateAttachments([{ filename: 'file.txt', content: { pipe: () => {} } }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/content/);
+    });
+
+    // invalid contentType
+    it('returns error when contentType is a number', () => {
+      const err = validateAttachments([{ filename: 'file.txt', content: 'abc', contentType: 42 }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/contentType/);
+    });
+
+    it('returns error when contentType is an object', () => {
+      const err = validateAttachments([{ filename: 'file.txt', content: 'abc', contentType: {} }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/contentType/);
+    });
+
+    // error index is correctly reported for second item
+    it('reports the correct index when the second attachment is malformed', () => {
+      const err = validateAttachments([
+        { filename: 'good.txt', content: 'ok' },
+        { filename: 'bad.txt', content: 99 },
+      ]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/attachments\[1\]/);
     });
   });
 });

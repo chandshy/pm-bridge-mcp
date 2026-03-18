@@ -27,7 +27,7 @@ import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
 import { logger } from "./utils/logger.js";
-import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
+import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
 import {
   requestEscalation,
@@ -1505,6 +1505,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── Sending ─────────────────────────────────────────────────────────────
 
       case "send_email": {
+        const seAttErr = validateAttachments(args.attachments);
+        if (seAttErr) throw new McpError(ErrorCode.InvalidParams, seAttErr);
         const result = await smtpService.sendEmail({
           to: args.to as string,
           cc: args.cc as string | undefined,
@@ -1743,6 +1745,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── Drafts & Scheduling ───────────────────────────────────────────────────
 
       case "save_draft": {
+        const sdAttErr = validateAttachments(args.attachments);
+        if (sdAttErr) throw new McpError(ErrorCode.InvalidParams, sdAttErr);
         const draftResult = await imapService.saveDraft({
           to: args.to as string | undefined,
           cc: args.cc as string | undefined,
@@ -1761,6 +1765,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "schedule_email": {
+        const schAttErr = validateAttachments(args.attachments);
+        if (schAttErr) throw new McpError(ErrorCode.InvalidParams, schAttErr);
         const sendAtStr = args.send_at as string;
         if (!sendAtStr) {
           return { content: [{ type: "text" as const, text: "send_at is required" }], isError: true, structuredContent: { success: false, reason: "send_at is required" } };
