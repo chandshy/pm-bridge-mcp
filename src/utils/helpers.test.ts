@@ -835,4 +835,144 @@ describe('helpers', () => {
       expect(valid).toEqual(['42', '100', '7']);
     });
   });
+
+  // ── Cycle #9 Tests ─────────────────────────────────────────────────────────
+
+  describe('move_to_label / remove_label handler validation (numeric emailId guard)', () => {
+    // Both handlers now use the same !/^\d+$/.test(emailId) guard as all other
+    // single-email action handlers.  These tests exercise the guard logic directly.
+    function isValidEmailId(v: unknown): boolean {
+      if (!v || typeof v !== 'string') return false;
+      return /^\d+$/.test(v);
+    }
+
+    it('valid emailId "42" passes', () => {
+      expect(isValidEmailId('42')).toBe(true);
+    });
+
+    it('valid emailId "1" passes', () => {
+      expect(isValidEmailId('1')).toBe(true);
+    });
+
+    it('valid emailId "999999" passes', () => {
+      expect(isValidEmailId('999999')).toBe(true);
+    });
+
+    it('empty string is rejected', () => {
+      expect(isValidEmailId('')).toBe(false);
+    });
+
+    it('"abc" is rejected', () => {
+      expect(isValidEmailId('abc')).toBe(false);
+    });
+
+    it('"12x" (mixed) is rejected', () => {
+      expect(isValidEmailId('12x')).toBe(false);
+    });
+
+    it('"-5" (negative) is rejected', () => {
+      expect(isValidEmailId('-5')).toBe(false);
+    });
+
+    it('"3.14" (float) is rejected', () => {
+      expect(isValidEmailId('3.14')).toBe(false);
+    });
+
+    it('null is rejected', () => {
+      expect(isValidEmailId(null)).toBe(false);
+    });
+
+    it('undefined is rejected', () => {
+      expect(isValidEmailId(undefined)).toBe(false);
+    });
+
+    it('null-byte "5\\x006" is rejected', () => {
+      expect(isValidEmailId('5\x006')).toBe(false);
+    });
+  });
+
+  describe('saveDraft attachment filename sanitization', () => {
+    // These tests exercise the inline sanitization logic added to saveDraft in
+    // simple-imap-service.ts.  We replicate the exact logic here so the rules
+    // are independently testable without spinning up an IMAP connection.
+    function sanitizeDraftFilename(filename: string | undefined): string | undefined {
+      if (!filename) return undefined;
+      return filename.replace(/[\r\n\x00]/g, '').slice(0, 255) || 'attachment';
+    }
+
+    it('plain filename passes unchanged', () => {
+      expect(sanitizeDraftFilename('report.pdf')).toBe('report.pdf');
+    });
+
+    it('CRLF injection in filename is stripped', () => {
+      expect(sanitizeDraftFilename('a.pdf\r\nContent-Type: text/html')).toBe('a.pdfContent-Type: text/html');
+    });
+
+    it('LF injection in filename is stripped', () => {
+      expect(sanitizeDraftFilename('bad\nfile.txt')).toBe('badfile.txt');
+    });
+
+    it('NUL byte in filename is stripped', () => {
+      expect(sanitizeDraftFilename('file\x00.txt')).toBe('file.txt');
+    });
+
+    it('filename longer than 255 chars is truncated', () => {
+      const long = 'a'.repeat(300);
+      expect(sanitizeDraftFilename(long)!.length).toBe(255);
+    });
+
+    it('filename that becomes empty after stripping falls back to "attachment"', () => {
+      expect(sanitizeDraftFilename('\r\n\x00')).toBe('attachment');
+    });
+
+    it('undefined filename returns undefined', () => {
+      expect(sanitizeDraftFilename(undefined)).toBeUndefined();
+    });
+  });
+
+  describe('saveDraft attachment contentType sanitization', () => {
+    // Replicates the MIME type validation logic from saveDraft.
+    function sanitizeDraftContentType(contentType: string | undefined): string | undefined {
+      if (!contentType) return undefined;
+      const rawCt = contentType.replace(/[\r\n\x00]/g, '').trim();
+      return rawCt && /^[\w!#$&\-^]+\/[\w!#$&\-^+.]+$/.test(rawCt) ? rawCt : undefined;
+    }
+
+    it('valid "application/pdf" passes', () => {
+      expect(sanitizeDraftContentType('application/pdf')).toBe('application/pdf');
+    });
+
+    it('valid "image/png" passes', () => {
+      expect(sanitizeDraftContentType('image/png')).toBe('image/png');
+    });
+
+    it('valid "text/plain" passes', () => {
+      expect(sanitizeDraftContentType('text/plain')).toBe('text/plain');
+    });
+
+    it('CRLF injection in contentType is rejected (becomes undefined)', () => {
+      expect(sanitizeDraftContentType('text/html\r\nX-Injected: yes')).toBeUndefined();
+    });
+
+    it('NUL byte in contentType is stripped, then validated', () => {
+      // "text/plain\x00" after strip becomes "text/plain" which is valid
+      expect(sanitizeDraftContentType('text/plain\x00')).toBe('text/plain');
+    });
+
+    it('arbitrary string without slash is rejected', () => {
+      expect(sanitizeDraftContentType('notamimetype')).toBeUndefined();
+    });
+
+    it('empty string returns undefined', () => {
+      expect(sanitizeDraftContentType('')).toBeUndefined();
+    });
+
+    it('undefined returns undefined', () => {
+      expect(sanitizeDraftContentType(undefined)).toBeUndefined();
+    });
+
+    it('contentType with spaces is rejected', () => {
+      expect(sanitizeDraftContentType('text /plain')).toBeUndefined();
+    });
+  });
 });

@@ -2017,6 +2017,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "move_to_label": {
+        const mtlEmailId = args.emailId as string;
+        if (!mtlEmailId || typeof mtlEmailId !== "string" || !/^\d+$/.test(mtlEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
         const label = args.label as string;
         // Validate label before constructing the IMAP folder path.
         // Without this, an empty or slash-containing label can produce paths
@@ -2030,7 +2034,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (label.length > 255) {
           throw new McpError(ErrorCode.InvalidParams, "label exceeds maximum length of 255 characters.");
         }
-        await imapService.moveEmail(args.emailId as string, `Labels/${label}`);
+        await imapService.moveEmail(mtlEmailId, `Labels/${label}`);
         return actionOk();
       }
 
@@ -2069,13 +2073,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "remove_label": {
+        const rlEmailId = args.emailId as string;
+        if (!rlEmailId || typeof rlEmailId !== "string" || !/^\d+$/.test(rlEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
         const rlRawTarget = args.targetFolder as string | undefined;
         // Validate caller-supplied targetFolder before use as an IMAP path.
         // Default to INBOX when omitted; reject control characters and path traversal.
         const rlValidErr = validateTargetFolder(rlRawTarget);
         if (rlValidErr) throw new McpError(ErrorCode.InvalidParams, rlValidErr);
         const rlTarget = rlRawTarget || "INBOX";
-        await imapService.moveEmail(args.emailId as string, rlTarget);
+        await imapService.moveEmail(rlEmailId, rlTarget);
         return actionOk();
       }
 

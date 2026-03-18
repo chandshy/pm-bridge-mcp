@@ -739,12 +739,29 @@ export class SimpleIMAPService {
       };
 
       if (options.attachments && options.attachments.length > 0) {
-        mailOptions.attachments = options.attachments.map(att => ({
-          filename: att.filename,
-          content: att.content,
-          contentType: att.contentType,
-          cid: att.contentId,
-        }));
+        // Mirror the sanitization performed in smtp-service.ts sendEmail() to prevent
+        // MIME header injection via crafted attachment filenames or content-type values.
+        // A filename like "a.pdf\r\nContent-Type: text/html" or a contentType like
+        // "text/html\r\nX-Injected: yes" could break the MIME structure of the draft.
+        mailOptions.attachments = options.attachments.map(att => {
+          // Strip CRLF/NUL from filename to prevent Content-Disposition header injection.
+          const safeFilename = att.filename
+            ? att.filename.replace(/[\r\n\x00]/g, "").slice(0, 255) || "attachment"
+            : undefined;
+
+          // Strip CRLF/NUL from contentType and validate it matches type/subtype format.
+          // An unsanitized contentType is placed directly in the Content-Type MIME header.
+          const rawCt = att.contentType ? att.contentType.replace(/[\r\n\x00]/g, "").trim() : undefined;
+          const safeContentType =
+            rawCt && /^[\w!#$&\-^]+\/[\w!#$&\-^+.]+$/.test(rawCt) ? rawCt : undefined;
+
+          return {
+            filename:    safeFilename,
+            content:     att.content,
+            contentType: safeContentType,
+            cid:         att.contentId,
+          };
+        });
       }
 
       const info = await transport.sendMail(mailOptions);
