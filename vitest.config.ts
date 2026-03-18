@@ -16,12 +16,12 @@ export default defineConfig({
       ],
       // Minimum coverage thresholds — CI will fail if these are not met.
       // Set conservatively below current measured levels; raise as coverage improves.
-      // Current measured: statements 52%, branches 46%, functions 61%, lines 54%.
+      // Current measured: statements 57%, branches 50%, functions 66%, lines 59%.
       thresholds: {
-        statements: 50,
-        branches: 43,
-        functions: 58,
-        lines: 52,
+        statements: 55,
+        branches: 48,
+        functions: 63,
+        lines: 56,
       },
     },
   },

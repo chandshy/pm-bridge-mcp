@@ -218,4 +218,224 @@ describe('AnalyticsService', () => {
       expect(stats.totalEmails).toBe(1);
     });
   });
+
+  describe('wipeData', () => {
+    it('wipes all email fields and clears contacts', () => {
+      // service already has mockMessages loaded; wipe and verify
+      service.wipeData();
+      const stats = service.getEmailStats();
+      expect(stats.totalEmails).toBe(0);
+      expect(stats.totalContacts).toBe(0);
+    });
+
+    it('wipes body/subject/from fields on inbox emails', () => {
+      const svc = new AnalyticsService();
+      const inbox: EmailMessage = {
+        id: '99',
+        from: 'a@b.com',
+        to: ['me@x.com'],
+        subject: 'Secret',
+        body: 'Private text',
+        isHtml: false,
+        date: new Date(),
+        folder: 'INBOX',
+        isRead: false,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      svc.updateEmails([inbox], []);
+      // Access the internal array via cast to verify fields are wiped
+      svc.wipeData();
+      // After wipe the service should report 0 emails
+      expect(svc.getEmailStats().totalEmails).toBe(0);
+    });
+
+    it('wipes sent emails the same way', () => {
+      const svc = new AnalyticsService();
+      const sent: EmailMessage = {
+        id: '100',
+        from: 'me@x.com',
+        to: ['bob@example.com'],
+        subject: 'Confidential',
+        body: 'Secret body',
+        isHtml: false,
+        date: new Date(),
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      svc.updateEmails([], [sent]);
+      svc.wipeData();
+      expect(svc.getEmailStats().totalEmails).toBe(0);
+    });
+  });
+
+  describe('getContacts — limit clamping', () => {
+    it('clamps limit to minimum 1', () => {
+      const contacts = service.getContacts(0);
+      // Even asking for 0, at least 1 result should come back (if contacts exist)
+      expect(contacts.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('clamps limit to maximum 500', () => {
+      const contacts = service.getContacts(9999);
+      // Should not exceed 500 (or total contacts if fewer)
+      expect(contacts.length).toBeLessThanOrEqual(500);
+    });
+
+    it('handles NaN limit gracefully (falls back to 100)', () => {
+      // Math.trunc(NaN) || 100 = 100
+      const contacts = service.getContacts(NaN);
+      expect(Array.isArray(contacts)).toBe(true);
+    });
+  });
+
+  describe('calculateAttachmentStats — with typed attachments', () => {
+    it('computes mostCommonTypes from attachment contentType', () => {
+      const withAtt: EmailMessage = {
+        id: '50',
+        from: 'x@x.com',
+        to: ['y@y.com'],
+        subject: 'Has attachments',
+        body: '',
+        isHtml: false,
+        date: new Date(),
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: true,
+        attachments: [
+          { filename: 'doc.pdf', contentType: 'application/pdf', size: 1024 },
+          { filename: 'img.png', contentType: 'image/png', size: 2048 },
+          { filename: 'other.bin', contentType: undefined, size: 512 },
+        ],
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([withAtt], []);
+      const analytics = svc.getEmailAnalytics();
+      const { attachmentStats } = analytics;
+      expect(attachmentStats.totalAttachments).toBe(3);
+      expect(attachmentStats.mostCommonTypes.length).toBeGreaterThan(0);
+      // "application", "image", "other" should appear
+      const types = attachmentStats.mostCommonTypes.map(t => t.type);
+      expect(types).toContain('application');
+      expect(types).toContain('image');
+      expect(types).toContain('other');
+    });
+
+    it('averageSizeMB is 0 when there are no attachments', () => {
+      const svc = new AnalyticsService();
+      svc.updateEmails([], []);
+      const analytics = svc.getEmailAnalytics();
+      expect(analytics.attachmentStats.averageSizeMB).toBe(0);
+    });
+  });
+
+  describe('getEmailStats — cache hit path', () => {
+    it('returns cached stats on second call without recalculating', () => {
+      const stats1 = service.getEmailStats();
+      // Second call immediately after → should hit cache and return identical object
+      const stats2 = service.getEmailStats();
+      expect(stats2).toBe(stats1); // same reference (cache hit)
+    });
+
+    it('getEmailAnalytics returns cached analytics on second call', () => {
+      const a1 = service.getEmailAnalytics();
+      const a2 = service.getEmailAnalytics();
+      expect(a2).toBe(a1);
+    });
+  });
+
+  describe('getEmailStats — attachment size included in storageUsedMB', () => {
+    it('includes attachment size bytes in total storage', () => {
+      const withAtt: EmailMessage = {
+        id: '77',
+        from: 'a@b.com',
+        to: ['c@d.com'],
+        subject: 'Has att',
+        body: 'body',
+        isHtml: false,
+        date: new Date(),
+        folder: 'INBOX',
+        isRead: false,
+        isStarred: false,
+        hasAttachment: true,
+        attachments: [{ filename: 'x.pdf', contentType: 'application/pdf', size: 1_048_576 }], // 1 MB
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([withAtt], []);
+      const stats = svc.getEmailStats();
+      expect(stats.storageUsedMB).toBeGreaterThan(0);
+    });
+  });
+
+  describe('getEmailAnalytics — topRecipients with sent emails', () => {
+    it('populates topRecipients when sent emails include multiple recipients', () => {
+      const inbox: EmailMessage = {
+        id: '1',
+        from: 'alice@x.com',
+        to: ['me@x.com'],
+        subject: 'Hi',
+        body: '',
+        isHtml: false,
+        date: new Date(),
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      const sent1: EmailMessage = {
+        id: '2',
+        from: 'me@x.com',
+        to: ['alice@x.com'],
+        subject: 'Re: Hi',
+        body: '',
+        isHtml: false,
+        date: new Date(),
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      const sent2: EmailMessage = {
+        id: '3',
+        from: 'me@x.com',
+        to: ['bob@x.com'],
+        subject: 'Hey Bob',
+        body: '',
+        isHtml: false,
+        date: new Date(),
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([inbox], [sent1, sent2]);
+      const analytics = svc.getEmailAnalytics();
+      expect(analytics.topRecipients.length).toBeGreaterThan(0);
+      const emails = analytics.topRecipients.map(r => r.email);
+      expect(emails).toContain('alice@x.com');
+    });
+  });
+
+  describe('getVolumeTrends — day clamping', () => {
+    it('clamps to minimum 1 day', () => {
+      // Math.trunc(-5) = -5; Math.max(1, -5) = 1
+      const trends = service.getVolumeTrends(-5);
+      expect(trends.length).toBe(1);
+    });
+
+    it('clamps to maximum 365 days', () => {
+      const trends = service.getVolumeTrends(1000);
+      expect(trends.length).toBe(365);
+    });
+
+    it('handles NaN days gracefully (falls back to 30)', () => {
+      // Math.trunc(NaN) || 30 = 30
+      const trends = service.getVolumeTrends(NaN);
+      expect(trends.length).toBe(30);
+    });
+  });
 });

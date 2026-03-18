@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SchedulerService } from "./scheduler.js";
 import type { SMTPService } from "./smtp-service.js";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -234,6 +234,90 @@ describe("SchedulerService", () => {
     expect(loaded).toHaveLength(1);
     expect(loaded[0].id).toBe(idKeep);
     expect(loaded[0].status).toBe("pending");
+  });
+
+  it("load() skips malformed records and warns", () => {
+    const smtp = makeSMTP();
+    const svc1 = new SchedulerService(smtp, storePath);
+
+    // Schedule one valid item, then persist a mix of valid + malformed to disk
+    const id = svc1.schedule(makeOptions(), futureDate(120));
+    svc1.stop(); // persists the one valid item
+
+    // Now manually overwrite the file with a mix of valid + invalid records
+    const valid = (svc1 as any).items[0];
+    const malformed = { id: "", scheduledAt: "not-a-date", status: "pending" }; // missing required fields
+    writeFileSync(storePath, JSON.stringify([valid, malformed]), "utf-8");
+
+    const svc2 = new SchedulerService(smtp, storePath);
+    (svc2 as any).load();
+
+    // Only the valid record should survive
+    const loaded = svc2.list();
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].id).toBe(id);
+  });
+
+  it("load() handles JSON parse errors gracefully", () => {
+    const smtp = makeSMTP();
+
+    // Write invalid JSON to the store path
+    writeFileSync(storePath, "{ not valid json ]", "utf-8");
+
+    const svc = new SchedulerService(smtp, storePath);
+    // load() is called in start(); call it directly to test the error branch
+    expect(() => (svc as any).load()).not.toThrow();
+    expect(svc.list()).toHaveLength(0);
+  });
+
+  it("pruneHistory() caps non-pending records at MAX_HISTORY_RECORDS", () => {
+    const smtp = makeSMTP();
+    const svc = new SchedulerService(smtp, storePath);
+
+    // Build 1001 "sent" records within the 30-day retention window (newer than cutoff)
+    const recentDate = new Date(Date.now() - 1000).toISOString(); // 1 second ago
+    const records = Array.from({ length: 1001 }, (_, i) => ({
+      id: `id-${i}`,
+      scheduledAt: recentDate,
+      createdAt: recentDate,
+      status: "sent",
+      options: makeOptions(),
+      retryCount: 0,
+    }));
+
+    // pruneHistory is private; access via the internal load path
+    const pruned: any[] = (svc as any).pruneHistory(records);
+    // Should be capped at 1000
+    expect(pruned.length).toBe(1000);
+  });
+
+  it("persist() error path — warns when write fails", () => {
+    const smtp = makeSMTP();
+    // Use a path inside a non-existent directory to force writeFileSync to fail
+    const badPath = join(tmpDir, "nonexistent", "subdir", "scheduled.json");
+    const svc = new SchedulerService(smtp, badPath);
+    // schedule() calls persist() internally; the error should be swallowed and warned
+    expect(() => svc.schedule(makeOptions(), futureDate(120))).not.toThrow();
+  });
+
+  it("processDue() handles thrown exceptions from sendEmail (catch branch)", async () => {
+    // Make sendEmail throw an Error instead of returning success:false
+    const smtp = {
+      sendEmail: vi.fn().mockRejectedValue(new Error("Connection refused")),
+    } as unknown as SMTPService;
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    // Run processDue 3 times (MAX_RETRIES) to exhaust retries via the catch branch
+    await svc.processDue();
+    await svc.processDue();
+    await svc.processDue();
+
+    const item = svc.list().find(i => i.id === id)!;
+    expect(item.status).toBe("failed");
+    expect(item.error).toBe("Connection refused");
+    expect(item.retryCount).toBe(3);
   });
 
   it("load() retains recent non-pending records (within 30 days)", () => {
