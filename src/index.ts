@@ -1834,6 +1834,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const lblValidErr = validateLabelName(lblName);
         if (lblValidErr) throw new McpError(ErrorCode.InvalidParams, lblValidErr);
         const lblFolder = `Labels/${lblName}`;
+        // Validate limit type — a non-numeric value (e.g. string "50") would
+        // produce NaN inside Math.max/min and reach the IMAP service unclamped.
+        // Consistent with the guards added to get_emails / search_emails (Cycle #25).
+        if (args.limit !== undefined && typeof args.limit !== "number") {
+          throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
+        }
         const lblLimit = Math.min(Math.max((args.limit as number) || 50, 1), 200);
 
         let lblOffset = 0;
@@ -2337,6 +2343,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validate folder to prevent path traversal via the folder argument.
         const seValidErr = validateTargetFolder(folder);
         if (seValidErr) throw new McpError(ErrorCode.InvalidParams, seValidErr);
+        // Validate limit type — a non-numeric value (e.g. string "100") would
+        // produce NaN inside Math.max/min and reach the IMAP service unclamped.
+        // Consistent with the guards added to get_emails / search_emails (Cycle #25).
+        if (args.limit !== undefined && typeof args.limit !== "number") {
+          throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
+        }
         const limit = Math.min(Math.max(1, (args.limit as number) || 100), 500);
         const emails = await imapService.getEmails(folder, limit);
         analyticsCache = null; analyticsCacheInflight = null; // force analytics refresh on next request

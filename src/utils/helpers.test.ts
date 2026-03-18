@@ -1998,4 +1998,116 @@ describe('helpers', () => {
       expect(isValidChallengeId('../../etc/passwd')).toBe(false);
     });
   });
+
+  // ── Cycle #27: get_emails_by_label / sync_emails 'limit' type guards ────────
+  // Both handlers now have:
+  //   if (args.limit !== undefined && typeof args.limit !== "number")
+  //     throw McpError(InvalidParams, "'limit' must be a number.")
+  // This mirrors the guards added to get_emails / search_emails in Cycle #25.
+  // A non-numeric string like "abc" produces NaN inside Math.max/min, which
+  // would propagate to the IMAP service unclamped without these guards.
+
+  describe("get_emails_by_label 'limit' type guard (Cycle #27)", () => {
+    // Replicates: args.limit !== undefined && typeof args.limit !== "number"
+    // Returns true → guard fires → McpError(InvalidParams) thrown.
+    const isNonNumericLimit = (v: unknown): boolean =>
+      v !== undefined && typeof v !== 'number';
+
+    it('undefined is accepted (handler uses default 50)', () => {
+      expect(isNonNumericLimit(undefined)).toBe(false);
+    });
+
+    it('integer 50 is accepted', () => {
+      expect(isNonNumericLimit(50)).toBe(false);
+    });
+
+    it('integer 1 is accepted (lower clamping boundary)', () => {
+      expect(isNonNumericLimit(1)).toBe(false);
+    });
+
+    it('integer 200 is accepted (upper clamping boundary)', () => {
+      expect(isNonNumericLimit(200)).toBe(false);
+    });
+
+    it('float 25.5 is accepted (clamped by Math.max/min)', () => {
+      expect(isNonNumericLimit(25.5)).toBe(false);
+    });
+
+    it('string "50" triggers guard', () => {
+      expect(isNonNumericLimit('50')).toBe(true);
+    });
+
+    it('string "abc" triggers guard (would produce NaN without guard)', () => {
+      expect(isNonNumericLimit('abc')).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isNonNumericLimit(null)).toBe(true);
+    });
+
+    it('boolean false triggers guard', () => {
+      expect(isNonNumericLimit(false)).toBe(true);
+    });
+
+    it('array [50] triggers guard', () => {
+      expect(isNonNumericLimit([50])).toBe(true);
+    });
+
+    it('object {} triggers guard', () => {
+      expect(isNonNumericLimit({})).toBe(true);
+    });
+  });
+
+  describe("sync_emails 'limit' type guard (Cycle #27)", () => {
+    // Replicates: args.limit !== undefined && typeof args.limit !== "number"
+    // Returns true → guard fires → McpError(InvalidParams) thrown.
+    // sync_emails uses a different default (100) and cap (500) but the
+    // type-guard logic is identical to get_emails / get_emails_by_label.
+    const isNonNumericLimit = (v: unknown): boolean =>
+      v !== undefined && typeof v !== 'number';
+
+    it('undefined is accepted (handler uses default 100)', () => {
+      expect(isNonNumericLimit(undefined)).toBe(false);
+    });
+
+    it('integer 100 is accepted (default value)', () => {
+      expect(isNonNumericLimit(100)).toBe(false);
+    });
+
+    it('integer 1 is accepted (lower clamping boundary)', () => {
+      expect(isNonNumericLimit(1)).toBe(false);
+    });
+
+    it('integer 500 is accepted (upper clamping boundary)', () => {
+      expect(isNonNumericLimit(500)).toBe(false);
+    });
+
+    it('float 99.9 is accepted (clamped by Math.max/min)', () => {
+      expect(isNonNumericLimit(99.9)).toBe(false);
+    });
+
+    it('string "100" triggers guard', () => {
+      expect(isNonNumericLimit('100')).toBe(true);
+    });
+
+    it('string "abc" triggers guard (would produce NaN without guard)', () => {
+      expect(isNonNumericLimit('abc')).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isNonNumericLimit(null)).toBe(true);
+    });
+
+    it('boolean true triggers guard', () => {
+      expect(isNonNumericLimit(true)).toBe(true);
+    });
+
+    it('array [100] triggers guard', () => {
+      expect(isNonNumericLimit([100])).toBe(true);
+    });
+
+    it('object {} triggers guard', () => {
+      expect(isNonNumericLimit({})).toBe(true);
+    });
+  });
 });
