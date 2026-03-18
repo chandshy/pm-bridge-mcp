@@ -370,6 +370,62 @@ describe('AnalyticsService', () => {
     });
   });
 
+  describe('deprecated emails getter', () => {
+    it('returns the current inboxEmails array', () => {
+      const svc = new AnalyticsService();
+      svc.updateEmails(mockMessages, []);
+      // Access the deprecated getter
+      const result = (svc as any).emails;
+      expect(Array.isArray(result)).toBe(true);
+      expect(result).toHaveLength(mockMessages.length);
+    });
+  });
+
+  describe('updateContact — firstInteraction update', () => {
+    it('updates firstInteraction when a newer contact receives an older email', () => {
+      // Sending two emails from same sender: first with a recent date, then with an earlier date
+      const recentDate = new Date('2024-06-01T10:00:00Z');
+      const earlierDate = new Date('2024-01-01T10:00:00Z');
+
+      const email1: EmailMessage = {
+        id: '1',
+        from: 'alice@x.com',
+        to: ['me@x.com'],
+        subject: 'Recent',
+        body: '',
+        isHtml: false,
+        date: recentDate,
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      const email2: EmailMessage = {
+        id: '2',
+        from: 'alice@x.com',
+        to: ['me@x.com'],
+        subject: 'Older',
+        body: '',
+        isHtml: false,
+        date: earlierDate,
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      };
+
+      const svc = new AnalyticsService();
+      // Both emails are from alice@x.com — contact is created with recentDate,
+      // then updated with earlierDate which should set firstInteraction
+      svc.updateEmails([email1, email2], []);
+      const contacts = svc.getContacts();
+      const alice = contacts.find(c => c.email === 'alice@x.com');
+      expect(alice).toBeDefined();
+      expect(alice!.firstInteraction).toEqual(earlierDate);
+      expect(alice!.lastInteraction).toEqual(recentDate);
+    });
+  });
+
   describe('getEmailAnalytics — topRecipients with sent emails', () => {
     it('populates topRecipients when sent emails include multiple recipients', () => {
       const inbox: EmailMessage = {
