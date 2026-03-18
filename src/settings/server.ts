@@ -1878,7 +1878,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           '<span class="risk-badge risk-' + escHtml(cat.risk) + '">' + escHtml(cat.risk) + '</span>' +
           '<label class="toggle-wrap" onclick="event.stopPropagation()">' +
             '<span class="toggle"><input type="checkbox" id="cat-' + escHtml(catKey) + '" ' +
-              'onchange="toggleCategory_all(\'' + escHtml(catKey) + '\',this.checked)"><span class="slider"></span></span>' +
+              'onchange="toggleCategory_all(\\'' + escHtml(catKey) + '\\',this.checked)"><span class="slider"></span></span>' +
             '<span style="font-size:12px;color:var(--muted)">All</span>' +
           '</label>' +
         '</div>' +
@@ -1901,7 +1901,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       '</div>' +
       '<label class="toggle-wrap">' +
         '<span class="toggle"><input type="checkbox" id="tool-' + escHtml(tool) + '" ' +
-          'onchange="onToolToggle(\'' + escHtml(tool) + '\',this.checked)"><span class="slider"></span></span>' +
+          'onchange="onToolToggle(\\'' + escHtml(tool) + '\\',this.checked)"><span class="slider"></span></span>' +
       '</label>' +
     '</div>';
   }
@@ -2109,7 +2109,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       return '<div class="escalation-card-body">' +
         '<div class="escalation-meta">Challenge ID: <code>' + escHtml(e.id) + '</code> &nbsp;·&nbsp; ' +
         'Requested: ' + new Date(e.requestedAt).toLocaleString() + '</div>' +
-        '<div class="escalation-field"><label>Agent\'s reason</label>' +
+        '<div class="escalation-field"><label>Agent\\'s reason</label>' +
           '<div class="escalation-reason">' + escHtml(e.reason) + '</div></div>' +
         '<div class="escalation-field"><label>Privilege change</label>' +
           '<div class="escalation-preset-row">' +
@@ -2122,12 +2122,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           '<label>Type APPROVE to enable the button</label>' +
           '<input class="escalation-confirm-input" type="text" id="conf-' + escHtml(e.id) + '" ' +
             'placeholder="APPROVE" autocomplete="off" spellcheck="false" ' +
-            'oninput="onConfirmInput(\'' + escHtml(e.id) + '\')">' +
+            'oninput="onConfirmInput(\\'' + escHtml(e.id) + '\\')">' +
         '</div>' +
         '<div class="escalation-actions">' +
-          '<button class="btn btn-deny" onclick="denyEscalation(\'' + escHtml(e.id) + '\')">✗ Deny</button>' +
+          '<button class="btn btn-deny" onclick="denyEscalation(\\'' + escHtml(e.id) + '\\')">✗ Deny</button>' +
           '<button class="btn btn-approve" id="approve-' + escHtml(e.id) + '" disabled ' +
-            'onclick="approveEscalation(\'' + escHtml(e.id) + '\')">✓ Approve</button>' +
+            'onclick="approveEscalation(\\'' + escHtml(e.id) + '\\')">✓ Approve</button>' +
           '<span class="escalation-countdown" id="cd-' + escHtml(e.id) + '">' +
             formatCountdown(e.expiresAt) + '</span>' +
         '</div></div>';
