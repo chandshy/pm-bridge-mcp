@@ -300,9 +300,13 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 
 Pre-built prompt templates for common tasks:
 
-- **`compose_reply`** — Draft a contextual reply to an email thread
-- **`thread_summary`** — Summarise an email thread with action items
-- **`find_subscriptions`** — Identify mailing lists and newsletters you're subscribed to
+| Prompt | Description | Arguments |
+|---|---|---|
+| **`triage_inbox`** | Review unread emails, assess urgency, and suggest actions (reply / archive / delete / snooze) | `limit` (default 20), `focus` (sender or topic to prioritize) |
+| **`compose_reply`** | Draft a contextual reply to an email thread | `emailId` (required), `intent` |
+| **`daily_briefing`** | Summarize today's inbox: unread count, key senders, action items, and deadline mentions | — |
+| **`find_subscriptions`** | Identify mailing lists and newsletters you're subscribed to, and offer to archive or delete them | `folder` (default: INBOX) |
+| **`thread_summary`** | Fetch all messages in a thread and produce a concise summary with open action items | `emailId` (required) |
 
 ---
 
