@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #34 (2026-03-18)
+Last updated: Cycle #35 (2026-03-18)
 
 ---
 
@@ -348,6 +348,25 @@ The `LogEntry` interface has an optional `data?: any` field carrying sanitized/r
 
 ### [DONE - Cycle 32] `list_labels` — `(f: any)` cast in array filter
 The `list_labels` filter used `(f: any)` with optional chaining `f.path?.startsWith()`. Since `getFolders()` returns `EmailFolder[]` and `path` is non-optional, the cast was spurious. Replaced with `(f: EmailFolder)` and direct `f.path.startsWith()`. Added `EmailFolder` to the import line.
+
+## NEW — Cycle #35 Findings (all completed in Cycle #35)
+
+### [DONE - Cycle 35] `search_emails` `from`/`to`/`subject` — string type guards missing before length checks
+Cycle #6 length caps used `args.X && (args.X as string).length > 500` without a `typeof` check first. A non-string truthy value (e.g. `42`) has `undefined.length` at runtime; `undefined > 500` is `false`, so the value passed silently to imapflow. Added `typeof !== "string"` guard for each of `from`, `to`, `subject` before the existing length cap.
+
+### [DONE - Cycle 35] `search_emails` `hasAttachment` — boolean type guard
+`as boolean | undefined` cast with no runtime check. A non-boolean truthy value passes imapflow's filter check via JS truthiness. Added `typeof !== "boolean"` guard consistent with the `isRead`/`isStarred` guards in mark/star handlers (Cycle #34).
+
+### [DONE - Cycle 35] `search_emails` `isRead` and `isStarred` — boolean type guards
+Same `as boolean | undefined` cast issue as `hasAttachment`. Both filter fields forwarded to imapflow without verification. Added equivalent guards for both.
+
+### [DONE - Cycle 35] `save_draft` `inReplyTo` — string type guard
+`as string | undefined` cast with no runtime check. A non-string value (number, array, object) produces a malformed Message-ID header in the MIME draft. Added `typeof !== "string"` guard before the `saveDraft` call.
+
+### [DONE - Cycle 35] `save_draft` `references` — array and per-item string type guards
+`as string[] | undefined` cast with no shape check. A non-array or an array with non-string items produces malformed `References` headers. Added `Array.isArray()` check and per-item `typeof !== "string"` check with positional error messages.
+
+---
 
 ## NEW — Cycle #34 Findings (all completed in Cycle #34)
 

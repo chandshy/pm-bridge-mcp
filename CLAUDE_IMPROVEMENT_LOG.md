@@ -4,6 +4,39 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #35 — search_emails boolean/string type guards, save_draft inReplyTo+references guards
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 763/763 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`search_emails` — `from`/`to`/`subject` length checks missing string type guards** — The Cycle #6 length caps used bare `args.X && (args.X as string).length > MAX` without first checking `typeof args.X === "string"`. A non-string truthy value (e.g. the number `42`) would be cast via `as string`; at runtime `(42 as string).length` is `undefined` and `undefined > 500` is `false`, so the bad value silently passed to the IMAP service. Added `if (args.from !== undefined && typeof args.from !== "string") throw new McpError(ErrorCode.InvalidParams, "'from' filter must be a string when provided.")` before each length check for `from`, `to`, and `subject`.
+
+2. **`search_emails` — `hasAttachment` missing boolean type guard** — `args.hasAttachment as boolean | undefined` with no runtime type check. A non-boolean truthy value (e.g. `"true"` or `1`) passes the cast silently and is forwarded to imapflow, which evaluates it as truthy and applies the attachment filter based on JS truthiness rather than caller intent. Added `if (args.hasAttachment !== undefined && typeof args.hasAttachment !== "boolean") throw new McpError(ErrorCode.InvalidParams, "'hasAttachment' must be a boolean when provided.")`, consistent with the boolean guards added for `isRead`/`isStarred` in mark/star handlers.
+
+3. **`search_emails` — `isRead` and `isStarred` missing boolean type guards** — Same `as boolean | undefined` cast pattern with no runtime check. Both filter fields forwarded to imapflow without verification. Added the same `typeof !== "boolean"` guards for both, consistent with the existing guards in `mark_email_read`, `star_email`, `bulk_mark_read`, `bulk_star` (Cycle #34).
+
+4. **`save_draft` — `inReplyTo` missing string type guard** — `args.inReplyTo as string | undefined` with no type check. A non-string value (number, object, array) would be silently cast to string and forwarded to the IMAP `saveDraft` layer as a malformed Message-ID header. Added `if (args.inReplyTo !== undefined && typeof args.inReplyTo !== "string") throw new McpError(ErrorCode.InvalidParams, "'inReplyTo' must be a string when provided.")` before the `saveDraft` call.
+
+5. **`save_draft` — `references` missing array and item type guards** — `args.references as string[] | undefined` with no shape check. A non-array value (e.g. a bare string) would be cast silently; an array with non-string items would produce malformed `References` headers in the draft MIME. Added: (a) `if (!Array.isArray(args.references)) throw McpError(InvalidParams)` when value is defined but not an array; (b) per-item `typeof item !== "string"` check with a positional error message `'references[i]' must be a string`.
+
+### Changes
+
+- `src/index.ts`: Added string type guards for `from`, `to`, `subject` in `search_emails` (3 × 4 lines + comments). Added boolean type guards for `hasAttachment`, `isRead`, `isStarred` in `search_emails` (10 lines + comment block). Added `inReplyTo` string type guard in `save_draft` (4 lines + comment). Added `references` array + per-item string type guard in `save_draft` (8 lines + comment).
+- `src/utils/helpers.test.ts`: Added 54 new tests: string type guard for `from` (7 tests), `to` (4 tests), `subject` (5 tests); boolean type guard for `hasAttachment` (9 tests), `isRead` (6 tests), `isStarred` (6 tests); `inReplyTo` string type guard (7 tests); `references` array + item type guard (10 tests).
+
+### Test Results
+
+**Before:** 763 tests passing
+**After:** 817 tests passing (+54)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #34 — isRead/isStarred boolean type guards, body max-length for reply_to_email and forward_email
 **Timestamp:** 2026-03-18
 **Branch:** main

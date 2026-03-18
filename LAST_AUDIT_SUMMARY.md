@@ -1,7 +1,21 @@
 # Final Security & Quality Audit Report
 ## Codebase: protonmail-mcp-server
 ## Date: 2026-03-18
-## Cycles completed: 34
+## Cycles completed: 35
+
+### Cycle #35 Addendum
+
+Cycle #35 identified and resolved five quality gaps:
+
+1. **`search_emails` `from`/`to`/`subject` string type guards** — The Cycle #6 length caps used `args.X && (args.X as string).length > 500` without a `typeof` check. A non-string truthy value (e.g. `42`) has `undefined` as `.length` at runtime, so `undefined > 500` is `false` and the value passes silently to imapflow. Added `typeof !== "string"` guard before each length check.
+2. **`search_emails` `hasAttachment` boolean type guard** — `as boolean | undefined` cast with no runtime check. A non-boolean truthy value passes to imapflow and triggers the attachment filter via JS truthiness. Added `typeof !== "boolean"` guard consistent with mark/star handler guards (Cycle #34).
+3. **`search_emails` `isRead` and `isStarred` boolean type guards** — Same `as boolean | undefined` cast issue. Added equivalent guards for both filter fields.
+4. **`save_draft` `inReplyTo` string type guard** — `as string | undefined` cast with no runtime check. A non-string value would produce a malformed Message-ID in the MIME draft. Added `typeof !== "string"` guard.
+5. **`save_draft` `references` array and per-item type guards** — `as string[] | undefined` cast with no shape check. A non-array or an array with non-string items would produce malformed `References` headers. Added `Array.isArray()` check and per-item `typeof !== "string"` check.
+
+No security findings beyond the above. Build clean. 817/817 tests pass (+54 over Cycle #34 baseline of 763).
+
+---
 
 ### Cycle #34 Addendum
 
