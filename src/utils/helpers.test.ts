@@ -1826,4 +1826,176 @@ describe('helpers', () => {
       expect(isInvalidAttIndex(undefined)).toBe(true);
     });
   });
+
+  // ── Cycle #26: send_email / save_draft / schedule_email subject length cap ──
+  // RFC 2822 §2.1.1 specifies that a single header line MUST NOT exceed 998
+  // characters (excluding the CRLF terminator).  Outbound email handlers now
+  // enforce this via: if (subject.length > MAX_SUBJECT_LENGTH) throw McpError(...)
+  // MAX_SUBJECT_LENGTH = 998
+
+  describe("send_email / save_draft / schedule_email 'subject' length cap (RFC 2822, 998 chars)", () => {
+    const MAX_SUBJECT_LENGTH = 998;
+
+    // Replicates the in-handler guard:
+    //   args.subject !== undefined && typeof args.subject === "string" &&
+    //   (args.subject as string).length > MAX_SUBJECT_LENGTH
+    // Returns true → guard triggers → McpError(InvalidParams) thrown.
+    function isSubjectTooLong(v: unknown): boolean {
+      return v !== undefined && typeof v === 'string' && (v as string).length > MAX_SUBJECT_LENGTH;
+    }
+
+    it('short subject "Hello World" is accepted', () => {
+      expect(isSubjectTooLong('Hello World')).toBe(false);
+    });
+
+    it('empty subject "" is accepted (required field check is separate)', () => {
+      expect(isSubjectTooLong('')).toBe(false);
+    });
+
+    it('subject exactly 998 chars is accepted (at the limit)', () => {
+      expect(isSubjectTooLong('a'.repeat(998))).toBe(false);
+    });
+
+    it('subject of 999 chars triggers guard (one over limit)', () => {
+      expect(isSubjectTooLong('a'.repeat(999))).toBe(true);
+    });
+
+    it('subject of 1000 chars triggers guard', () => {
+      expect(isSubjectTooLong('a'.repeat(1000))).toBe(true);
+    });
+
+    it('subject of 10000 chars triggers guard (extreme case)', () => {
+      expect(isSubjectTooLong('a'.repeat(10_000))).toBe(true);
+    });
+
+    it('undefined subject does not trigger guard (omitted is fine for save_draft)', () => {
+      expect(isSubjectTooLong(undefined)).toBe(false);
+    });
+
+    it('non-string subject (number) does not trigger the length guard (type guard fires first)', () => {
+      // typeof 42 !== "string" → condition is false → no length error
+      expect(isSubjectTooLong(42)).toBe(false);
+    });
+
+    it('subject of exactly 997 chars is accepted', () => {
+      expect(isSubjectTooLong('b'.repeat(997))).toBe(false);
+    });
+
+    it('unicode subject within 998 code units is accepted', () => {
+      // Each emoji is 2 UTF-16 code units; JS .length counts code units.
+      // 249 emoji × 2 = 498 code units — well within the 998 limit.
+      const emojiSubject = '🎉'.repeat(249);
+      expect(isSubjectTooLong(emojiSubject)).toBe(false);
+    });
+  });
+
+  // ── Cycle #26: request_permission_escalation / check_escalation_status ──────
+  // Both handlers now throw McpError(ErrorCode.InvalidParams, …) for invalid
+  // parameters instead of returning { isError: true, content: [...] }.
+  // These tests verify the guard logic used in both handlers.
+
+  describe('request_permission_escalation target_preset validation (isValidEscalationTarget)', () => {
+    // Replicates: !isValidEscalationTarget(targetPreset)
+    // The helper VALID_ESCALATION_TARGETS = new Set(["send_only", "supervised", "full"])
+    function isValidTarget(v: unknown): boolean {
+      return typeof v === 'string' && new Set(['send_only', 'supervised', 'full']).has(v as string);
+    }
+
+    it('"send_only" is a valid escalation target', () => {
+      expect(isValidTarget('send_only')).toBe(true);
+    });
+
+    it('"supervised" is a valid escalation target', () => {
+      expect(isValidTarget('supervised')).toBe(true);
+    });
+
+    it('"full" is a valid escalation target', () => {
+      expect(isValidTarget('full')).toBe(true);
+    });
+
+    it('"read_only" is not a valid escalation target (cannot escalate down)', () => {
+      expect(isValidTarget('read_only')).toBe(false);
+    });
+
+    it('"custom" is not a valid escalation target (human-configured only)', () => {
+      expect(isValidTarget('custom')).toBe(false);
+    });
+
+    it('empty string is not a valid target', () => {
+      expect(isValidTarget('')).toBe(false);
+    });
+
+    it('undefined is not a valid target', () => {
+      expect(isValidTarget(undefined)).toBe(false);
+    });
+
+    it('null is not a valid target', () => {
+      expect(isValidTarget(null)).toBe(false);
+    });
+
+    it('number is not a valid target', () => {
+      expect(isValidTarget(3)).toBe(false);
+    });
+
+    it('arbitrary string "admin" is not a valid target', () => {
+      expect(isValidTarget('admin')).toBe(false);
+    });
+  });
+
+  describe('check_escalation_status challenge_id format validation (isValidChallengeId)', () => {
+    // Replicates: !isValidChallengeId(challengeId)
+    // CHALLENGE_ID_RE = /^[0-9a-f]{32}$/  (128-bit randomBytes hex)
+    const CHALLENGE_ID_RE = /^[0-9a-f]{32}$/;
+    function isValidChallengeId(v: unknown): boolean {
+      return typeof v === 'string' && CHALLENGE_ID_RE.test(v as string);
+    }
+
+    it('valid 32-char lowercase hex string passes', () => {
+      expect(isValidChallengeId('a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4')).toBe(true);
+    });
+
+    it('all-zeros 32-char hex string passes', () => {
+      expect(isValidChallengeId('00000000000000000000000000000000')).toBe(true);
+    });
+
+    it('all-f hex string passes', () => {
+      expect(isValidChallengeId('ffffffffffffffffffffffffffffffff')).toBe(true);
+    });
+
+    it('uppercase hex fails (must be lowercase)', () => {
+      expect(isValidChallengeId('A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4')).toBe(false);
+    });
+
+    it('31-char string fails (too short)', () => {
+      expect(isValidChallengeId('a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3')).toBe(false);
+    });
+
+    it('33-char string fails (too long)', () => {
+      expect(isValidChallengeId('a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e')).toBe(false);
+    });
+
+    it('empty string fails', () => {
+      expect(isValidChallengeId('')).toBe(false);
+    });
+
+    it('undefined fails', () => {
+      expect(isValidChallengeId(undefined)).toBe(false);
+    });
+
+    it('null fails', () => {
+      expect(isValidChallengeId(null)).toBe(false);
+    });
+
+    it('string with hyphens (UUID-style) fails', () => {
+      expect(isValidChallengeId('550e8400-e29b-41d4-a716-446655440000')).toBe(false);
+    });
+
+    it('string with non-hex chars fails', () => {
+      expect(isValidChallengeId('z1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4')).toBe(false);
+    });
+
+    it('path traversal string fails', () => {
+      expect(isValidChallengeId('../../etc/passwd')).toBe(false);
+    });
+  });
 });

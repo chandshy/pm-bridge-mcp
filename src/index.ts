@@ -1436,10 +1436,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const targetPreset = args.target_preset;
     const reason       = sanitizeText((args.reason as string | undefined) ?? "No reason provided", 500);
     if (!isValidEscalationTarget(targetPreset)) {
-      return {
-        content: [{ type: "text" as const, text: `Invalid target_preset. Must be one of: send_only, supervised, full` }],
-        isError: true,
-      };
+      throw new McpError(ErrorCode.InvalidParams, "Invalid target_preset. Must be one of: send_only, supervised, full");
     }
     const validatedPreset = targetPreset as PermissionPreset;
     const currentPreset = (loadConfig() ?? defaultConfig()).permissions.preset;
@@ -1492,10 +1489,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === "check_escalation_status") {
     const challengeId = args.challenge_id;
     if (!isValidChallengeId(challengeId)) {
-      return {
-        content: [{ type: "text" as const, text: "challenge_id must be a 32-character lowercase hex string." }],
-        isError: true,
-      };
+      throw new McpError(ErrorCode.InvalidParams, "challenge_id must be a 32-character lowercase hex string.");
     }
     const record = getEscalationStatus(challengeId);
     if (!record) {
@@ -1564,6 +1558,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     });
   }
 
+  // RFC 2822 §2.1.1 hard limit: a single header line MUST NOT exceed 998 chars.
+  // Enforced for the 'subject' field in send_email, save_draft, and schedule_email.
+  const MAX_SUBJECT_LENGTH = 998;
+
   try {
     switch (name) {
 
@@ -1575,6 +1573,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Guard empty/whitespace-only 'to' field before reaching SMTP layer.
         if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
           throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
+        }
+        // RFC 2822 §2.1.1 — header lines SHOULD be ≤998 characters (hard limit).
+        // A multi-kilobyte subject causes header bloat and may be rejected by MTAs.
+        if (args.subject !== undefined && typeof args.subject === "string" && (args.subject as string).length > MAX_SUBJECT_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `'subject' must not exceed ${MAX_SUBJECT_LENGTH} characters (RFC 2822 limit).`);
         }
         const result = await smtpService.sendEmail({
           to: args.to as string,
@@ -1857,6 +1860,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "save_draft": {
         const sdAttErr = validateAttachments(args.attachments);
         if (sdAttErr) throw new McpError(ErrorCode.InvalidParams, sdAttErr);
+        // RFC 2822 subject length cap (shared with send_email / schedule_email).
+        if (args.subject !== undefined && typeof args.subject === "string" && (args.subject as string).length > MAX_SUBJECT_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `'subject' must not exceed ${MAX_SUBJECT_LENGTH} characters (RFC 2822 limit).`);
+        }
         const draftResult = await imapService.saveDraft({
           to: args.to as string | undefined,
           cc: args.cc as string | undefined,
@@ -1880,6 +1887,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Guard empty/whitespace-only 'to' — consistent with send_email / forward_email.
         if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
           throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
+        }
+        // RFC 2822 subject length cap (shared with send_email / save_draft).
+        if (args.subject !== undefined && typeof args.subject === "string" && (args.subject as string).length > MAX_SUBJECT_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `'subject' must not exceed ${MAX_SUBJECT_LENGTH} characters (RFC 2822 limit).`);
         }
         // Validate send_at as a parseable ISO date string.
         if (!args.send_at || typeof args.send_at !== "string") {
