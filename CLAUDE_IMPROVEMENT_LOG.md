@@ -4,6 +4,36 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #23 — Input guards: send_email/forward_email 'to' field, reply_to_email body, bulk empty-array
+**Timestamp:** 2026-03-18
+**Git commit:** (see below)
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 457/457 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`send_email` / `forward_email` `to` field — no handler-level empty-string guard** — Both handlers passed `args.to as string` directly to `smtpService.sendEmail()` without checking whether the string was empty or whitespace-only. An empty `to` would reach the SMTP service's `parseEmails("")` which returns `[]`, ultimately producing an opaque "Email delivery failed" error rather than a clear `McpError(InvalidParams)`. Added a guard: `!args.to || typeof args.to !== "string" || !(args.to).trim()` → `McpError(InvalidParams, "'to' must be a non-empty string...")`.
+
+2. **`reply_to_email` `body` field — no handler-level empty-string guard** — The handler passed `args.body as string` directly to `smtpService.sendEmail()` without checking emptiness. A blank/whitespace-only body would silently send an empty reply email. Added the same guard pattern → `McpError(InvalidParams, "'body' must be a non-empty string.")`.
+
+3. **Bulk operations (`bulk_mark_read`, `bulk_star`, `bulk_move_emails`, `bulk_move_to_label`, `bulk_remove_label`, `bulk_delete_emails` / `bulk_delete`) — empty `emailIds` array produces silent no-op** — When called with `emailIds: []` (or a non-array), all six bulk handlers previously returned `{success: 0, failed: 0, errors: []}` — indistinguishable from a real run that found nothing to act on. Added an up-front guard `!Array.isArray(args.emailIds) || args.emailIds.length === 0` → `McpError(InvalidParams, "emailIds must be a non-empty array...")` in all six handlers.
+
+### Implementation
+
+- **`src/index.ts`**: 8 new guards (1 for `send_email`, 1 for `reply_to_email`, 1 for `forward_email`, 5 for bulk tools + 1 shared for `bulk_delete` / `bulk_delete_emails`).
+- **`src/utils/helpers.test.ts`**: 21 new unit tests covering all three guard patterns (to-field, body-field, bulk-empty-array). Total: **478 tests**.
+
+### Metrics
+
+- Tests: 457 → 478 (+21)
+- `as any` casts: 0 avoidable (unchanged)
+- TypeScript errors: 0 (clean build)
+
+---
+
 ## Cycle #22 — Security hardening: multi-folder traversal, UUID validation, security headers
 **Timestamp:** 2026-03-18
 **Git commit:** (see below)

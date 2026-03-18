@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #22 (2026-03-18)
+Last updated: Cycle #23 (2026-03-18)
 
 ---
 
@@ -237,4 +237,17 @@ The private method in `SimpleIMAPService` checked for empty, too-long, and contr
 
 ---
 
-IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 22 cycles
+---
+
+## NEW — Cycle #23 Findings (all completed in Cycle #23)
+
+### [DONE - Cycle 23] `send_email` / `forward_email` `to` field — no handler-level empty-string guard
+Both handlers forwarded `args.to as string` without checking for empty/whitespace-only values. An empty `to` would reach `smtpService.sendEmail()` and produce an opaque SMTP error rather than a clear `InvalidParams`. Added guard `!args.to || typeof args.to !== "string" || !(args.to).trim()` → `McpError(InvalidParams)` in both handlers.
+
+### [DONE - Cycle 23] `reply_to_email` `body` field — no handler-level empty-string guard
+`args.body as string` passed directly to the SMTP service without emptiness check. A blank body would silently send an empty reply. Added guard `!args.body || typeof args.body !== "string" || !(args.body).trim()` → `McpError(InvalidParams, "'body' must be a non-empty string.")`.
+
+### [DONE - Cycle 23] Bulk operations — empty `emailIds` array produces silent no-op
+All 6 bulk tools (`bulk_mark_read`, `bulk_star`, `bulk_move_emails`, `bulk_move_to_label`, `bulk_remove_label`, `bulk_delete_emails` / `bulk_delete`) previously returned `{success:0, failed:0, errors:[]}` when called with `emailIds: []`. Added up-front guard → `McpError(InvalidParams, "emailIds must be a non-empty array of numeric UID strings.")` in all six handlers.
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 23 cycles
