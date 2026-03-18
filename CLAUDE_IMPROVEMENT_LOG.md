@@ -4,6 +4,105 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #19 — FINAL CODE CYCLE
+**Timestamp:** 2026-03-18 05:00–05:10 Eastern
+**Git commit:** `a990d12`
+**Branch:** main
+**NOTE: This is the last code-change cycle. Cycle #20 will be the final summary/audit report.**
+
+### Audit Highlights
+
+**`get_logs` limit validation — confirmed correct:**
+Handler uses `Math.min(Math.max(1, Math.trunc(rawLimit)), 500)`. Handles non-integer inputs via `Math.trunc`. Range 1–500. No action needed.
+
+**`sync_emails` / `clear_cache` — confirmed clean:**
+`sync_emails` clamps limit 1–500 at handler level. Folder passed to `imapService.getEmails()` which calls `this.validateFolderName()` internally. `clear_cache` has no inputs; no guards needed.
+
+**`get_email_analytics` / `get_contacts` / `get_volume_trends` input validation — confirmed clean:**
+`getContacts()` clamps limit 1–500 via `Math.min(Math.max(1, Math.trunc(limit) || 100), 500)`.
+`getVolumeTrends()` clamps days 1–365 similarly. Handler-level type coercion via `as number | undefined` is fine since both methods handle non-numeric gracefully.
+
+**`getEmails()` memory bound — confirmed:**
+Hard cap is **200** at line 302: `limit = Math.min(Math.max(1, limit ?? 50), 200)`.
+
+**`rateLimitStatus()` and `check()` — confirmed clean:**
+Rolling window uses `now - 60 * 60 * 1000`. `filter((ts) => ts > windowStart)` uses strict `>` — boundary-exact timestamps are excluded (correct). No unbounded growth: timestamps outside the window are evicted on every `consumeRateSlot()` call. No edge cases found.
+
+**`get_email_analytics` outputSchema — incomplete items schemas (FIXED):**
+- `topSenders` items declared as bare `{type:"object"}` — expanded to full `{email, count, lastContact}` with required
+- `topRecipients` items same — expanded to `{email, count, lastContact}` with required
+- `peakActivityHours` items bare `{type:"object"}` — expanded to `{hour, count}` with required
+- `attachmentStats` bare `{type:"object"}` — expanded to full `{totalAttachments, totalSizeMB, averageSizeMB, mostCommonTypes[]}` with required
+
+**`get_contacts` outputSchema — missing Contact fields (FIXED):**
+`Contact` interface has 8 fields; outputSchema only declared 4. Added `name`, `firstInteraction`, `averageResponseTime`, `isFavorite` to the items schema.
+
+### Work Completed This Cycle
+
+1. **`get_email_analytics` outputSchema** — Expanded 4 incomplete/bare schema entries to match actual `EmailAnalytics` type exactly. Net +47 lines of structured schema.
+2. **`get_contacts` outputSchema** — Added 4 missing optional Contact fields (`name`, `firstInteraction`, `averageResponseTime`, `isFavorite`).
+
+### Validation Results
+
+- `npm run build`: Clean (zero TypeScript errors)
+- `npm test`: 416/416 tests pass
+
+---
+
+## Cycle #18
+**Timestamp:** 2026-03-18 04:45–04:55 Eastern
+**Git commit:** `293a039`
+**Branch:** main
+
+### Audit Highlights
+
+**`ensureConnection()` error path — confirmed well-handled:**
+- `reconnect()` throws `Error('Cannot reconnect: no connection config stored')` when config is absent.
+- Read-path methods (`getFolders`, `getEmails`, `searchEmails`) catch `ensureConnection()` failures and return empty arrays / cached data — they do not propagate to the MCP handler.
+- Write-path methods that call `ensureConnection()` let errors propagate; the top-level `try/catch` in `CallToolRequestSchema` wraps all errors with `safeErrorMessage()`, which maps IMAP-related messages to the user-friendly "IMAP operation failed" string.
+- Assessment: error handling is correct and user-friendly. No action required.
+
+**`get_connection_status` outputSchema — fields missing:**
+The actual handler response returned 8 fields across the smtp/imap objects plus 2 top-level fields:
+- `smtp`: `connected`, `host`, `port`, `lastCheck` (ISO string), `insecureTls` (bool), and conditional `error`
+- `imap`: `connected`, `healthy`, `host`, `port`, `insecureTls` (bool)
+- Top-level: `settingsConfigured` (bool), `settingsConfigPath` (string)
+
+The outputSchema declared only `connected`/`host`/`port` for smtp and `connected`/`healthy`/`host`/`port` for imap. All remaining fields were absent. This was a schema accuracy gap that agents relying on structured output could be affected by.
+
+**`list_scheduled_emails` outputSchema — `retryCount` missing:**
+The handler included `retryCount: s.retryCount` in every scheduled email object (line 1811), but the outputSchema item properties did not declare this field.
+
+**No TODO/FIXME in production code:** Grep confirmed zero instances across all `src/` files.
+
+**Tool descriptions — reviewed 10 tools:** All descriptions are accurate and clear. No changes needed.
+
+### Work Completed This Cycle
+
+1. **Fixed `get_connection_status` outputSchema** (`src/index.ts`):
+   - Added `lastCheck` (`string`, `format: date-time`) to smtp properties
+   - Added `insecureTls` (`boolean`) to smtp properties
+   - Added `error` (`string`, with description) to smtp properties
+   - Added `insecureTls` (`boolean`) to imap properties
+   - Added `settingsConfigured` (`boolean`, with description) as top-level property
+   - Added `settingsConfigPath` (`string`, with description) as top-level property
+
+2. **Fixed `list_scheduled_emails` outputSchema** (`src/index.ts`):
+   - Added `retryCount` (`number`, with description) to scheduled item properties
+
+### Validation Results
+
+- `npm run build`: clean (0 errors)
+- `npm test`: **416/416 tests pass** — unchanged count, all green
+
+### Git Status
+
+- Commit: `293a039`
+- Files changed: `src/index.ts` (+7 insertions)
+- Pushed to `origin/main`
+
+---
+
 ## Cycle #17
 **Timestamp:** 2026-03-18 04:25–04:40 Eastern
 **Git commit:** `f6ed4b1`

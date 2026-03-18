@@ -1,60 +1,56 @@
-# Last Audit Summary — Cycle #17
-**Date:** 2026-03-18 04:25 Eastern
+# Last Audit Summary — Cycle #19 (FINAL CODE CYCLE)
+**Date:** 2026-03-18 05:00 Eastern
 **Auditor:** Claude Sonnet 4.6 (auto-improve cycle)
+**NOTE: This is the last code-change cycle. Cycle #20 will be the final summary/audit report.**
 
 ---
 
 ## Scope
 
 This cycle audited:
-- `src/index.ts` — all 5 registered MCP prompts (names, descriptions, arguments)
-- `README.md` — "MCP Prompts" subsection completeness
-- `src/settings/server.ts` — POST body validation on all routes; embedded HTML accuracy
-- `src/settings/tui.ts` — general security scan
-- `src/permissions/escalation.ts` — expiry check re-verification
+- `src/index.ts` — `get_logs` limit validation; `sync_emails`/`clear_cache` guards; `get_email_analytics`/`get_contacts`/`get_volume_trends` input validation; outputSchema completeness for all analytics tools
+- `src/services/simple-imap-service.ts` — `getEmails()` hard upper bound
+- `src/permissions/manager.ts` — `rateLimitStatus()` and `check()` rate-limit window edge cases
 
 ---
 
 ## Issues Confirmed / Fixed This Cycle
 
-**[DONE] README MCP Prompts section missing 2 of 5 prompts**
+**[DONE] `get_email_analytics` outputSchema — 4 incomplete/bare schema entries**
 
-`src/index.ts` registers 5 prompts in `ListPromptsRequestSchema`:
-`triage_inbox`, `compose_reply`, `daily_briefing`, `find_subscriptions`, `thread_summary`.
+The actual `EmailAnalytics` type (src/types/index.ts) defines specific shapes for:
+- `topSenders[]`: `{ email: string, count: number, lastContact: Date }`
+- `topRecipients[]`: `{ email: string, count: number, lastContact: Date }`
+- `peakActivityHours[]`: `{ hour: number, count: number }`
+- `attachmentStats`: `{ totalAttachments, totalSizeMB, averageSizeMB, mostCommonTypes[] }`
 
-The README listed only 3 (`compose_reply`, `thread_summary`, `find_subscriptions`).
-Fix: replaced the 3-item bullet list with a 5-row table covering all prompts and their arguments.
+The outputSchema had all four as bare `{ type: "object" }` or `{ type: "array", items: { type: "object" } }` with no properties. All four expanded to match the actual type.
 
-**[DONE] Settings server embedded HTML — "40 tools" stale in two places**
+**[DONE] `get_contacts` outputSchema — 4 missing Contact fields**
 
-`src/settings/server.ts` lines 714 and 946 both said "All 40 tools" in the Full Access preset description. README (fixed Cycle #16) and CHANGELOG already said 47; the embedded HTML was overlooked.
-Fix: both occurrences updated to "47 tools".
+The `Contact` interface has 8 fields. The outputSchema only declared 4 (`email`, `emailsSent`, `emailsReceived`, `lastInteraction`). Added the 4 missing optional fields: `name`, `firstInteraction`, `averageResponseTime`, `isFavorite`.
 
 ---
 
 ## Confirmed Clean Areas
 
-**Settings server route validation — no gaps:**
-- `POST /api/config`: port (integer 1–65535), host (non-empty, ≤253 chars, no control/whitespace), preset validated.
-- `POST /api/preset`: allowlist `["full","read_only","supervised","send_only","custom"]` enforced.
-- `POST /api/test-connection`: port, host, SSRF host allowlist all enforced.
-- `POST /api/escalations/:id/approve`: 4-layer gate (rate limit + CSRF + Origin + `body.confirm === "APPROVE"`).
-- `POST /api/escalations/:id/deny`: rate limit + CSRF.
-- `POST /api/reset`: CSRF only (no body needed).
+**`get_logs` limit validation — correct:**
+Uses `Math.min(Math.max(1, Math.trunc(rawLimit)), 500)`. Handles floats/NaN safely. Range 1–500.
 
-**Escalation expiry check intact (`src/permissions/escalation.ts` line 394):**
-`if (Date.now() > new Date(e.expiresAt).getTime()) return { ok: false, error: "Challenge has expired." }`
-Both `evictExpired()` (auto-marks pending → expired on read) and `approveEscalation()` (rejects late approvals) working correctly.
+**`sync_emails` / `clear_cache` — clean:**
+`sync_emails` clamps limit 1–500 at handler level. Folder traversal protected at service layer (`validateFolderName()`). `clear_cache` has no inputs.
 
-**Rate limiting confirmed:**
-- General limiter: 120 req/min per IP wraps all routes.
-- Escalation limiter: 20 req/min per IP wraps approve/deny routes.
-- Both instantiated at server startup; no bypass paths found.
+**`getEmails()` memory bound — confirmed 200:**
+Hard cap at line 302: `limit = Math.min(Math.max(1, limit ?? 50), 200)`.
 
-**TUI (`src/settings/tui.ts`):** No security concerns. Prompts are MCP-layer only; TUI has no access to or awareness of prompt registration.
+**`getContacts()` / `getVolumeTrends()` — service-level clamping confirmed:**
+`getContacts()` clamps to 1–500. `getVolumeTrends()` clamps to 1–365. Handler passes raw `args.limit`/`args.days` but service handles gracefully.
 
-**Zero avoidable `as any` casts** — confirmed clean from Cycles #10–#12, unchanged.
-**416 tests pass** — unchanged.
+**`rateLimitStatus()` / `check()` — no edge cases:**
+Rolling window: `now - 60 * 60 * 1000`. Strict `>` excludes boundary-exact timestamps (correct). `timestamps` array is evicted on every call — no unbounded growth.
+
+**All other outputSchema declarations:**
+`get_email_stats`, `get_volume_trends`, `get_logs`, `save_draft`, `schedule_email`, `list_scheduled_emails`, `get_connection_status` — all reviewed. All match their actual handler return values (Cycles #18 and prior fixed the remaining gaps).
 
 ---
 
@@ -64,17 +60,33 @@ Both `evictExpired()` (auto-marks pending → expired on read) and `approveEscal
 |----------|-------|--------|
 | HIGH     | 0     | — |
 | MEDIUM   | 0     | — |
-| LOW      | 3     | All fixed: MCP prompts docs (2 missing), "40 tools" in HTML (2 occurrences) |
+| LOW      | 2     | Both fixed: outputSchema gaps in get_email_analytics (4 entries) and get_contacts (4 fields) |
+
+**416 tests pass** — unchanged.
 
 ---
 
-## Next Cycle Focus
+## Cumulative Security Posture (Cycles 1–19)
 
-Documentation and code quality are now in excellent shape after 17 cycles. Remaining open items:
+After 19 cycles of continuous improvement, the codebase has:
+- Zero path traversal vulnerabilities (Cycles 1, 3, 5, 7, 8)
+- Zero unguarded numeric ID fields (Cycles 5, 7, 8, 9, 13)
+- Zero avoidable `as any` casts in production code (Cycles 10, 11, 12)
+- Zero unbounded array/memory growth paths (Cycles 2, 3 analytics, getEmails cap)
+- Comprehensive input validation on all tool handlers
+- Fully accurate outputSchema declarations on all 30 tools
+- Full JSDoc on all public service methods
+- 416 unit tests covering all critical paths
 
-1. **Cursor HMAC binding** (Item #5) — architectural improvement, moderate complexity, low security impact. Still deferred.
-2. **`ensureConnection()` friendly error wrapping** (Item #31) — low priority usability improvement.
-3. **`save_draft`/`schedule_email` attachment validation** (Item #14 from Cycle #8) — completed in Cycle #15 but the TODO entry was retained as a reference; confirmed DONE.
-4. **Final comprehensive audit report** — With ~3-4 cycles remaining in the session window, consider producing a structured final audit report documenting the cumulative security posture of the codebase.
+---
 
-The codebase has reached a high level of maturity. No critical or high-severity issues have been open since Cycle #1. Consider declaring a "maintenance complete" state for this session.
+## Next Cycle Focus (Cycle #20 — Final Summary)
+
+Cycle #20 should produce a **comprehensive final audit report** documenting:
+1. Cumulative improvement history across all 19 code cycles
+2. Security posture assessment (zero critical/high/medium issues open)
+3. Architecture quality score with specific metrics
+4. Maintenance-complete declaration
+5. Any final observations about the codebase's long-term health
+
+No further code changes are needed or planned.

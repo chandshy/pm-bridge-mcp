@@ -1,6 +1,7 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #16 (2026-03-18)
+Last updated: Cycle #19 (2026-03-18) — FINAL CODE CYCLE
+NOTE: Cycle #19 is the last code-change cycle. Cycle #20 will be the final summary/audit report.
 
 ---
 
@@ -185,11 +186,23 @@ Expanded README "MCP Prompts" subsection from a 3-item bullet list to a 5-row ta
 ### [DONE - Cycle 17] Settings UI embedded HTML — "40 tools" corrected to "47 tools"
 Fixed two occurrences of "All 40 tools" in `src/settings/server.ts` (preset comparison table + setup wizard card). Now consistent with README and CHANGELOG (all say 47).
 
-### 31. `ensureConnection()` friendly error wrapping (carried from Cycle #12, assessed in Cycle #14)
-**File:** `src/services/simple-imap-service.ts`
-**Issue:** Raw imapflow errors propagate on reconnect failure. Existing logger context is reasonable but user-facing error text could be friendlier. Assessed: current messages are "IMAP connection lost, attempting to reconnect" + the raw error. Low priority — skip unless a concrete usability complaint surfaces.
-**Effort:** LOW
-**Risk:** LOW
+### 31. `ensureConnection()` friendly error wrapping — CLOSED (Cycle #18 re-assessment)
+**Status:** No action needed. Re-assessed in Cycle #18:
+- Read-path methods catch and return empty arrays on reconnect failure.
+- Write-path errors propagate to the top-level `safeErrorMessage()` handler which maps IMAP messages to "IMAP operation failed".
+- Error handling is correct and user-friendly. Closing this item.
+
+### [DONE - Cycle 18] `get_connection_status` outputSchema accuracy
+Added 6 missing fields to outputSchema: `smtp.lastCheck`, `smtp.insecureTls`, `smtp.error`, `imap.insecureTls`, `settingsConfigured`, `settingsConfigPath`.
+
+### [DONE - Cycle 18] `list_scheduled_emails` outputSchema missing `retryCount`
+Added `retryCount` field to the scheduled item properties in the outputSchema.
+
+### [DONE - Cycle 19] `get_email_analytics` outputSchema — 4 incomplete entries
+Expanded `topSenders`, `topRecipients`, `peakActivityHours`, and `attachmentStats` from bare `{type:"object"}` to full typed schemas matching the `EmailAnalytics` interface.
+
+### [DONE - Cycle 19] `get_contacts` outputSchema — 4 missing Contact fields
+Added `name`, `firstInteraction`, `averageResponseTime`, `isFavorite` to the contact item schema to match the full `Contact` interface.
 
 ---
 
