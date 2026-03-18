@@ -1,8 +1,8 @@
-# Audit Summary — Cycle #47 (2026-03-18)
+# Audit Summary — Cycle #47 final (2026-03-18)
 ## Cycles completed: 47
 
 ### Status After Cycle #47
-- **921 tests passing** (15 test files, was 861 in 14 files)
+- **944 tests passing** (15 test files, was 861 in 14 files)
 - **0 build errors/warnings**
 - **0 exploitable security vulnerabilities**
 - Zero `any` type annotations in production TypeScript source (except unavoidable tui.ts readline internal access)
@@ -12,22 +12,28 @@
 - Comprehensive input validation on all 47 MCP tool handlers
 - All 5 MCP prompt handlers hardened against prompt injection and NaN inputs
 - CHANGELOG covers cycles 1–43 (Cycles 44–47 are code quality, not CHANGELOG-worthy)
-- Vitest coverage thresholds raised: statements 47%, branches 40%, functions 55%, lines 49%
+- Vitest coverage thresholds raised: statements 50%, branches 43%, functions 58%, lines 52%
 - **utils package (helpers.ts, logger.ts, tracer.ts): 100% coverage across all metrics**
+- **permissions/manager.ts: 100% coverage across all metrics**
+- **security/memory.ts: 100% coverage across all metrics**
+- **config/loader.ts: 30% → 65% statements coverage**
 
-### Changes This Cycle (#47)
-1. `logger.test.ts` — 22 new tests: getLogs, clearLogs, maxLogs ring-buffer, all sanitizeData branches (circular refs, arrays, sensitive key redaction, string truncation, control-char replacement)
-2. `tracer.test.ts` — created from scratch with 20 tests: enabled/disabled paths, span/spanSync, nested spans, error propagation, non-Error throws
-3. `helpers.test.ts` — 18 new tests: retry, sleep, generateId, parseDate, validateTargetFolder non-string branch, isValidEmail RFC 5321 length limits
-4. `vitest.config.ts` — raised 4 coverage thresholds to match improved measurements
+### Changes This Cycle (#47, all 3 sub-cycles)
+1. `logger.test.ts` — 22 new tests: getLogs, clearLogs, maxLogs ring-buffer, all sanitizeData branches
+2. `tracer.test.ts` — created from scratch with 20 tests covering all Tracer paths
+3. `helpers.test.ts` — 20 new tests: retry, sleep, generateId, parseDate, RFC 5321 email limits, targetFolder non-string branch
+4. `manager.test.ts` — 10 new tests: rateLimitStatus, getResponseLimits, permissions.tools fallback
+5. `memory.test.ts` — 3 new tests: Buffer attachment scrub, string content, falsy fields
+6. `loader.test.ts` — 14 new tests with fs mocking: loadConfig (7 cases), configExists (2), saveConfig (2), clamp via response limits (3)
+7. `vitest.config.ts` — thresholds raised 3 times to track improvements
 
-### Coverage Before → After
-| Metric | Before | After |
+### Coverage Before → After (Cycle #47 complete)
+| Metric | Before (Cycle 46) | After (Cycle 47) |
 |---|---|---|
-| Statements | 47.01% | 49.29% |
-| Branches | 39.91% | 42.60% |
-| Functions | 51.97% | 57.23% |
-| Lines | 48.85% | 50.97% |
+| Statements | 47.01% | 52.42% |
+| Branches | 39.91% | 45.54% |
+| Functions | 51.97% | 60.52% |
+| Lines | 48.85% | 54.32% |
 
 ### Open Items (priority order)
 1. Test coverage for MCP tool handler validation paths (47 handlers, sparse coverage — requires mocking the full server)
@@ -49,4 +55,10 @@ No new HIGH or MEDIUM priority items found. Remaining open items are:
 2. Architectural (cursor HMAC) — deferred as low security impact
 3. Test coverage increase beyond utils — requires live service mocking; low marginal value
 
-**TERMINATION CONDITION MET**: No new safe, high-impact improvements found. Utils package fully tested. Further coverage gains require service-layer mocks with heavy setup cost and diminishing returns.
+**TERMINATION CONDITION MET**: No new safe, high-impact improvements found after full cycle #47 audit.
+- utils (helpers/logger/tracer): 100% — complete
+- permissions/manager: 100% — complete
+- security/memory: 100% — complete
+- config/loader: 65% — keychain functions (lines 239-308) require complex async keychain mocking; deferred
+- Remaining low-coverage: escalation.ts (5%), settings/security.ts (39%), simple-imap-service.ts (32%) — all require live service infrastructure or are integration-level code unsuitable for unit tests
+- No production code changes needed — all type safety, security, and validation work complete
