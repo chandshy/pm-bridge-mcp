@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #24 (2026-03-18)
+Last updated: Cycle #25 (2026-03-18)
 
 ---
 
@@ -263,4 +263,17 @@ Both `send_at` guards (missing value, invalid date) used `return { ..., isError:
 ### [DONE - Cycle 24] `get_contacts` / `get_volume_trends` — no handler-level numeric type check on `limit`/`days`
 Both handlers cast `args.limit`/`args.days` directly as `number | undefined` without verifying the runtime type. A non-numeric value (e.g. string `"30"`) would silently fall back to the service default. Added handler-level type guards → `McpError(InvalidParams, "'limit' must be a number.")` and `McpError(InvalidParams, "'days' must be a number.")`.
 
-IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 24 cycles
+---
+
+## NEW — Cycle #25 Findings (all completed in Cycle #25)
+
+### [DONE - Cycle 25] `get_emails` / `search_emails` — `limit` parameter has no runtime type guard
+Both handlers used `(args.limit as number) || 50` inside `Math.min(Math.max(...))` without verifying the runtime type. A non-numeric string like `"abc"` produces NaN that bypasses clamping and reaches the IMAP service. Added `if (args.limit !== undefined && typeof args.limit !== "number") throw McpError(InvalidParams)` in both handlers, consistent with the type guards added to `get_contacts.limit` and `get_volume_trends.days` in Cycle #24.
+
+### [DONE - Cycle 25] `search_emails` — no cross-validation of `dateFrom`/`dateTo`
+When both `dateFrom` and `dateTo` are provided, no check was made that `dateFrom ≤ dateTo`. A reversed range (e.g. dateFrom=2024-12-31, dateTo=2024-01-01) would be forwarded to imapflow silently returning zero results. Added cross-validation: when both parse as valid dates and `Date.parse(dateFrom) > Date.parse(dateTo)`, throws `McpError(InvalidParams, "'dateFrom' must not be later than 'dateTo'.")`.
+
+### [DONE - Cycle 25] `download_attachment` — `attachment_index` has no upper bound
+The existing guard only checked `!isInteger || < 0` but allowed values like 999999. Requesting absurdly large indices wastes resources and is always a caller error. Added `MAX_ATTACHMENT_INDEX = 50` constant and guard `if (rawAttIdx > MAX_ATTACHMENT_INDEX) throw McpError(InvalidParams)`.
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 25 cycles

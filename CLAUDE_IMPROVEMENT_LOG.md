@@ -4,6 +4,35 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #25 — get_emails/search_emails limit type guard, search_emails date-range cross-validation, download_attachment index upper bound
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 504/504 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`get_emails` / `search_emails` — `limit` parameter has no runtime type guard** — Both handlers used `(args.limit as number) || 50` inside `Math.min(Math.max(...))` without checking that `args.limit` is actually a number. A numeric string like `"50"` coerces silently, but a non-numeric string like `"abc"` produces `NaN` inside `Math.max`, which propagates through both `Math.max` and `Math.min` as `NaN`, meaning the unclamped NaN is forwarded to the IMAP service. This was inconsistent with the type guards added for `get_contacts.limit` and `get_volume_trends.days` in Cycle #24. Added: `if (args.limit !== undefined && typeof args.limit !== "number") throw new McpError(InvalidParams, "'limit' must be a number.")` in both handlers.
+
+2. **`search_emails` — no cross-validation of `dateFrom`/`dateTo` when both are provided** — When a caller supplies both `dateFrom` and `dateTo`, no check was made that `dateFrom` is not later than `dateTo`. A reversed range (e.g. `dateFrom: "2024-12-31"`, `dateTo: "2024-01-01"`) would be forwarded directly to imapflow's `IMAP SEARCH BEFORE/SINCE` commands, silently returning zero results with no indication of a caller error. Added a cross-validation guard: when both fields are present and both parse as valid dates, `Date.parse(dateFrom) > Date.parse(dateTo)` triggers `McpError(InvalidParams, "'dateFrom' must not be later than 'dateTo'.")`.
+
+3. **`download_attachment` — `attachment_index` has no upper bound** — The existing guard checked `!Number.isInteger(rawAttIdx) || rawAttIdx < 0` but allowed arbitrarily large values such as 999999. While the service would return `null` for a missing attachment, scanning that far through attachment metadata arrays (especially large multi-part emails) wastes resources and is almost certainly a caller error. Added: `if (rawAttIdx > MAX_ATTACHMENT_INDEX) throw McpError(InvalidParams, ...)` with `MAX_ATTACHMENT_INDEX = 50` (a generous ceiling for any real email).
+
+### Changes
+
+- `src/index.ts`: Added `limit` type guard in `get_emails` (3 lines). Added `limit` type guard and `dateFrom`/`dateTo` cross-validation in `search_emails` (10 lines). Added `MAX_ATTACHMENT_INDEX = 50` constant and upper-bound guard in `download_attachment` (5 lines).
+- `src/utils/helpers.test.ts`: Added 31 new tests covering all three new guard paths: `limit` type guard (12 tests), `dateFrom`/`dateTo` cross-validation (8 tests), `attachment_index` upper bound (11 tests).
+
+### Test Results
+
+**Before:** 504 tests passing
+**After:** 535 tests passing (+31)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #24 — schedule_email guards, send_at McpError consistency, get_contacts/get_volume_trends numeric type validation
 **Timestamp:** 2026-03-18
 **Branch:** main
