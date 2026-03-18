@@ -1,7 +1,20 @@
 # Final Security & Quality Audit Report
 ## Codebase: protonmail-mcp-server
 ## Date: 2026-03-18
-## Cycles completed: 20
+## Cycles completed: 21
+
+### Cycle #21 Addendum
+
+Cycle #21 identified and fixed four documentation accuracy issues that survived the 20-cycle series:
+
+1. **`package.json` description** — "45 tools" corrected to "47 tools". This field is displayed on the npm registry and in `npm search` results.
+2. **`CHANGELOG.md [Unreleased]` heading** — "Cycles #1–#15" corrected to "Cycles #1–#19".
+3. **`CHANGELOG.md [Unreleased]` test count** — Baseline corrected from 281 to 212; net-new delta corrected from +135 to +204.
+4. **`CHANGELOG.md [Unreleased]` missing Documentation section** — Added 7-item section documenting Cycles 16–19 improvements (README, MCP Prompts table, settings UI, outputSchema completeness).
+
+No code changes. Build clean. 416/416 tests pass. Commit `101c528`.
+
+---
 
 ---
 

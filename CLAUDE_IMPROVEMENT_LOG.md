@@ -4,6 +4,55 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #21
+**Timestamp:** 2026-03-18 06:15–06:30 Eastern
+**Git commit:** `101c528`
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 416/416 tests passing — no regressions from previous cycles.
+
+**Phase 0 — Architecture:** No structural changes since Cycle 20. 47 tools, 5 services, 14 test files confirmed.
+
+**Phase 1–3 — Functionality / Logic / Security:** No new HIGH, MEDIUM, or LOW security issues found. All previously resolved items remain resolved. Zero `as any` casts in production code. All handler-level guards in place.
+
+**Phase 4 — Documentation audit (new findings):**
+
+1. **`package.json` description — stale tool count:** Line 4 said "45 tools" — actual count is 47 (confirmed by counting all tool `name:` declarations in the ListTools handler). This field is displayed on the npm registry page and in npm search results.
+
+2. **`CHANGELOG.md [Unreleased]` section heading — stale cycle range:** Heading said "Cycles #1–#15" — cycles #16 through #19 all made meaningful changes (README accuracy, prompts table, settings UI fix, outputSchema completeness for 4 tools). The heading was not updated when those cycles added their CHANGELOG entries.
+
+3. **`CHANGELOG.md [Unreleased]` test count — two wrong numbers:** "was 281 before Cycle #1" is incorrect; Cycle 1 completed with 212 tests (and added 0 new tests, so baseline was 212). "+135 tests" is also incorrect; net new tests from Cycles 1–19 = 416 - 212 = 204.
+
+4. **`CHANGELOG.md [Unreleased]` — no Documentation section:** Cycles 16–19 made significant documentation and outputSchema improvements that were absent from the CHANGELOG. Added a `### Documentation` subsection covering 7 items.
+
+### Work Completed This Cycle
+
+1. **`package.json` description** — Changed "45 tools" to "47 tools". (1 line)
+
+2. **`CHANGELOG.md [Unreleased]` heading** — Changed "Cycles #1–#15" to "Cycles #1–#19". (1 line)
+
+3. **`CHANGELOG.md [Unreleased]` test count** — Corrected baseline from 281 to 212 and delta from +135 to +204. (1 line)
+
+4. **`CHANGELOG.md [Unreleased]` Documentation section** — Added 7-item `### Documentation` subsection documenting Cycle #16–#19 improvements (README tool count, MCP Prompts table, settings UI correction, outputSchema accuracy for `get_connection_status`, `list_scheduled_emails`, `get_email_analytics`, `get_contacts`).
+
+### Validation Results
+
+- `npm run build`: Clean (zero TypeScript errors)
+- `npm test`: 416/416 tests pass
+
+### Git Status
+
+- Commit: `101c528`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+
+The codebase is in excellent condition. All security issues resolved, zero `as any` casts, 416 tests, accurate documentation. Remaining deferred items (cursor HMAC binding, proactive IMAP reconnect) remain low-priority. No urgent work identified for next cycle.
+
+---
+
 ## Cycle #20 — FINAL AUDIT REPORT (NO CODE CHANGES)
 **Timestamp:** 2026-03-18 05:15–05:30 Eastern
 **Git commit:** (state files only)
