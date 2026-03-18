@@ -1625,6 +1625,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_emails": {
         const folder = (args.folder as string) || "INBOX";
+        // Validate folder before passing to IMAP — prevents path traversal (e.g. ../../etc).
+        const geValidErr = validateTargetFolder(folder);
+        if (geValidErr) throw new McpError(ErrorCode.InvalidParams, geValidErr);
         const limit = Math.min(Math.max(1, (args.limit as number) || 50), 200);
 
         // Decode cursor for offset, or start at 0
@@ -1891,26 +1894,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "move_email": {
+        // Validate emailId format — must be a numeric UID string.
+        const mvEmailId = args.emailId as string;
+        if (!mvEmailId || typeof mvEmailId !== "string" || !/^\d+$/.test(mvEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
         // Validate targetFolder before passing to IMAP — prevents path traversal
         // attacks such as "../../etc/passwd" style folder names.
         const mvValidErr = validateTargetFolder(args.targetFolder);
         if (mvValidErr) throw new McpError(ErrorCode.InvalidParams, mvValidErr);
-        await imapService.moveEmail(args.emailId as string, args.targetFolder as string);
+        await imapService.moveEmail(mvEmailId, args.targetFolder as string);
         return actionOk();
       }
 
       case "archive_email": {
-        await imapService.moveEmail(args.emailId as string, "Archive");
+        const aeEmailId = args.emailId as string;
+        if (!aeEmailId || typeof aeEmailId !== "string" || !/^\d+$/.test(aeEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
+        await imapService.moveEmail(aeEmailId, "Archive");
         return actionOk();
       }
 
       case "move_to_trash": {
-        await imapService.moveEmail(args.emailId as string, "Trash");
+        const mttEmailId = args.emailId as string;
+        if (!mttEmailId || typeof mttEmailId !== "string" || !/^\d+$/.test(mttEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
+        await imapService.moveEmail(mttEmailId, "Trash");
         return actionOk();
       }
 
       case "move_to_spam": {
-        await imapService.moveEmail(args.emailId as string, "Spam");
+        const mtsEmailId = args.emailId as string;
+        if (!mtsEmailId || typeof mtsEmailId !== "string" || !/^\d+$/.test(mtsEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
+        await imapService.moveEmail(mtsEmailId, "Spam");
         return actionOk();
       }
 
@@ -1927,7 +1947,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "bulk_mark_read": {
         const bmrIds = Array.isArray(args.emailIds) ? args.emailIds : [];
         const bmrEmailIds: string[] = bmrIds
-          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
         const bmrIsRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
         const bmrTotal = bmrEmailIds.length;
@@ -1949,7 +1969,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "bulk_star": {
         const bsIds = Array.isArray(args.emailIds) ? args.emailIds : [];
         const bsEmailIds: string[] = bsIds
-          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
         const bsIsStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
         const bsTotal = bsEmailIds.length;
@@ -1972,10 +1992,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validate targetFolder before touching any email — same guards as move_email.
         const bmValidErr = validateTargetFolder(args.targetFolder);
         if (bmValidErr) throw new McpError(ErrorCode.InvalidParams, bmValidErr);
-        // Validate and sanitize input — reject non-string IDs, cap array size
+        // Validate and sanitize input — reject non-string and non-numeric IDs, cap array size
         const rawIds = Array.isArray(args.emailIds) ? args.emailIds : [];
         const emailIds: string[] = rawIds
-          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
         const targetFolder = args.targetFolder as string;
         const total = emailIds.length;
@@ -2017,7 +2037,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "bulk_move_to_label": {
         const rawIds2 = Array.isArray(args.emailIds) ? args.emailIds : [];
         const emailIds2: string[] = rawIds2
-          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
         const rawLabel = args.label as string;
         if (!rawLabel || typeof rawLabel !== "string" || !rawLabel.trim()) {
@@ -2062,7 +2082,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "bulk_remove_label": {
         const brlIds = Array.isArray(args.emailIds) ? args.emailIds : [];
         const brlEmailIds: string[] = brlIds
-          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
         const brlRawTarget = args.targetFolder as string | undefined;
         // Validate caller-supplied targetFolder — same guards as remove_label.
@@ -2088,7 +2108,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "delete_email": {
-        await imapService.deleteEmail(args.emailId as string);
+        const deEmailId = args.emailId as string;
+        if (!deEmailId || typeof deEmailId !== "string" || !/^\d+$/.test(deEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
+        await imapService.deleteEmail(deEmailId);
         analyticsCache = null; analyticsCacheInflight = null;
         return actionOk();
       }
@@ -2097,7 +2121,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "bulk_delete_emails": {
         const rawIds3 = Array.isArray(args.emailIds) ? args.emailIds : [];
         const emailIds3: string[] = rawIds3
-          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
         const total3 = emailIds3.length;
         const results3 = { success: 0, failed: 0, errors: [] as string[] };

@@ -680,4 +680,159 @@ describe('helpers', () => {
       expect(isInvalidEmailId('12\x0034')).toBe(true);
     });
   });
+
+  // ── Cycle #8: archive_email / move_to_trash / move_to_spam / move_email / delete_email
+  //    All five handlers now use the same numeric UID guard before calling the IMAP service.
+  //    Tests exercise the guard logic directly (same regex as in-handler code).
+  describe('archive_email / move_to_trash / move_to_spam / move_email / delete_email handler validation (numeric emailId guard)', () => {
+    // Helper mirrors the in-handler guard: !emailId || typeof emailId !== "string" || !/^\d+$/.test(emailId)
+    const isInvalidMoveId = (id: unknown): boolean =>
+      !id || typeof id !== 'string' || !/^\d+$/.test(id as string);
+
+    it('valid "42" passes guard', () => {
+      expect(isInvalidMoveId('42')).toBe(false);
+    });
+
+    it('valid "1" passes guard', () => {
+      expect(isInvalidMoveId('1')).toBe(false);
+    });
+
+    it('valid "999999" passes guard', () => {
+      expect(isInvalidMoveId('999999')).toBe(false);
+    });
+
+    it('empty string triggers guard', () => {
+      expect(isInvalidMoveId('')).toBe(true);
+    });
+
+    it('alphabetic "abc" triggers guard', () => {
+      expect(isInvalidMoveId('abc')).toBe(true);
+    });
+
+    it('mixed "12x" triggers guard', () => {
+      expect(isInvalidMoveId('12x')).toBe(true);
+    });
+
+    it('negative "-5" triggers guard', () => {
+      expect(isInvalidMoveId('-5')).toBe(true);
+    });
+
+    it('float "3.14" triggers guard', () => {
+      expect(isInvalidMoveId('3.14')).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isInvalidMoveId(null)).toBe(true);
+    });
+
+    it('undefined triggers guard', () => {
+      expect(isInvalidMoveId(undefined)).toBe(true);
+    });
+
+    it('null-byte "7\x008" triggers guard', () => {
+      expect(isInvalidMoveId('7\x008')).toBe(true);
+    });
+  });
+
+  // ── Cycle #8: get_emails handler — folder validated with validateTargetFolder ──────────
+  describe('get_emails handler validation (validateTargetFolder for folder arg)', () => {
+    it('INBOX passes validation', () => {
+      expect(validateTargetFolder('INBOX')).toBeNull();
+    });
+
+    it('Folders/Work passes validation', () => {
+      expect(validateTargetFolder('Folders/Work')).toBeNull();
+    });
+
+    it('empty string passes validation (caller uses default INBOX)', () => {
+      expect(validateTargetFolder('')).toBeNull();
+    });
+
+    it('undefined passes validation (caller uses default INBOX)', () => {
+      expect(validateTargetFolder(undefined)).toBeNull();
+    });
+
+    it('path traversal "../../etc/passwd" fails validation', () => {
+      expect(validateTargetFolder('../../etc/passwd')).not.toBeNull();
+    });
+
+    it('embedded traversal "Labels/../INBOX" fails validation', () => {
+      expect(validateTargetFolder('Labels/../INBOX')).not.toBeNull();
+    });
+
+    it('null byte "INBOX\x00evil" fails validation', () => {
+      expect(validateTargetFolder('INBOX\x00evil')).not.toBeNull();
+    });
+
+    it('over-limit (1001 chars) fails validation', () => {
+      expect(validateTargetFolder('A'.repeat(1001))).not.toBeNull();
+    });
+
+    it('exact limit (1000 chars) passes validation', () => {
+      expect(validateTargetFolder('A'.repeat(1000))).toBeNull();
+    });
+  });
+
+  // ── Cycle #8: bulk operations — array items filtered to numeric UIDs only ────────────
+  //    bulk_delete_emails, bulk_move_emails, bulk_mark_read, bulk_star,
+  //    bulk_move_to_label, bulk_remove_label all now use /^\d+$/.test(id) filter.
+  describe('bulk operation array-item numeric UID filter', () => {
+    // Helper mirrors the in-handler filter: typeof id === "string" && /^\d+$/.test(id)
+    const isValidBulkId = (id: unknown): boolean =>
+      typeof id === 'string' && /^\d+$/.test(id as string);
+
+    it('valid "42" passes filter', () => {
+      expect(isValidBulkId('42')).toBe(true);
+    });
+
+    it('valid "1" passes filter', () => {
+      expect(isValidBulkId('1')).toBe(true);
+    });
+
+    it('valid "100000" passes filter', () => {
+      expect(isValidBulkId('100000')).toBe(true);
+    });
+
+    it('empty string is excluded by filter', () => {
+      expect(isValidBulkId('')).toBe(false);
+    });
+
+    it('alphabetic "abc" is excluded by filter', () => {
+      expect(isValidBulkId('abc')).toBe(false);
+    });
+
+    it('mixed "12x" is excluded by filter', () => {
+      expect(isValidBulkId('12x')).toBe(false);
+    });
+
+    it('negative "-3" is excluded by filter', () => {
+      expect(isValidBulkId('-3')).toBe(false);
+    });
+
+    it('float "2.5" is excluded by filter', () => {
+      expect(isValidBulkId('2.5')).toBe(false);
+    });
+
+    it('null is excluded by filter', () => {
+      expect(isValidBulkId(null)).toBe(false);
+    });
+
+    it('undefined is excluded by filter', () => {
+      expect(isValidBulkId(undefined)).toBe(false);
+    });
+
+    it('number 42 (not string) is excluded by filter', () => {
+      expect(isValidBulkId(42)).toBe(false);
+    });
+
+    it('null-byte "5\x006" is excluded by filter', () => {
+      expect(isValidBulkId('5\x006')).toBe(false);
+    });
+
+    it('array of mixed inputs filters to numeric UIDs only', () => {
+      const raw = ['42', 'abc', '', '-1', '100', null, undefined, '3.14', '7'];
+      const valid = raw.filter((id): id is string => typeof id === 'string' && /^\d+$/.test(id as string));
+      expect(valid).toEqual(['42', '100', '7']);
+    });
+  });
 });
