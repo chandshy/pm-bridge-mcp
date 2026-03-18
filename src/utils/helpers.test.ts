@@ -589,80 +589,109 @@ describe('helpers', () => {
     });
   });
 
-  // ── create_folder / delete_folder handler validation (validateFolderName) ──
+  // ── create_folder / delete_folder handler validation (validateTargetFolder) ──
+  // Handlers now use validateTargetFolder so full IMAP paths like "Folders/Work"
+  // and "Labels/Archive" are accepted (Proton Bridge requires the prefix).
+  //
+  // Note: validateTargetFolder returns null for null/undefined/"" by design —
+  // those are "omitted" signals and the handler performs a separate non-empty
+  // check.  The tests below reflect the function's own contract.
 
-  describe('create_folder / delete_folder handler validation (validateFolderName)', () => {
-    // Replicates the guard: validateFolderName(args.folderName)
-    it('valid folder name "Work" returns null (no error)', () => {
-      expect(validateFolderName('Work')).toBeNull();
+  describe('create_folder / delete_folder handler validation (validateTargetFolder)', () => {
+    // Replicates the guard: validateTargetFolder(args.folderName)
+    it('leaf folder name "Work" returns null (no error)', () => {
+      expect(validateTargetFolder('Work')).toBeNull();
     });
 
-    it('valid folder name with unicode returns null', () => {
-      expect(validateFolderName('Receipts-2024')).toBeNull();
+    it('full Proton path "Folders/Work" returns null (slash allowed)', () => {
+      expect(validateTargetFolder('Folders/Work')).toBeNull();
     });
 
-    it('empty string returns error', () => {
-      expect(validateFolderName('')).not.toBeNull();
+    it('full Proton label path "Labels/Archive" returns null', () => {
+      expect(validateTargetFolder('Labels/Archive')).toBeNull();
     });
 
-    it('whitespace-only string returns error', () => {
-      expect(validateFolderName('   ')).not.toBeNull();
+    it('deeply nested path "Folders/Work/Q1" returns null', () => {
+      expect(validateTargetFolder('Folders/Work/Q1')).toBeNull();
     });
 
-    it('null returns error', () => {
-      expect(validateFolderName(null)).not.toBeNull();
+    it('valid name with digits "Receipts-2024" returns null', () => {
+      expect(validateTargetFolder('Receipts-2024')).toBeNull();
     });
 
-    it('undefined returns error', () => {
-      expect(validateFolderName(undefined)).not.toBeNull();
+    // null / undefined / "" → null (omitted → caller uses default; handler adds
+    // a separate non-empty guard so the MCP tool still rejects these at runtime)
+    it('null returns null (omitted/default passthrough)', () => {
+      expect(validateTargetFolder(null)).toBeNull();
     });
 
-    it('name containing "/" returns error (leaf segment only)', () => {
-      expect(validateFolderName('Folders/Work')).not.toBeNull();
+    it('undefined returns null (omitted/default passthrough)', () => {
+      expect(validateTargetFolder(undefined)).toBeNull();
+    });
+
+    it('empty string returns null (omitted/default passthrough)', () => {
+      expect(validateTargetFolder('')).toBeNull();
+    });
+
+    it('non-string value (number 42) returns error', () => {
+      expect(validateTargetFolder(42)).not.toBeNull();
     });
 
     it('traversal ".." returns error', () => {
-      expect(validateFolderName('..')).not.toBeNull();
+      expect(validateTargetFolder('..')).not.toBeNull();
+    });
+
+    it('embedded traversal "Folders/../INBOX" returns error', () => {
+      expect(validateTargetFolder('Folders/../INBOX')).not.toBeNull();
     });
 
     it('name with null byte returns error', () => {
-      expect(validateFolderName('Work\x00Evil')).not.toBeNull();
+      expect(validateTargetFolder('Work\x00Evil')).not.toBeNull();
     });
 
     it('name with C0 control char returns error', () => {
-      expect(validateFolderName('Work\x1fEvil')).not.toBeNull();
+      expect(validateTargetFolder('Work\x1fEvil')).not.toBeNull();
     });
 
-    it('exact 255-char name returns null (at limit)', () => {
-      expect(validateFolderName('a'.repeat(255))).toBeNull();
+    it('exact 1000-char name returns null (at limit)', () => {
+      expect(validateTargetFolder('a'.repeat(1000))).toBeNull();
     });
 
-    it('256-char name returns error (over limit)', () => {
-      expect(validateFolderName('a'.repeat(256))).not.toBeNull();
+    it('1001-char name returns error (over limit)', () => {
+      expect(validateTargetFolder('a'.repeat(1001))).not.toBeNull();
     });
   });
 
-  // ── rename_folder handler validation (validateFolderName for oldName/newName) ──
+  // ── rename_folder handler validation (validateTargetFolder for oldName/newName) ──
+  // Both oldName and newName now accept full IMAP paths (e.g. "Folders/Archive").
 
-  describe('rename_folder handler validation (validateFolderName for oldName and newName)', () => {
+  describe('rename_folder handler validation (validateTargetFolder for oldName and newName)', () => {
     it('valid oldName "Archive" returns null', () => {
-      expect(validateFolderName('Archive')).toBeNull();
+      expect(validateTargetFolder('Archive')).toBeNull();
     });
 
     it('valid newName "Archive-Old" returns null', () => {
-      expect(validateFolderName('Archive-Old')).toBeNull();
+      expect(validateTargetFolder('Archive-Old')).toBeNull();
+    });
+
+    it('full path oldName "Folders/Archive" returns null', () => {
+      expect(validateTargetFolder('Folders/Archive')).toBeNull();
+    });
+
+    it('full path newName "Folders/Archive-2024" returns null', () => {
+      expect(validateTargetFolder('Folders/Archive-2024')).toBeNull();
     });
 
     it('oldName with path traversal "../INBOX" returns error', () => {
-      expect(validateFolderName('../INBOX')).not.toBeNull();
+      expect(validateTargetFolder('../INBOX')).not.toBeNull();
     });
 
-    it('newName that is empty returns error', () => {
-      expect(validateFolderName('')).not.toBeNull();
+    it('empty string returns null (omitted passthrough — handler rejects separately)', () => {
+      expect(validateTargetFolder('')).toBeNull();
     });
 
-    it('newName containing "/" returns error', () => {
-      expect(validateFolderName('New/Name')).not.toBeNull();
+    it('newName with embedded traversal "New/../Name" returns error', () => {
+      expect(validateTargetFolder('New/../Name')).not.toBeNull();
     });
   });
 

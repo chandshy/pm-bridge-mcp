@@ -2399,26 +2399,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "create_folder": {
-        // Validate folderName before passing to IMAP — returns clean McpError
-        // rather than letting the service throw a raw Error.
-        const cfValidErr = validateFolderName(args.folderName);
+        // Use validateTargetFolder (allows the / separator needed for full IMAP
+        // paths like "Folders/Archive" or "Labels/Work") rather than
+        // validateFolderName (which was designed for leaf-only names and rejects /).
+        const cfValidErr = validateTargetFolder(args.folderName);
         if (cfValidErr) throw new McpError(ErrorCode.InvalidParams, cfValidErr);
+        if (!args.folderName || typeof args.folderName !== "string" || !(args.folderName as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "folderName must be a non-empty string.");
+        }
         await imapService.createFolder(args.folderName as string);
         return actionOk();
       }
 
       case "delete_folder": {
-        const dfValidErr = validateFolderName(args.folderName);
+        const dfValidErr = validateTargetFolder(args.folderName);
         if (dfValidErr) throw new McpError(ErrorCode.InvalidParams, dfValidErr);
+        if (!args.folderName || typeof args.folderName !== "string" || !(args.folderName as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "folderName must be a non-empty string.");
+        }
         await imapService.deleteFolder(args.folderName as string);
         return actionOk();
       }
 
       case "rename_folder": {
-        const rfOldErr = validateFolderName(args.oldName);
+        const rfOldErr = validateTargetFolder(args.oldName);
         if (rfOldErr) throw new McpError(ErrorCode.InvalidParams, `oldName: ${rfOldErr}`);
-        const rfNewErr = validateFolderName(args.newName);
+        if (!args.oldName || typeof args.oldName !== "string" || !(args.oldName as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "oldName must be a non-empty string.");
+        }
+        const rfNewErr = validateTargetFolder(args.newName);
         if (rfNewErr) throw new McpError(ErrorCode.InvalidParams, `newName: ${rfNewErr}`);
+        if (!args.newName || typeof args.newName !== "string" || !(args.newName as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "newName must be a non-empty string.");
+        }
         // Guard against a no-op rename — renaming a folder to the same name would
         // result in a spurious IMAP RENAME command that servers may reject with a
         // cryptic "Mailbox already exists" error rather than a clear message.
