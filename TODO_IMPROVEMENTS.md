@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #14 (2026-03-18)
+Last updated: Cycle #16 (2026-03-18)
 
 ---
 
@@ -173,11 +173,11 @@ Both handlers now call `validateLabelName()` instead of 3 inline if-blocks each.
 
 ## NEW — Cycle #14 Findings
 
-### 30. `save_draft` / `schedule_email` attachment validation (carried from Cycle #8)
-**File:** `src/index.ts`
-**Issue:** `args.attachments as any` is passed through without handler-level validation of attachment object shape (name, contentType, content). The service sanitizes contentType and filename internally, but the handler performs no early rejection of malformed objects.
-**Effort:** LOW–MEDIUM
-**Risk:** LOW
+### [DONE - Cycle 15] `save_draft` / `schedule_email` / `send_email` attachment validation (carried from Cycle #8)
+Added `validateAttachments()` helper to `src/utils/helpers.ts`. Called in all three handlers. Returns `McpError(InvalidParams)` for non-array input, primitive array items, missing/wrong-type filename, missing/null/wrong-type content, or wrong-type contentType. 23 new tests added. 416 tests total.
+
+### [DONE - Cycle 16] README accuracy — tool count and `get_connection_status` description
+Corrected tool count from 45 → 47 in README tagline, README Full Access preset row, and CHANGELOG [2.1.0]. Extended `get_connection_status` table description to mention `imap.healthy` (NOOP probe) and `insecureTls` fields. Added comprehensive `[Unreleased]` CHANGELOG section documenting all Cycle #1–#15 improvements.
 
 ### 31. `ensureConnection()` friendly error wrapping (carried from Cycle #12, assessed in Cycle #14)
 **File:** `src/services/simple-imap-service.ts`

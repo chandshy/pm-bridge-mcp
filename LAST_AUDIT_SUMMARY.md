@@ -1,57 +1,56 @@
-# Last Audit Summary — Cycle #14
-**Date:** 2026-03-18 03:35 Eastern
+# Last Audit Summary — Cycle #16
+**Date:** 2026-03-18 04:05 Eastern
 **Auditor:** Claude Sonnet 4.6 (auto-improve cycle)
 
 ---
 
 ## Scope
 
-This cycle performed a focused audit of the three items carried forward from Cycle #13's "Next Cycle Focus":
-
-- `src/index.ts` — `move_to_label` and `bulk_move_to_label` handler inline label validation blocks
-- `src/index.ts` — `get_connection_status` handler: whether `healthCheck()` was wired in
-- `src/services/simple-imap-service.ts` — `ensureConnection()` / `reconnect()` error message clarity
+This cycle performed a README accuracy audit:
+- `README.md` — tool count claims, `get_connection_status` description, tool table completeness
+- `src/index.ts` — authoritative tool list (all `server.tool()` registrations)
+- `CHANGELOG.md` — coverage of cycles 1–15 improvements
 
 ---
 
 ## Issues Confirmed / Fixed This Cycle
 
-**[DONE] Inline label validation — `move_to_label` and `bulk_move_to_label`**
+**[DONE] Tool count incorrect throughout README and CHANGELOG**
 
-Both handlers contained 3 consecutive inline if-blocks (empty/whitespace check, control-char/slash/traversal check, length check) duplicating logic that already existed in `validateLabelName()` in `helpers.ts`. The helper was already imported in `src/index.ts` and already used in the `get_emails_by_label` handler at line 1718. Both handlers refactored:
-- `move_to_label`: 9 lines → 2 lines (`mtlValidErr = validateLabelName(label)` + throw guard)
-- `bulk_move_to_label`: 9 lines → 2 lines (`bmlValidErr = validateLabelName(rawLabel)` + throw guard)
-- Net: -14 lines in `src/index.ts`. Behavior identical; existing `validateLabelName` tests provide full coverage.
+The README tagline said "45 tools" and Full Access preset description said "All 45 tools". The CHANGELOG [2.1.0] said "5 new tools (45 total)". Inspection of `src/index.ts` lines 292–1324 shows **47 tools** registered via `server.tool()`. The pre-cycle codebase already had 47 tools; the documentation was simply never corrected after the v2.1.0 release notes were written.
 
-**[DONE] `healthCheck()` wired into `get_connection_status`**
+Fix: Updated all three occurrences (README tagline, README Full Access row, CHANGELOG) to 47.
 
-`get_connection_status` returned `imap.connected: imapService.isActive()` (flag check only). `healthCheck()` — added in Cycle #13 — was not called anywhere. Fixed by:
-- Adding `healthy: await imapService.healthCheck()` to the `imap` sub-object in the handler response.
-- Adding `healthy: { type: "boolean" }` to the `outputSchema` `imap.properties` block.
+**[DONE] `get_connection_status` description incomplete**
 
-The `healthy` field now reflects whether a real NOOP round-trip to the IMAP server succeeded, which detects silent TCP drops that `isActive()` cannot catch.
+The README table one-liner did not mention `imap.healthy` (the live NOOP probe added in Cycle #14) or the `insecureTls` fields (added in v2.1.0). The description was extended to note these fields explicitly.
 
-**[ASSESSED / SKIPPED] `ensureConnection()` error message clarity**
+**[DONE] CHANGELOG had no entry for cycles 1–15 work**
 
-Reviewed `ensureConnection()` → `reconnect()` → `connect()` chain. The logger emits `"IMAP connection lost, attempting to reconnect"` as a warning before the reconnect attempt, and `"IMAP connection failed"` with the full error object if it fails. These messages are contextually clear. Skipped as instructed.
+Added a comprehensive `[Unreleased]` section covering security hardening, type safety improvements, DRY refactoring, JSDoc coverage, and test suite growth from Cycles #1–#15.
 
 ---
 
 ## New Findings This Cycle
 
-### 30. `save_draft` / `schedule_email` attachment validation
-Both handlers pass `args.attachments as any` without handler-level shape validation. The service (`saveDraft`) sanitizes contentType and filename internally, but a malformed attachment array could produce confusing errors from deeper in the stack. Low effort, low risk.
+### README — 5 MCP Prompts not listed in tool table (intentional, not a bug)
+The README does have a "MCP Prompts" subsection that lists the 3 prompts visible in the tool documentation (`compose_reply`, `thread_summary`, `find_subscriptions`). However, `src/index.ts` registers 5 prompts: `triage_inbox`, `compose_reply`, `daily_briefing`, `find_subscriptions`, `thread_summary`. The README only mentions 3. This could be updated to list all 5. Low priority.
 
-### 31. `ensureConnection()` friendly error wrapping (assessed, low priority)
-Raw imapflow errors still propagate on reconnect failure. Existing logger context is adequate. Defer unless a concrete user-facing complaint surfaces.
+### `bulk_delete` alias — README could clarify it's an alias
+The README table for `bulk_delete` says "Alias for `bulk_delete_emails`" — this is accurate. No change needed.
+
+### Cursor token HMAC binding (Item #5, still open)
+Still a future/architectural improvement. No new information.
 
 ---
 
 ## Confirmed Clean Areas
 
-- Zero avoidable `as any` casts (confirmed intact from Cycles #10–#12)
-- All Cycle #1–#13 security fixes confirmed intact
-- 393 tests pass (unchanged from Cycle #13)
+- Tool table in README is complete — all 47 tools are listed.
+- `get_connection_status` outputSchema in `src/index.ts` accurately documents `imap.healthy` (added Cycle #14).
+- 5 newest tools (`save_draft`, `schedule_email`, `list_scheduled_emails`, `cancel_scheduled_email`, `download_attachment`) described accurately in README.
+- Zero avoidable `as any` casts (confirmed from Cycles #10–#12, unchanged).
+- **416 tests pass** (unchanged from Cycle #15).
 
 ---
 
@@ -60,7 +59,7 @@ Raw imapflow errors still propagate on reconnect failure. Existing logger contex
 | Severity | Count | Status |
 |----------|-------|--------|
 | HIGH     | 0     | — |
-| MEDIUM   | 0     | — |
-| LOW      | 2     | Item 30 (attachment validation) + Item 31 (ensureConnection clarity, low priority) |
+| MEDIUM   | 1     | Tool count wrong in README + CHANGELOG — FIXED |
+| LOW      | 2     | `get_connection_status` desc incomplete — FIXED; 5 MCP prompts not all listed — deferred |
 
-Next focus: Item 30 (save_draft/schedule_email attachment handler-level validation); Item 14 from backlog (save_draft/schedule_email attachment validation — same item, confirmed still open). Item 27/31 remains low priority unless a usability complaint surfaces.
+Next focus: Cycle #17 — With documentation now accurate, consider whether further code-level improvements remain. Candidates: (a) cursor HMAC binding (Item #5), (b) `ensureConnection()` friendly error wrapping (Item #31, low priority), (c) listing all 5 MCP prompts in README. Alternatively, declare the codebase mature and use remaining cycles for a comprehensive final audit report.

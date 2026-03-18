@@ -4,6 +4,99 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #16
+**Timestamp:** 2026-03-18 04:05–04:20 Eastern
+**Git commit:** `be30584`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights
+
+**Tool count discrepancy discovered:**
+The README tagline claimed "45 tools" and the Full Access preset description said "All 45 tools". Examination of the actual `server.tool()` registrations in `src/index.ts` (lines 292–1324) revealed **47 tools**. The CHANGELOG [2.1.0] also incorrectly stated "5 new tools (45 total)". All three occurrences were corrected to 47.
+
+The discrepancy appears to have existed since before any autonomous cycles — the original codebase already had 47 tools, but the CHANGELOG and README were written assuming the original pre-security-hardening count of 45 without accounting for `bulk_delete` (alias) and `forward_email` which were both present from the start.
+
+**`imap.healthy` not mentioned in README:**
+As flagged in Cycle #15 LAST_AUDIT_SUMMARY: the `get_connection_status` tool description in the README table only said "SMTP/IMAP connection health, config path, settings status". The tool actually returns `imap.healthy` (live NOOP probe result from Cycle #14) and `insecureTls` flags for both SMTP and IMAP. The description was updated to mention these fields.
+
+**CHANGELOG missing cycles 1–15 work:**
+CHANGELOG only had version-tagged releases. A new `[Unreleased]` section was added documenting all security hardening, type safety improvements, DRY refactoring, and test coverage additions from Cycles #1–#15.
+
+**5 MCP Prompts confirmed separate from tools:**
+Lines 2324–2359 in `src/index.ts` contain 5 MCP prompts (`triage_inbox`, `compose_reply`, `daily_briefing`, `find_subscriptions`, `thread_summary`) registered separately from tools. The README correctly does not count these as tools.
+
+### Work Completed This Cycle
+
+1. **README tagline** — "45 tools" → "47 tools"
+2. **README Full Access preset** — "All 45 tools" → "All 47 tools"
+3. **README `get_connection_status` description** — extended to mention `imap.healthy` (NOOP probe) and `insecureTls` flags
+4. **CHANGELOG [2.1.0]** — "5 new tools (45 total)" → "5 new tools (47 total)"
+5. **CHANGELOG `[Unreleased]` section added** — comprehensive entry covering all security, type safety, and DRY improvements from Cycles #1–#15
+
+### Validation Results
+
+- Build: clean (`tsc` exit 0)
+- Tests: **416 passed**, 0 failed (14 test files)
+
+---
+
+## Cycle #15
+**Timestamp:** 2026-03-18 03:50–04:00 Eastern
+**Git commit:** `14830d5`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights
+
+**Phase 1 — `save_draft` / `schedule_email` / `send_email` attachment shape validation (Item #30):**
+All three handlers passed `args.attachments as EmailAttachment[] | undefined` directly to the service layer without any handler-level shape validation. If a caller supplied `attachments: ["string"]` or `attachments: [{filename: 123, content: null}]`, the error would surface deep inside nodemailer/mailcomposer with a confusing stack trace. The service layer sanitizes MIME fields (CRLF stripping, contentType regex) but assumes the array items are already objects with string filename and Buffer/string content.
+
+**Phase 2 — Broader survey:**
+- Zero avoidable `as any` casts remain (confirmed from Cycles #10–#12).
+- All catch blocks log errors; none silently swallow. Scheduler catch blocks increment retryCount and log at warn/error.
+- No O(n²) patterns found in production paths.
+- Test count was 393; after Cycle #15 additions it is 416.
+
+### Work Completed This Cycle
+
+1. **`validateAttachments()` helper added to `src/utils/helpers.ts`**
+   - Validates that `attachments` is `undefined`, `null`, or a non-empty array of objects.
+   - Each item must have: `filename` (non-empty string), `content` (string or Buffer), `contentType` (string if present).
+   - Returns `null` on success or an error message string with the offending index (e.g. `attachments[1].content must be a base64 string or Buffer.`).
+   - Exported alongside other validators.
+
+2. **`validateAttachments` wired into all three handler sites in `src/index.ts`:**
+   - `send_email`: `seAttErr = validateAttachments(args.attachments)` → throw `McpError(InvalidParams)` on failure.
+   - `save_draft`: `sdAttErr = validateAttachments(args.attachments)` → same.
+   - `schedule_email`: `schAttErr = validateAttachments(args.attachments)` → same (placed before `send_at` checks for early rejection).
+
+3. **23 new unit tests in `src/utils/helpers.test.ts`:**
+   - null/undefined (omitted) — valid.
+   - Empty array — valid.
+   - Non-array input (object, string, number) — error.
+   - Valid single and multi-attachment arrays (string content, Buffer content, no contentType).
+   - Primitive items in array (string, null, number) — error with index.
+   - Missing/empty/wrong-type filename — error.
+   - Missing/null/wrong-type content — error.
+   - Wrong-type contentType — error.
+   - Correct index reported for second malformed item.
+
+### Validation Results
+- Build: clean (0 TypeScript errors)
+- Tests: **416 passed** (was 393 before this cycle; +23)
+
+### Git Status
+- Committed: `14830d5`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+- Item #31: `ensureConnection()` friendly error wrapping (low priority — assessed twice; skip unless usability complaint surfaces).
+- README accuracy audit — verify all 45 tools documented and descriptions match current behavior (e.g. `get_connection_status` now returns `imap.healthy`, added in Cycle #14).
+- Consider: any high-value JSDoc gaps in public helpers (none critical, but `validateAttachments` was just added and is fully documented inline).
+
+---
+
 ## Cycle #14
 **Timestamp:** 2026-03-18 03:35–03:45 Eastern
 **Git commit:** `c636c50`
