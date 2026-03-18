@@ -181,4 +181,108 @@ describe("PermissionManager", () => {
 
     expect(manager.check("send_email").allowed).toBe(false);
   });
+
+  // ─── rateLimitStatus ────────────────────────────────────────────────────────
+
+  describe("rateLimitStatus", () => {
+    it("returns empty object when loadConfig returns null", () => {
+      mockedLoadConfig.mockReturnValue(null);
+      const manager = new PermissionManager();
+      expect(manager.rateLimitStatus()).toEqual({});
+    });
+
+    it("returns empty object when no tools have rate limits", () => {
+      const config = makeConfig({
+        send_email: { enabled: true, rateLimit: null },
+        get_emails: { enabled: true, rateLimit: null },
+      });
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      expect(manager.rateLimitStatus()).toEqual({});
+    });
+
+    it("returns used=0 for a rate-limited tool with no calls made", () => {
+      const config = makeConfig({
+        delete_email: { enabled: true, rateLimit: 5 },
+      });
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      const status = manager.rateLimitStatus();
+      expect(status["delete_email"]).toEqual({ used: 0, limit: 5 });
+    });
+
+    it("returns used count matching the number of calls within the rolling window", () => {
+      const config = makeConfig({
+        delete_email: { enabled: true, rateLimit: 10 },
+      });
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      // Make 3 calls
+      manager.check("delete_email");
+      manager.check("delete_email");
+      manager.check("delete_email");
+      const status = manager.rateLimitStatus();
+      expect(status["delete_email"]).toEqual({ used: 3, limit: 10 });
+    });
+
+    it("does not include calls that have expired outside the 1-hour window", () => {
+      const config = makeConfig({
+        delete_email: { enabled: true, rateLimit: 10 },
+      });
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      manager.check("delete_email");
+      // Advance past the 1-hour rolling window
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+      const status = manager.rateLimitStatus();
+      expect(status["delete_email"]).toEqual({ used: 0, limit: 10 });
+    });
+
+    it("returns empty object when config has no permissions.tools (fallback to {})", () => {
+      // Config where permissions is missing tools entirely
+      const config: ServerConfig = {
+        configVersion: 1,
+        connection: {
+          smtpHost: "localhost", smtpPort: 1025,
+          imapHost: "localhost", imapPort: 1143,
+          username: "", password: "", smtpToken: "", bridgeCertPath: "", debug: false,
+        },
+        permissions: { preset: "custom", tools: {} as ServerConfig["permissions"]["tools"] },
+      };
+      // Remove tools to hit the ?? {} branch
+      (config.permissions as Record<string, unknown>)["tools"] = undefined;
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      expect(manager.rateLimitStatus()).toEqual({});
+    });
+  });
+
+  // ─── getResponseLimits ──────────────────────────────────────────────────────
+
+  describe("getResponseLimits", () => {
+    it("returns response limits from the loaded config", () => {
+      const config = makeConfig({});
+      (config as ServerConfig & { responseLimits: object }).responseLimits = {
+        maxResponseBytes: 512_000,
+        maxEmailBodyChars: 5_000_000,
+        maxEmailListResults: 50,
+        maxAttachmentBytes: 512_000,
+      };
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      const limits = manager.getResponseLimits();
+      expect(limits.maxEmailListResults).toBe(50);
+      expect(limits.maxResponseBytes).toBe(512_000);
+    });
+
+    it("falls back to DEFAULT_RESPONSE_LIMITS when loadConfig returns null", () => {
+      mockedLoadConfig.mockReturnValue(null);
+      mockedDefaultConfig.mockReturnValue(makeConfig({}));
+      const manager = new PermissionManager();
+      const limits = manager.getResponseLimits();
+      // Just verify the shape — defaultConfig has responseLimits undefined so it falls back
+      expect(limits).toBeDefined();
+      expect(typeof limits.maxResponseBytes).toBe("number");
+    });
+  });
 });
