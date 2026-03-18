@@ -4,8 +4,8 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
-## Cycle #22 — Security hardening: validation gaps and error pass-through
-**Timestamp:** 2026-03-18 05:30–05:50 Eastern
+## Cycle #22 — Security hardening: multi-folder traversal, UUID validation, security headers
+**Timestamp:** 2026-03-18
 **Git commit:** (see below)
 **Branch:** main
 
@@ -15,35 +15,33 @@ This file records every autonomous improvement cycle run on this codebase.
 
 **New Findings (all corrected this cycle):**
 
-1. **`safeErrorMessage` swallowed `McpError` validation messages** — When any handler threw `McpError(InvalidParams, ...)` (from `requireNumericEmailId`, `validateLabelName`, etc.), the outer `catch` block called `safeErrorMessage()` which returned "An error occurred" for most validation error text. The carefully crafted user-friendly messages (e.g. "emailId must be a non-empty numeric UID string.") were silently discarded. Fixed by adding an early `instanceof McpError` check that returns the message directly.
+1. **`search_emails` multi-folder `folders[]` array — no handler-level path traversal validation** — When callers pass `folders: ["../../etc", "INBOX"]`, the handler forwarded the array directly to the service. The service's `validateFolderName()` (private method) was called, but it did NOT check for `..` traversal sequences — only empty strings, control characters, and oversized names. A traversal path in `folders[]` would reach imapflow unguarded.
 
-2. **`reply_to_email` / `forward_email` missing `requireNumericEmailId` guard** — Both handlers passed `args.emailId as string` directly to `imapService.getEmailById()` without the numeric UID validation applied by every other single-email handler since Cycle #5. A non-numeric or traversal string silently returned null (email not found) rather than a clear `InvalidParams` error.
+2. **`cancel_scheduled_email` — no UUID format validation on `id`** — The `id` parameter was passed directly to `schedulerService.cancel()` as a raw string with no format check. The scheduler generates UUIDs for IDs, so any non-UUID value (e.g. control characters, a very long string) would iterate the entire `items` array looking for a match and log the raw value.
 
-3. **`move_to_folder` missing `requireNumericEmailId` guard** — The `emailId` argument was passed as `args.emailId as string` directly to `imapService.moveEmail()`, bypassing the numeric UID guard. All other move/action handlers use `requireNumericEmailId()`.
+3. **Settings HTML response — missing security headers** — The `json()` helper at the top of `src/settings/server.ts` emits `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy`. The HTML page response at `GET /` included `Content-Security-Policy` but was missing all three of those headers plus `Cache-Control`.
 
-4. **`sync_emails` folder argument not validated** — `args.folder` was passed directly to `imapService.getEmails()` without calling `validateTargetFolder()`. A path traversal string (e.g. `../../etc`) could be passed as the folder argument. Every other handler that accepts a folder string validates it first; `sync_emails` was the sole exception.
+4. **Service-level `validateFolderName()` — no `..` traversal check** — The private method in `SimpleIMAPService` validated for empty, too-long, and control characters but did not reject folder names containing `..`. Handler-level guards (`validateTargetFolder`) caught traversal for most paths, but the service's own defense layer was incomplete.
 
 ### Work Completed This Cycle
 
-1. **`safeErrorMessage` — McpError pass-through** (`src/index.ts`): Added `if (error instanceof McpError) return error.message;` before the keyword-matching branches. Zero behavior change for valid-input paths; validation errors now surface their descriptive messages to callers.
+1. **`search_emails` multi-folder validation** (`src/index.ts`): Added handler-level validation of both the single `folder` arg (when `folders` is not set) and each element of the `folders[]` array. The `["*"]` wildcard sentinel is exempted. Returns `McpError(InvalidParams)` with a per-index message (e.g. `folders[0]: ...`) for any traversal or control-character path.
 
-2. **`reply_to_email` emailId guard** (`src/index.ts`): `const emailId = args.emailId as string` → `const emailId = requireNumericEmailId(args.emailId)`.
+2. **`cancel_scheduled_email` UUID guard** (`src/index.ts`): Added a UUID regex check (`/^[0-9a-f]{8}-[0-9a-f]{4}-...-[0-9a-f]{12}$/i`) before calling `schedulerService.cancel()`. Returns `McpError(InvalidParams)` for non-UUID inputs.
 
-3. **`forward_email` emailId guard** (`src/index.ts`): `const fwdId = args.emailId as string` → `const fwdId = requireNumericEmailId(args.emailId)`.
+3. **Settings HTML security headers** (`src/settings/server.ts`): Added `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store, no-cache, must-revalidate` to the `GET /` response, matching the headers already present on all JSON API responses.
 
-4. **`move_to_folder` emailId guard** (`src/index.ts`): Introduced `const mtfEmailId = requireNumericEmailId(args.emailId)` and threaded through to `moveEmail()` call. Removed the bare cast.
+4. **Service `validateFolderName` traversal guard** (`src/services/simple-imap-service.ts`): Added `if (name.includes('..'))` check to the private `validateFolderName()` method. Throws with message matching `/path traversal/i`. Provides defence-in-depth below the handler-level guards.
 
-5. **`sync_emails` folder validation** (`src/index.ts`): Added `validateTargetFolder(folder)` check after resolving the default "INBOX". Throws `McpError(InvalidParams)` for traversal strings, control characters, or over-limit values.
-
-6. **23 new tests** (`src/utils/helpers.test.ts`): Three new `describe` blocks:
-   - `reply_to_email / forward_email / move_to_folder emailId guard` (8 tests) — exercises `requireNumericEmailId` for the new guard sites.
-   - `sync_emails folder validation` (9 tests) — validates all `validateTargetFolder` branches for the `sync_emails` folder path.
-   - `McpError properties from requireNumericEmailId` (6 tests) — confirms that McpError thrown by validators carries `ErrorCode.InvalidParams` and a descriptive message (documenting the pass-through behavior).
+5. **41 new tests** (`src/utils/helpers.test.ts`, `src/services/simple-imap-service.newfeatures.test.ts`):
+   - `UUID format validation` (8 tests in helpers.test.ts) — verifies the UUID regex accepts/rejects expected inputs.
+   - `validateTargetFolder for search_emails folders array entries` (4 tests in helpers.test.ts) — confirms traversal and null-byte paths are rejected by `validateTargetFolder`.
+   - `SimpleIMAPService private validateFolderName — path traversal guard` (6 tests in newfeatures.test.ts) — exercises the new `..` check via `(svc as any).validateFolderName()`.
 
 ### Validation Results
 
 - `npm run build`: Clean (zero TypeScript errors)
-- `npm test`: 439/439 tests pass (416 existing + 23 new)
+- `npm test`: 457/457 tests pass (416 existing + 41 new)
 
 ### Git Status
 

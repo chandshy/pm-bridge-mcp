@@ -223,17 +223,17 @@ Added `name`, `firstInteraction`, `averageResponseTime`, `isFavorite` to the con
 
 ## NEW — Cycle #22 Findings (all completed in Cycle #22)
 
-### [DONE - Cycle 22] `safeErrorMessage` swallowed `McpError` validation messages
-Added `if (error instanceof McpError) return error.message;` as the first guard in `safeErrorMessage()`. Previously, any `McpError(InvalidParams)` thrown by `requireNumericEmailId`, `validateLabelName`, etc. inside the handler `switch` was caught by the outer `catch` block and had its message discarded (returned "An error occurred"). All validation errors now surface their descriptive text to callers.
+### [DONE - Cycle 22] `search_emails` multi-folder `folders[]` — no handler-level path traversal validation
+The handler forwarded the `folders[]` array directly to the service without validating individual strings. The service's private `validateFolderName()` did not check for `..` traversal, so paths like `../../etc` could reach imapflow. Added handler-level loop calling `validateTargetFolder()` on each entry (exempting the `["*"]` wildcard), plus added `..` check to the service method itself as defence-in-depth.
 
-### [DONE - Cycle 22] `reply_to_email` / `forward_email` missing `requireNumericEmailId`
-Both handlers were casting `args.emailId as string` directly to `imapService.getEmailById()` without the numeric UID guard. Added `requireNumericEmailId(args.emailId)` to both, consistent with all other single-email action handlers.
+### [DONE - Cycle 22] `cancel_scheduled_email` — no UUID format validation on `id`
+The raw `args.id` string was passed directly to `schedulerService.cancel()`. Added a UUID regex guard (`/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i`) that returns `McpError(InvalidParams)` for non-UUID values.
 
-### [DONE - Cycle 22] `move_to_folder` missing `requireNumericEmailId`
-The `emailId` argument was cast directly without validation. Added `requireNumericEmailId(args.emailId)` and threaded the result to `moveEmail()`.
+### [DONE - Cycle 22] Settings HTML response — missing security headers
+`GET /` response lacked `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and `Cache-Control` headers. Added all four to match the headers already present on all JSON API responses from the `json()` helper.
 
-### [DONE - Cycle 22] `sync_emails` folder argument not validated against traversal
-Added `validateTargetFolder(folder)` call in the `sync_emails` handler. All other folder-accepting handlers already validated their folder inputs; `sync_emails` was the sole omission.
+### [DONE - Cycle 22] Service-level `validateFolderName()` — no `..` traversal check
+The private method in `SimpleIMAPService` checked for empty, too-long, and control characters but not for `..` path traversal sequences. Added `name.includes('..')` check as a second layer of defence below the handler-level `validateTargetFolder()` guards.
 
 ---
 
