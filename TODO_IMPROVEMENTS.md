@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #23 (2026-03-18)
+Last updated: Cycle #24 (2026-03-18)
 
 ---
 
@@ -250,4 +250,17 @@ Both handlers forwarded `args.to as string` without checking for empty/whitespac
 ### [DONE - Cycle 23] Bulk operations — empty `emailIds` array produces silent no-op
 All 6 bulk tools (`bulk_mark_read`, `bulk_star`, `bulk_move_emails`, `bulk_move_to_label`, `bulk_remove_label`, `bulk_delete_emails` / `bulk_delete`) previously returned `{success:0, failed:0, errors:[]}` when called with `emailIds: []`. Added up-front guard → `McpError(InvalidParams, "emailIds must be a non-empty array of numeric UID strings.")` in all six handlers.
 
-IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 23 cycles
+---
+
+## NEW — Cycle #24 Findings (all completed in Cycle #24)
+
+### [DONE - Cycle 24] `schedule_email` — missing `to` empty-string guard
+`args.to` was passed directly to `schedulerService.schedule()` without checking for empty/whitespace-only values. An empty `to` would schedule a job that silently failed at send-time with an opaque SMTP error. Added guard consistent with `send_email`/`forward_email` → `McpError(InvalidParams, "'to' must be a non-empty string...")`.
+
+### [DONE - Cycle 24] `schedule_email` — `send_at` validation used `return` pattern (inconsistency)
+Both `send_at` guards (missing value, invalid date) used `return { ..., isError: true, ... }` instead of `throw new McpError(ErrorCode.InvalidParams, ...)`. Refactored to throw `McpError(InvalidParams)` with clear messages including an ISO 8601 format hint. Now consistent with every other handler's parameter validation pattern.
+
+### [DONE - Cycle 24] `get_contacts` / `get_volume_trends` — no handler-level numeric type check on `limit`/`days`
+Both handlers cast `args.limit`/`args.days` directly as `number | undefined` without verifying the runtime type. A non-numeric value (e.g. string `"30"`) would silently fall back to the service default. Added handler-level type guards → `McpError(InvalidParams, "'limit' must be a number.")` and `McpError(InvalidParams, "'days' must be a number.")`.
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 24 cycles

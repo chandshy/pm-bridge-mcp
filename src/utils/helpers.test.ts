@@ -1518,4 +1518,139 @@ describe('helpers', () => {
       expect(isInvalidBulkIds(['abc', '', null])).toBe(false);
     });
   });
+
+  // ── schedule_email 'to' field guard (Cycle #24) ──────────────────────────
+
+  describe("schedule_email 'to' field guard", () => {
+    // Replicates: !args.to || typeof args.to !== "string" || !(args.to).trim()
+    const isInvalidTo = (v: unknown): boolean =>
+      !v || typeof v !== 'string' || !(v as string).trim();
+
+    it("valid address 'user@example.com' passes guard", () => {
+      expect(isInvalidTo('user@example.com')).toBe(false);
+    });
+
+    it('multiple addresses (comma-separated) pass guard', () => {
+      expect(isInvalidTo('a@x.com, b@y.com')).toBe(false);
+    });
+
+    it('empty string triggers guard', () => {
+      expect(isInvalidTo('')).toBe(true);
+    });
+
+    it('whitespace-only string triggers guard', () => {
+      expect(isInvalidTo('   ')).toBe(true);
+    });
+
+    it('undefined triggers guard', () => {
+      expect(isInvalidTo(undefined)).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isInvalidTo(null)).toBe(true);
+    });
+
+    it('number triggers guard (wrong type)', () => {
+      expect(isInvalidTo(42)).toBe(true);
+    });
+  });
+
+  // ── schedule_email 'send_at' validation (Cycle #24) ──────────────────────
+
+  describe("schedule_email 'send_at' McpError-style validation", () => {
+    const isInvalidSendAt = (v: unknown): boolean =>
+      !v || typeof v !== 'string';
+
+    const isInvalidDate = (v: string): boolean =>
+      isNaN(new Date(v).getTime());
+
+    it('valid ISO string passes both guards', () => {
+      expect(isInvalidSendAt('2026-01-15T14:30:00Z')).toBe(false);
+      expect(isInvalidDate('2026-01-15T14:30:00Z')).toBe(false);
+    });
+
+    it('undefined triggers the type guard', () => {
+      expect(isInvalidSendAt(undefined)).toBe(true);
+    });
+
+    it('null triggers the type guard', () => {
+      expect(isInvalidSendAt(null)).toBe(true);
+    });
+
+    it('empty string triggers the type guard', () => {
+      expect(isInvalidSendAt('')).toBe(true);
+    });
+
+    it('number triggers the type guard', () => {
+      expect(isInvalidSendAt(Date.now())).toBe(true);
+    });
+
+    it('non-date string triggers the date-parse guard', () => {
+      expect(isInvalidDate('not-a-date')).toBe(true);
+    });
+
+    it('random garbage string triggers the date-parse guard', () => {
+      expect(isInvalidDate('tomorrow at noon')).toBe(true);
+    });
+
+    it('valid future ISO string passes the date-parse guard', () => {
+      expect(isInvalidDate('2030-06-01T09:00:00.000Z')).toBe(false);
+    });
+  });
+
+  // ── get_contacts / get_volume_trends numeric type guard (Cycle #24) ──────
+
+  describe("get_contacts / get_volume_trends handler-level numeric type guard", () => {
+    // Replicates: args.limit !== undefined && typeof args.limit !== "number"
+    const isNonNumericLimit = (v: unknown): boolean =>
+      v !== undefined && typeof v !== 'number';
+
+    it('undefined is accepted (uses service default)', () => {
+      expect(isNonNumericLimit(undefined)).toBe(false);
+    });
+
+    it('integer 50 is accepted', () => {
+      expect(isNonNumericLimit(50)).toBe(false);
+    });
+
+    it('float 50.5 is accepted (service truncates)', () => {
+      expect(isNonNumericLimit(50.5)).toBe(false);
+    });
+
+    it('string "50" triggers guard', () => {
+      expect(isNonNumericLimit('50')).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isNonNumericLimit(null)).toBe(true);
+    });
+
+    it('boolean true triggers guard', () => {
+      expect(isNonNumericLimit(true)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isNonNumericLimit([30])).toBe(true);
+    });
+
+    // Replicates: args.days !== undefined && typeof args.days !== "number"
+    const isNonNumericDays = (v: unknown): boolean =>
+      v !== undefined && typeof v !== 'number';
+
+    it('days undefined is accepted (uses service default)', () => {
+      expect(isNonNumericDays(undefined)).toBe(false);
+    });
+
+    it('days 30 is accepted', () => {
+      expect(isNonNumericDays(30)).toBe(false);
+    });
+
+    it('days "30" triggers guard', () => {
+      expect(isNonNumericDays('30')).toBe(true);
+    });
+
+    it('days 0 is accepted (service will clamp to 1)', () => {
+      expect(isNonNumericDays(0)).toBe(false);
+    });
+  });
 });

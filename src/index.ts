@@ -1858,13 +1858,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "schedule_email": {
         const schAttErr = validateAttachments(args.attachments);
         if (schAttErr) throw new McpError(ErrorCode.InvalidParams, schAttErr);
-        const sendAtStr = args.send_at as string;
-        if (!sendAtStr) {
-          return { content: [{ type: "text" as const, text: "send_at is required" }], isError: true, structuredContent: { success: false, reason: "send_at is required" } };
+        // Guard empty/whitespace-only 'to' — consistent with send_email / forward_email.
+        if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
+          throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
         }
-        const sendAt = new Date(sendAtStr);
+        // Validate send_at as a parseable ISO date string.
+        if (!args.send_at || typeof args.send_at !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'send_at' is required and must be an ISO 8601 date-time string.");
+        }
+        const sendAt = new Date(args.send_at as string);
         if (isNaN(sendAt.getTime())) {
-          return { content: [{ type: "text" as const, text: `Invalid send_at date: ${sendAtStr}` }], isError: true, structuredContent: { success: false, reason: "Invalid date" } };
+          throw new McpError(ErrorCode.InvalidParams, `'send_at' is not a valid date-time: '${args.send_at}'. Use ISO 8601 format, e.g. 2026-01-15T14:30:00Z.`);
         }
         try {
           const schedId = schedulerService.schedule({
@@ -2245,12 +2249,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_contacts": {
+        // Validate limit at handler level — surface a clear error for non-numeric inputs
+        // rather than silently falling back to the service default.
+        if (args.limit !== undefined && typeof args.limit !== "number") {
+          throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
+        }
         await getAnalyticsEmails();
         const contacts = analyticsService.getContacts(args.limit as number | undefined);
         return ok({ contacts });
       }
 
       case "get_volume_trends": {
+        // Validate days at handler level — surface a clear error for non-numeric inputs
+        // rather than silently falling back to the service default.
+        if (args.days !== undefined && typeof args.days !== "number") {
+          throw new McpError(ErrorCode.InvalidParams, "'days' must be a number.");
+        }
         await getAnalyticsEmails();
         const trends = analyticsService.getVolumeTrends(args.days as number | undefined);
         return ok({ trends });

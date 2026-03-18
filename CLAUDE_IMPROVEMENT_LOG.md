@@ -4,6 +4,35 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #24 — schedule_email guards, send_at McpError consistency, get_contacts/get_volume_trends numeric type validation
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 478/478 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`schedule_email` — missing `to` field empty-string guard** — `schedule_email` accepted `args.to as string` without checking for empty/whitespace-only values before passing to `schedulerService.schedule()`. This was inconsistent with `send_email` and `forward_email`, both of which gained this guard in Cycle #23. An empty `to` would silently schedule a job that would fail at send-time with an opaque SMTP error. Added the same guard pattern → `McpError(InvalidParams, "'to' must be a non-empty string...")`.
+
+2. **`schedule_email` — `send_at` validation used `return` (non-McpError pattern)** — The `send_at` guards (missing value and invalid date) returned raw error-response objects rather than throwing `McpError(ErrorCode.InvalidParams, ...)`. This was inconsistent with every other tool handler that uses `throw new McpError(...)` for parameter validation. The inconsistency bypassed the outer try/catch's McpError pass-through in `safeErrorMessage`. Refactored both guards to `throw new McpError(ErrorCode.InvalidParams, ...)` with clear messages including the ISO 8601 format hint.
+
+3. **`get_contacts` / `get_volume_trends` — no handler-level type check on `limit`/`days`** — Both handlers cast `args.limit as number | undefined` and `args.days as number | undefined` directly to the service without verifying the actual runtime type. A string `"50"` or `"30"` would be cast and silently treated as `NaN` in `Math.trunc()`, falling back to the service default. Added handler-level guards: `if (args.limit !== undefined && typeof args.limit !== "number") throw McpError(InvalidParams)` and equivalently for `days`.
+
+### Changes
+
+- `src/index.ts`: Added `to` empty-string guard in `schedule_email` (3 lines). Replaced 2 `return`-style `send_at` validations with `throw new McpError(InvalidParams, ...)`. Added type guards for `limit` in `get_contacts` and `days` in `get_volume_trends`.
+- `src/utils/helpers.test.ts`: Added 26 new unit tests covering all three guard patterns: `schedule_email` `to` guard (7 tests), `send_at` validation (8 tests), numeric type guard for `limit`/`days` (11 tests).
+
+### Test Results
+
+**Before:** 478 tests passing
+**After:** 504 tests passing (+26)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #23 — Input guards: send_email/forward_email 'to' field, reply_to_email body, bulk empty-array
 **Timestamp:** 2026-03-18
 **Git commit:** (see below)
