@@ -4,6 +4,48 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #14
+**Timestamp:** 2026-03-18 03:35–03:45 Eastern
+**Git commit:** `c636c50`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights
+
+**Phase 1 — `move_to_label` / `bulk_move_to_label` inline validation:**
+Both handlers had 3 consecutive inline if-blocks (empty check, control-char/slash/traversal check, length check) instead of calling the `validateLabelName()` helper that already existed in `helpers.ts` and was already used in the `get_emails_by_label` handler. Confirmed `validateLabelName` was already imported in `src/index.ts` at line 30.
+
+**Phase 2 — `get_connection_status` missing healthCheck:**
+Handler at line 2147 returned `imap.connected: imapService.isActive()` (flag-only check) but did not call `healthCheck()`. The method was added in Cycle #13 but left unwired. Adding `imapHealthy: await imapService.healthCheck()` surfaces the NOOP round-trip probe to agents using the tool.
+
+**Phase 3 — `ensureConnection()` error message clarity:**
+Assessed: `ensureConnection()` calls `reconnect()` which calls `connect()`. The `connect()` method logs the error with context via `logger.error(...)` and re-throws the original. The warning "IMAP connection lost, attempting to reconnect" is printed before the attempt. Error messages are reasonably clear — skipped this cycle as instructed.
+
+### Work Completed This Cycle
+
+1. **`move_to_label` — replaced 9 lines of inline validation with 2-line helper call**
+   - Removed 3 if-blocks; replaced with `const mtlValidErr = validateLabelName(label)` + throw guard.
+   - Behavior is identical — `validateLabelName()` implements the same rules.
+
+2. **`bulk_move_to_label` — replaced 9 lines of inline validation with 2-line helper call**
+   - Same pattern: `const bmlValidErr = validateLabelName(rawLabel)` + throw guard.
+   - Net removal: ~14 lines from `src/index.ts`.
+
+3. **`get_connection_status` — wired `healthCheck()` into response**
+   - Added `healthy: await imapService.healthCheck()` to the `imap` sub-object.
+   - Updated `outputSchema` to declare `healthy: { type: "boolean" }` in the `imap` properties.
+   - `healthCheck()` sends NOOP to the server; returns `false` silently if disconnected or if NOOP fails. Never throws.
+
+### Validation Results
+- Build: clean (0 TypeScript errors)
+- Tests: **393 passed, 0 failed** (identical count to Cycle #13 — no new tests needed; existing tests for `validateLabelName` cover all branches; `healthCheck` tested in Cycle #13)
+
+### Git Status
+- Committed: `c636c50` — `src/index.ts` only (+10 / -21 lines)
+- Pushed to: `origin/main`
+
+---
+
 ## Cycle #1
 **Timestamp:** 2026-03-17 23:38–23:50 Eastern
 **Git commit:** `d2cd69f`

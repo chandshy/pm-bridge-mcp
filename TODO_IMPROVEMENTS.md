@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #12 (2026-03-18)
+Last updated: Cycle #14 (2026-03-18)
 
 ---
 
@@ -155,23 +155,35 @@ Added `async healthCheck(): Promise<boolean>`. Issues `this.client.noop()`. Retu
 ### [DONE - Cycle 13] DRY — numeric emailId guard in 12+ handlers
 Extracted `requireNumericEmailId(raw: unknown, fieldName?: string): string` to `src/utils/helpers.ts`. Throws `McpError(InvalidParams, ...)` on failure. Replaced all 12 guard sites in `src/index.ts`. 14 new unit tests added.
 
+### [DONE - Cycle 14] Wire `healthCheck()` into `get_connection_status`
+Added `healthy: await imapService.healthCheck()` to the `imap` sub-object of the `get_connection_status` response. Updated `outputSchema` to declare the new field. NOOP probe now surfaced to agents.
+
+### [DONE - Cycle 14] Inline label validation in `move_to_label` / `bulk_move_to_label`
+Both handlers now call `validateLabelName()` instead of 3 inline if-blocks each. Net -14 lines in `src/index.ts`. Behavior unchanged; all existing tests cover the validation paths.
+
 ### 27. Error message clarity for lost IMAP connections
 **File:** `src/services/simple-imap-service.ts`
-**Issue:** When IMAP connection is lost and an operation is attempted, the raw imapflow error propagates. Wrapping `ensureConnection()` failures with a friendly "IMAP connection lost; reconnect via the settings tool." message would improve user experience.
+**Issue:** When IMAP connection is lost and an operation is attempted, the raw imapflow error propagates. Wrapping `ensureConnection()` failures with a friendly "IMAP connection lost; reconnect via the settings tool." message would improve user experience. Assessed in Cycle #14 — existing messages are reasonably clear (logged with context). Low priority.
 **Effort:** LOW
 **Risk:** LOW
 
-### 28. Wire `healthCheck()` into the server
-**File:** `src/index.ts` or `src/services/simple-imap-service.ts`
-**Issue:** `healthCheck()` was added in Cycle #13 but not yet used. Options: (a) add a `check_imap_connection` tool that calls it; (b) call from `ensureConnection()` as a probe before attempting reconnect.
-**Effort:** LOW
-**Risk:** LOW (additive)
+---
 
-### 29. Inline label validation in `move_to_label` / `bulk_move_to_label`
+---
+
+## NEW — Cycle #14 Findings
+
+### 30. `save_draft` / `schedule_email` attachment validation (carried from Cycle #8)
 **File:** `src/index.ts`
-**Issue:** Both handlers still have inline label validation (3 separate if-blocks each) rather than calling the `validateLabelName()` helper that already exists in `helpers.ts`. This is the same pattern fixed for folders in Cycle #7.
+**Issue:** `args.attachments as any` is passed through without handler-level validation of attachment object shape (name, contentType, content). The service sanitizes contentType and filename internally, but the handler performs no early rejection of malformed objects.
+**Effort:** LOW–MEDIUM
+**Risk:** LOW
+
+### 31. `ensureConnection()` friendly error wrapping (carried from Cycle #12, assessed in Cycle #14)
+**File:** `src/services/simple-imap-service.ts`
+**Issue:** Raw imapflow errors propagate on reconnect failure. Existing logger context is reasonable but user-facing error text could be friendlier. Assessed: current messages are "IMAP connection lost, attempting to reconnect" + the raw error. Low priority — skip unless a concrete usability complaint surfaces.
 **Effort:** LOW
-**Risk:** LOW (pure refactor)
+**Risk:** LOW
 
 ---
 

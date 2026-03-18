@@ -1,54 +1,57 @@
-# Last Audit Summary — Cycle #13
-**Date:** 2026-03-18 03:00 Eastern
+# Last Audit Summary — Cycle #14
+**Date:** 2026-03-18 03:35 Eastern
 **Auditor:** Claude Sonnet 4.6 (auto-improve cycle)
 
 ---
 
 ## Scope
 
-This cycle performed a focused audit of the two items carried forward from Cycle #12's "Next Cycle Focus":
+This cycle performed a focused audit of the three items carried forward from Cycle #13's "Next Cycle Focus":
 
-- `src/index.ts` — Systematic grep of all `!/^\d+$/.test(` occurrences to map the 12 repeated numeric emailId guard blocks
-- `src/utils/helpers.ts` — Full read to confirm structure and suitable insertion point for `requireNumericEmailId()`
-- `src/services/simple-imap-service.ts` — `ensureConnection()` and `isActive()` review; confirmed `ImapFlow.noop()` is available at runtime
+- `src/index.ts` — `move_to_label` and `bulk_move_to_label` handler inline label validation blocks
+- `src/index.ts` — `get_connection_status` handler: whether `healthCheck()` was wired in
+- `src/services/simple-imap-service.ts` — `ensureConnection()` / `reconnect()` error message clarity
 
 ---
 
 ## Issues Confirmed / Fixed This Cycle
 
-**[DONE] `requireNumericEmailId()` helper — 12 guard sites replaced**
+**[DONE] Inline label validation — `move_to_label` and `bulk_move_to_label`**
 
-Audit found the guard pattern repeated at exactly 12 sites:
-- 10 sites using field name `emailId` (handlers: `get_email_by_id`, `mark_email_read`, `star_email`, `move_email`, `archive_email`, `move_to_trash`, `move_to_spam`, `move_to_label`, `remove_label`, `delete_email`)
-- 1 site using field name `email_id` (`download_attachment`)
-- 1 looser variant (no `!X ||` prefix, slightly different message) in `compose_reply`
+Both handlers contained 3 consecutive inline if-blocks (empty/whitespace check, control-char/slash/traversal check, length check) duplicating logic that already existed in `validateLabelName()` in `helpers.ts`. The helper was already imported in `src/index.ts` and already used in the `get_emails_by_label` handler at line 1718. Both handlers refactored:
+- `move_to_label`: 9 lines → 2 lines (`mtlValidErr = validateLabelName(label)` + throw guard)
+- `bulk_move_to_label`: 9 lines → 2 lines (`bmlValidErr = validateLabelName(rawLabel)` + throw guard)
+- Net: -14 lines in `src/index.ts`. Behavior identical; existing `validateLabelName` tests provide full coverage.
 
-All 12 replaced with `requireNumericEmailId(args.X)` or `requireNumericEmailId(args.X, "email_id")`. The `compose_reply` variant was simultaneously hardened to the full guard. Net: ~39 lines removed from `src/index.ts`.
+**[DONE] `healthCheck()` wired into `get_connection_status`**
 
-**[DONE] `SimpleIMAPService.healthCheck()` — additive NOOP probe**
+`get_connection_status` returned `imap.connected: imapService.isActive()` (flag check only). `healthCheck()` — added in Cycle #13 — was not called anywhere. Fixed by:
+- Adding `healthy: await imapService.healthCheck()` to the `imap` sub-object in the handler response.
+- Adding `healthy: { type: "boolean" }` to the `outputSchema` `imap.properties` block.
 
-New `async healthCheck(): Promise<boolean>` method added after `isActive()`. Confirmed `ImapFlow` exposes `.noop()` at runtime. Method returns `false` when `!client || !isConnected`, returns `true` when NOOP resolves, returns `false` (without throwing) when NOOP rejects. Behavior mirrors "check but never crash" contract. Not yet wired into server — deferred to next cycle.
+The `healthy` field now reflects whether a real NOOP round-trip to the IMAP server succeeded, which detects silent TCP drops that `isActive()` cannot catch.
+
+**[ASSESSED / SKIPPED] `ensureConnection()` error message clarity**
+
+Reviewed `ensureConnection()` → `reconnect()` → `connect()` chain. The logger emits `"IMAP connection lost, attempting to reconnect"` as a warning before the reconnect attempt, and `"IMAP connection failed"` with the full error object if it fails. These messages are contextually clear. Skipped as instructed.
 
 ---
 
 ## New Findings This Cycle
 
-### 28. Wire `healthCheck()` into the server
-The method exists but is not called. Could become a `check_imap_connection` tool, or called from `ensureConnection()` as a probe before attempting reconnect.
+### 30. `save_draft` / `schedule_email` attachment validation
+Both handlers pass `args.attachments as any` without handler-level shape validation. The service (`saveDraft`) sanitizes contentType and filename internally, but a malformed attachment array could produce confusing errors from deeper in the stack. Low effort, low risk.
 
-### 29. Inline label validation duplication in `move_to_label` / `bulk_move_to_label`
-Both handlers contain 3 consecutive if-blocks (empty check, control char/slash/traversal check, length check) instead of calling `validateLabelName()` which already implements identical logic in `helpers.ts`. Same pattern as was cleaned up for folders in Cycle #7.
-
-### 27 (carried forward). `ensureConnection()` error wrapping
-Raw imapflow errors still propagate when reconnect fails. A friendly user-facing message would improve experience.
+### 31. `ensureConnection()` friendly error wrapping (assessed, low priority)
+Raw imapflow errors still propagate on reconnect failure. Existing logger context is adequate. Defer unless a concrete user-facing complaint surfaces.
 
 ---
 
 ## Confirmed Clean Areas
 
-- Zero avoidable `as any` casts remain (confirmed intact from Cycles #10–#12)
-- All Cycle #1–#12 security fixes confirmed intact
-- 393 tests pass (up from 374 before this cycle)
+- Zero avoidable `as any` casts (confirmed intact from Cycles #10–#12)
+- All Cycle #1–#13 security fixes confirmed intact
+- 393 tests pass (unchanged from Cycle #13)
 
 ---
 
@@ -58,6 +61,6 @@ Raw imapflow errors still propagate when reconnect fails. A friendly user-facing
 |----------|-------|--------|
 | HIGH     | 0     | — |
 | MEDIUM   | 0     | — |
-| LOW      | 2     | Item 28 (wire healthCheck) + Item 29 (inline label validation) new; Item 27 carried forward |
+| LOW      | 2     | Item 30 (attachment validation) + Item 31 (ensureConnection clarity, low priority) |
 
-Next focus: wire `healthCheck()` into server (Item 28), refactor inline label validation to use `validateLabelName()` (Item 29), and `ensureConnection()` friendly error message (Item 27).
+Next focus: Item 30 (save_draft/schedule_email attachment handler-level validation); Item 14 from backlog (save_draft/schedule_email attachment validation — same item, confirmed still open). Item 27/31 remains low priority unless a usability complaint surfaces.
