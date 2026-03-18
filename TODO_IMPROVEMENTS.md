@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #11 (2026-03-18)
+Last updated: Cycle #12 (2026-03-18)
 
 ---
 
@@ -132,17 +132,40 @@ Added local `interface AppendResult { uid?: number }` before the class definitio
 
 ## NEW — Cycle #11 Findings
 
-### 23. `smtp-service.ts` `wipeCredentials()` — remaining `as any` casts
-**File:** `src/services/smtp-service.ts` lines 359–361
-**Issue:** `(config.smtp as any).password = ""`, `(config.smtp as any).smtpToken = ""`, `(config.smtp as any).username = ""` — avoidable. `SMTPConfig` fields are mutable strings; direct assignment compiles cleanly (confirmed in Cycle #10 for the shutdown handler in `index.ts`).
-**Effort:** LOW (~3 lines)
-**Risk:** None
+### [DONE - Cycle 12] `smtp-service.ts` `wipeCredentials()` — remaining `as any` casts
+Removed 3 `as any` casts from `wipeCredentials()`. Direct property writes compile cleanly against `SMTPConfig`.
 
-### 24. `clearCache()` in `simple-imap-service.ts` — missing JSDoc
+### [DONE - Cycle 12] `clearCache()` in `simple-imap-service.ts` — missing JSDoc
+Added one-line JSDoc to `clearCache()`.
+
+### [DONE - Cycle 12] `security/memory.ts` `scrubEmail()` — 5 spurious `as any` casts
+Removed all 5 casts in `scrubEmail()`. `EmailMessage.body/subject/from` and `EmailAttachment.filename` are non-optional mutable strings; `EmailAttachment.content` is already optional. Direct writes compile cleanly.
+
+**Zero avoidable `as any` casts remain in any production code file.**
+
+---
+
+---
+
+## NEW — Cycle #12 Findings
+
+### 25. `SimpleIMAPService.healthCheck()` — NOOP-based connection probe
 **File:** `src/services/simple-imap-service.ts`
-**Issue:** `clearCache()` is a public method with no JSDoc comment. Trivial one-liner.
-**Effort:** Trivial
-**Risk:** None
+**Issue:** `ensureConnection()` only checks the `isConnected` flag. Silent TCP drops leave `isConnected = true` while the socket is dead. A `healthCheck()` method issuing an IMAP NOOP (or `client.noop()`) would detect stale connections before operations fail. Don't wire into server yet — add the method and test it first.
+**Effort:** MEDIUM
+**Risk:** LOW (additive, no behavior change to existing paths)
+
+### 26. DRY — numeric emailId guard in 12+ handlers
+**File:** `src/index.ts`
+**Issue:** The pattern `const X = args.emailId as string; if (!/^\d+$/.test(X)) throw McpError(...)` is repeated ~12 times across handlers. Could be extracted to a helper `parseNumericEmailId(raw: unknown, fieldName?: string): string` that throws `McpError(InvalidParams, ...)` internally. Reduces repetition and ensures consistent error messages.
+**Effort:** LOW-MEDIUM
+**Risk:** LOW (refactor, no behavior change)
+
+### 27. Error message clarity for lost IMAP connections
+**File:** `src/services/simple-imap-service.ts`
+**Issue:** When IMAP connection is lost and an operation is attempted, the raw imapflow error propagates. Wrapping `ensureConnection()` failures with a friendly "IMAP connection lost; reconnect via the settings tool." message would improve user experience.
+**Effort:** LOW
+**Risk:** LOW
 
 ---
 

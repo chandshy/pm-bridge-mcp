@@ -605,6 +605,68 @@ No new HIGH/MEDIUM issues found. Confirmed all cycle 1–10 fixes still intact.
 
 ---
 
+## Cycle #12
+**Timestamp:** 2026-03-18 02:45–02:55 Eastern
+**Git commit:** `e5a017c`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights (new findings this cycle)
+
+No new HIGH/MEDIUM issues found. Confirmed all cycle 1–11 fixes still intact.
+
+**Confirmed from Next Cycle Focus list:**
+- `smtp-service.ts` `wipeCredentials()` — 3 `(config.smtp as any).X = ""` casts, all avoidable. `SMTPConfig` fields are plain mutable strings. Direct assignment compiles cleanly (confirmed from Cycle #10 where the same pattern was fixed in `index.ts`). (now fixed)
+- `simple-imap-service.ts` `clearCache()` — public method with no JSDoc. (now fixed)
+
+**New finding — `src/security/memory.ts` `scrubEmail()`:**
+- 5 `as any` casts in `scrubEmail()`: `(email as any).body = ""`, `(email as any).subject = ""`, `(email as any).from = ""`, `(att as any).content = undefined`, `(att as any).filename = ""`. All avoidable: `EmailMessage.body/subject/from` are non-optional `string` fields (direct write works); `EmailAttachment.content` is `content?: Buffer | string` (optional, undefined assignable); `EmailAttachment.filename` is `string` (direct write works). (now fixed)
+
+**Confirmed no `as any` in escalation.ts, loader.ts, keychain.ts** — grep returned zero matches in all three files. Clean.
+
+**Remaining `as any` in production code (required/accepted):**
+- `src/settings/tui.ts` — 4 casts accessing private readline internals (`_writeToOutput`). Required; no public API exists.
+- `src/settings/server.ts` — 2 casts on `err as any` to access `.code` property. Standard TypeScript unknown-error pattern.
+- `src/security/memory.ts` `wipeString(obj: any, ...)` — parameter typed `any` by design (generic utility).
+- `src/security/memory.ts` `wipeObject(obj: Record<string, any>, ...)` — same.
+
+**Zero avoidable `as any` casts remain anywhere in production code.**
+
+### Work Completed This Cycle
+
+1. **`smtp-service.ts` `wipeCredentials()`** — Replaced `(this.config.smtp as any).password = ""`, `(this.config.smtp as any).smtpToken = ""`, `(this.config.smtp as any).username = ""` with direct property writes. (−3 casts)
+
+2. **`simple-imap-service.ts` `clearCache()`** — Added one-line JSDoc: "Clear all in-memory email and folder caches, forcing fresh IMAP fetches on next access." (+1 line documentation)
+
+3. **`security/memory.ts` `scrubEmail()`** — Replaced all 5 spurious `as any` casts with direct property writes. `email.body`, `email.subject`, `email.from`, `att.filename` are non-optional mutable fields; `att.content` is optional (`content?: Buffer | string`) so `att.content = undefined` is valid. (−5 casts)
+
+**Total `as any` casts removed from production code this cycle: 8**
+**Total avoidable `as any` casts remaining in production code: 0**
+
+**Files changed:** `src/services/smtp-service.ts` (3 casts removed), `src/services/simple-imap-service.ts` (1 JSDoc line added), `src/security/memory.ts` (5 casts removed)
+
+### Validation Results
+
+- `npm run build` — PASS (0 TypeScript errors)
+- `npm test` — PASS (374/374 tests, 14 test files, count unchanged — no new tests this cycle)
+
+### Git Status
+
+- Commit: `e5a017c`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+
+**All avoidable `as any` casts in production code eliminated.** JSDoc coverage for public methods complete.
+
+**Priority items for Cycle #13:**
+1. `healthCheck()` method on `SimpleIMAPService` — send IMAP NOOP to detect silent TCP drops. Don't wire into server yet. (MEDIUM effort, test in isolation first)
+2. Improving error messages in IMAP service when connection is unexpectedly lost — currently surfaces raw imapflow errors. Wrap `ensureConnection` errors with friendly "IMAP connection lost. Please reconnect." message.
+3. DRY audit — check for repeated code blocks (3+ copies of same logic) across service files. Top candidate: numeric emailId guard repeated in ~12 handlers in `index.ts` (could be extracted to a helper function like `parseNumericEmailId()`).
+4. Cursor token HMAC binding — architectural backlog, still deferred.
+
+---
+
 ## Cycle #6
 **Timestamp:** 2026-03-18 00:50–01:00 Eastern
 **Git commit:** `403dcaa`

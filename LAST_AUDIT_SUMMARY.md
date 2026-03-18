@@ -1,66 +1,65 @@
-# Last Audit Summary — Cycle #11
-**Date:** 2026-03-18 02:25 Eastern
+# Last Audit Summary — Cycle #12
+**Date:** 2026-03-18 02:45 Eastern
 **Auditor:** Claude Sonnet 4.6 (auto-improve cycle)
 
 ---
 
 ## Scope
 
-This cycle performed a focused audit of the three items carried forward from Cycle #10's "Next Cycle Focus":
-- `src/services/simple-imap-service.ts` — `(result as any).uid` cast in `saveDraft`
-- `src/services/simple-imap-service.ts` — `(att as any).content = undefined` cast in `wipeCache`
-- `src/services/simple-imap-service.ts` and `src/services/smtp-service.ts` — JSDoc coverage for all undocumented public methods
+This cycle performed a focused audit of the items carried forward from Cycle #11's "Next Cycle Focus" plus a fresh scan of escalation.ts, loader.ts, and keychain.ts for any remaining `as any` casts:
 
-No new HIGH or MEDIUM issues found. All cycle 1–10 fixes confirmed intact.
+- `src/services/smtp-service.ts` — `wipeCredentials()` `as any` casts (3 occurrences)
+- `src/services/simple-imap-service.ts` — `clearCache()` missing JSDoc
+- `src/permissions/escalation.ts` — fresh `as any` scan + JSDoc check
+- `src/config/loader.ts` — fresh `as any` scan + JSDoc check
+- `src/security/keychain.ts` — fresh `as any` scan + JSDoc check
+- `src/security/memory.ts` — NEW FINDING: 5 spurious `as any` casts in `scrubEmail()`
+
+No new HIGH or MEDIUM issues found. All cycle 1–11 fixes confirmed intact.
 
 ---
 
 ## Issues Confirmed / Fixed This Cycle
 
-**[DONE] `(result as any).uid` in `saveDraft` — narrowed via local interface**
-Added `interface AppendResult { uid?: number }` directly after the import block in `simple-imap-service.ts`. This bridges the gap in imapflow's TypeScript declaration (which omits `uid` from the `append()` return type even though the runtime value includes it). Cast changed from `(result as any).uid` to `(result as AppendResult).uid`. No behavior change — same runtime semantics, better type-documented intent.
+**[DONE] `smtp-service.ts` `wipeCredentials()` — 3 casts removed**
+`(this.config.smtp as any).password = ""`, `.smtpToken = ""`, `.username = ""` all replaced with direct property writes. `SMTPConfig.password` and `.username` are `string` (non-optional, mutable); `.smtpToken` is `string | undefined` (optional, mutable). TypeScript compiles cleanly with no cast. Identical pattern was confirmed working in Cycle #10 when the shutdown handler in `index.ts` was fixed.
 
-**[DONE] `(att as any).content = undefined` in `wipeCache` — cast removed entirely**
-Audit of `src/types/index.ts` confirmed that `EmailAttachment.content` is already declared as `content?: Buffer | string` (optional — the `?` was present). The `as any` cast was entirely unnecessary. Changed to direct `att.content = undefined`. This compiles cleanly with strict TypeScript.
+**[DONE] `simple-imap-service.ts` `clearCache()` — JSDoc added**
+One-line JSDoc added: "Clear all in-memory email and folder caches, forcing fresh IMAP fetches on next access."
 
-**[DONE] JSDoc added to 14 undocumented public methods**
+**[DONE] `security/memory.ts` `scrubEmail()` — 5 casts removed (new finding)**
+The `scrubEmail()` internal function had 5 `as any` casts:
+- `(email as any).body = ""` → `email.body = ""`  (`EmailMessage.body: string`, non-optional mutable field)
+- `(email as any).subject = ""` → `email.subject = ""` (`EmailMessage.subject: string`, non-optional mutable field)
+- `(email as any).from = ""` → `email.from = ""` (`EmailMessage.from: string`, non-optional mutable field)
+- `(att as any).content = undefined` → `att.content = undefined` (`EmailAttachment.content?: Buffer | string`, optional — undefined is assignable)
+- `(att as any).filename = ""` → `att.filename = ""` (`EmailAttachment.filename: string`, non-optional mutable field)
 
-`SimpleIMAPService` (10 methods):
-- `connect` — 6-line JSDoc with @param for host, port, username, password, bridgeCertPath
-- `disconnect` — 1-line description
-- `isActive` — 1-line description
-- `getFolders` — 1-line description noting cache behavior
-- `getEmails` — 5-line JSDoc with @param for folder/limit/offset and @returns
-- `getEmailById` — 3-line JSDoc with @param for emailId and @returns
-- `searchEmails` — 3-line JSDoc with @param options (field list) and @returns
-- `markEmailRead` — 4-line JSDoc with @param emailId/isRead and @returns
-- `starEmail` — 4-line JSDoc with @param emailId/isStarred and @returns
-- `moveEmail` — 4-line JSDoc with @param emailId/targetFolder and @returns
-
-`SmtpService` (4 methods):
-- `verifyConnection` — 1-line description
-- `sendEmail` — 3-line JSDoc with @param options and @returns
-- `sendTestEmail` — 4-line JSDoc with @param to/customMessage and @returns
-- `close` — 1-line description
-
-`saveDraft` was already documented (added in a previous cycle). Private methods intentionally not documented (per cycle instructions).
+All 5 were spurious. Direct writes compile cleanly under strict TypeScript.
 
 ---
 
-## Remaining `as any` Casts in Production Code
+## Confirmed Clean Files (no `as any` casts found)
 
-**[AVOIDABLE — deferred to Cycle #12] `smtp-service.ts` `wipeCredentials()` — 3 casts**
-`(config.smtp as any).password = ""`, `(config.smtp as any).smtpToken = ""`, `(config.smtp as any).username = ""`. These are avoidable — `SMTPConfig` fields are mutable strings. Direct assignment works, as confirmed in Cycle #10 when the identical pattern was fixed in `src/index.ts` shutdown handler. Deferred as a Cycle #12 trivial fix.
-
-**Zero remaining `as any` casts in `simple-imap-service.ts` and `analytics-service.ts`.**
+- `src/permissions/escalation.ts` — zero `as any` matches
+- `src/config/loader.ts` — zero `as any` matches
+- `src/security/keychain.ts` — zero `as any` matches
+- `src/services/simple-imap-service.ts` — zero remaining after Cycles #10, #11, #12
+- `src/services/analytics-service.ts` — zero remaining after Cycle #10
+- `src/services/smtp-service.ts` — zero remaining after this cycle
 
 ---
 
-## Other Areas Reviewed (no issues found)
+## Remaining `as any` in Production Code (all required/accepted)
 
-- `src/types/index.ts` `EmailAttachment.content` field: confirmed `content?: Buffer | string` (optional). The `as any` cast in `wipeCache` was entirely unnecessary — the field has been optional since at least Cycle #9 when the MIME sanitization was added.
-- All 14 newly-documented public methods: JSDoc verified accurate against implementation (parameter names, return types, default values).
-- Test count: unchanged at 374/374. No new tests added this cycle (code quality changes only).
+| File | Location | Reason |
+|------|----------|--------|
+| `src/settings/tui.ts` | 4 casts on `rl as any` | Accessing private readline internals (`_writeToOutput`); no public API |
+| `src/settings/server.ts` | 2 casts on `err as any` | Standard TypeScript `catch (err: any)` pattern for accessing `.code` |
+| `src/security/memory.ts` | `wipeString(obj: any, ...)` parameter | Generic utility; `any` is intentional |
+| `src/security/memory.ts` | `wipeObject(obj: Record<string, any>, ...)` parameter | Generic utility; `any` is intentional |
+
+**Zero avoidable `as any` casts remain in production code.**
 
 ---
 
@@ -70,6 +69,8 @@ Audit of `src/types/index.ts` confirmed that `EmailAttachment.content` is alread
 |----------|-------|--------|
 | HIGH     | 0     | — |
 | MEDIUM   | 0     | — |
-| LOW      | 2     | `smtp-service.ts` wipeCredentials `as any` casts (3 occurrences, deferred); `clearCache()` missing JSDoc (trivial) |
+| LOW      | 3     | 8 avoidable `as any` casts (all fixed); 0 remaining |
 
-All 9 previously-unavoidable `as any` casts eliminated over Cycles #10 and #11. The only remaining avoidable casts are in `smtp-service.ts` `wipeCredentials()` (3 occurrences). Focus shifts to completing the last few cast removals and any remaining documentation gaps in Cycle #12.
+The complete `as any` elimination sweep that began in Cycle #10 is now fully finished. All avoidable casts in all production files have been removed over Cycles #10–#12. Remaining `as any` usages are all in the required/accepted category (private API access, generic utilities, standard error handling).
+
+Next focus: code quality improvements — extracting the repeated numeric emailId guard to a helper, adding `healthCheck()` to IMAP service, and improving error messages for lost connections.
