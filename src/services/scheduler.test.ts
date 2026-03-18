@@ -208,4 +208,55 @@ describe("SchedulerService", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0].id).toBe(id2);
   });
+
+  // ── history pruning ─────────────────────────────────────────────────────────
+
+  it("load() prunes non-pending records older than 30 days", () => {
+    const smtp = makeSMTP();
+    const svc1 = new SchedulerService(smtp, storePath);
+
+    // Schedule two emails and immediately mark one as 'sent' with an old createdAt
+    const idKeep = svc1.schedule(makeOptions(), futureDate(120));  // pending — always kept
+    const idOld  = svc1.schedule(makeOptions(), futureDate(180));
+
+    // Simulate: mark idOld as 'sent' with a createdAt older than 30 days
+    const oldRecord = (svc1 as any).items.find((i: any) => i.id === idOld);
+    oldRecord.status = "sent";
+    oldRecord.createdAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+
+    svc1.stop(); // persists both records to disk
+
+    // Now load from disk — the old 'sent' record should be pruned
+    const svc2 = new SchedulerService(smtp, storePath);
+    (svc2 as any).load();
+
+    const loaded = svc2.list();
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].id).toBe(idKeep);
+    expect(loaded[0].status).toBe("pending");
+  });
+
+  it("load() retains recent non-pending records (within 30 days)", () => {
+    const smtp = makeSMTP();
+    const svc1 = new SchedulerService(smtp, storePath);
+
+    const idPending = svc1.schedule(makeOptions(), futureDate(120));
+    const idSent    = svc1.schedule(makeOptions(), futureDate(180));
+
+    // Mark idSent as 'sent' with a recent createdAt (within 30 days)
+    const sentRecord = (svc1 as any).items.find((i: any) => i.id === idSent);
+    sentRecord.status = "sent";
+    sentRecord.createdAt = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(); // 1 day ago
+
+    svc1.stop();
+
+    const svc2 = new SchedulerService(smtp, storePath);
+    (svc2 as any).load();
+
+    const loaded = svc2.list();
+    expect(loaded).toHaveLength(2);
+    const ids = loaded.map((i: any) => i.id);
+    expect(ids).toContain(idPending);
+    expect(ids).toContain(idSent);
+  });
 });

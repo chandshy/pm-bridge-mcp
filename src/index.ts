@@ -27,7 +27,7 @@ import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
 import { logger } from "./utils/logger.js";
-import { isValidEmail } from "./utils/helpers.js";
+import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
 import {
   requestEscalation,
@@ -1683,23 +1683,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "list_labels": {
         const allFolders = await imapService.getFolders();
-        const labels = allFolders.filter((f: any) => f.path?.startsWith("Labels/") || f.name?.startsWith("Labels/"));
+        const labels = allFolders.filter((f: any) => f.path?.startsWith("Labels/"));
         return ok({ labels, count: labels.length });
       }
 
       case "get_emails_by_label": {
         const lblName = args.label as string;
-        // Validate label before constructing the IMAP folder path — same rules
-        // as move_to_label to prevent path traversal (Labels/../INBOX etc.).
-        if (!lblName || typeof lblName !== "string" || !lblName.trim()) {
-          throw new McpError(ErrorCode.InvalidParams, "label must be a non-empty string.");
-        }
-        if (lblName.includes("/") || lblName.includes("..") || /[\x00-\x1f]/.test(lblName)) {
-          throw new McpError(ErrorCode.InvalidParams, "label contains invalid characters (/, .., or control characters).");
-        }
-        if (lblName.length > 255) {
-          throw new McpError(ErrorCode.InvalidParams, "label exceeds maximum length of 255 characters.");
-        }
+        // Validate label before constructing the IMAP folder path — prevents
+        // path traversal attacks such as Labels/../INBOX.
+        const lblValidErr = validateLabelName(lblName);
+        if (lblValidErr) throw new McpError(ErrorCode.InvalidParams, lblValidErr);
         const lblFolder = `Labels/${lblName}`;
         const lblLimit = Math.min(Math.max((args.limit as number) || 50, 1), 200);
 
@@ -1873,16 +1866,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "move_to_folder": {
         const folderName = args.folder as string;
         // Validate folder name before constructing the IMAP folder path — prevents
-        // path traversal attacks like "Folders/../INBOX" or "Folders/../../etc".
-        if (!folderName || typeof folderName !== "string" || !folderName.trim()) {
-          throw new McpError(ErrorCode.InvalidParams, "folder must be a non-empty string.");
-        }
-        if (folderName.includes("/") || folderName.includes("..") || /[\x00-\x1f]/.test(folderName)) {
-          throw new McpError(ErrorCode.InvalidParams, "folder contains invalid characters (/, .., or control characters).");
-        }
-        if (folderName.length > 255) {
-          throw new McpError(ErrorCode.InvalidParams, "folder exceeds maximum length of 255 characters.");
-        }
+        // path traversal attacks like "Folders/../INBOX".
+        const folderValidErr = validateFolderName(folderName);
+        if (folderValidErr) throw new McpError(ErrorCode.InvalidParams, folderValidErr);
         await imapService.moveEmail(args.emailId as string, `Folders/${folderName}`);
         return actionOk();
       }
@@ -2012,14 +1998,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const rlRawTarget = args.targetFolder as string | undefined;
         // Validate caller-supplied targetFolder before use as an IMAP path.
         // Default to INBOX when omitted; reject control characters and path traversal.
-        if (rlRawTarget !== undefined && rlRawTarget !== "") {
-          if (/[\x00-\x1f]/.test(rlRawTarget) || rlRawTarget.includes("..")) {
-            throw new McpError(ErrorCode.InvalidParams, "targetFolder contains invalid characters (.. or control characters).");
-          }
-          if (rlRawTarget.length > 1000) {
-            throw new McpError(ErrorCode.InvalidParams, "targetFolder exceeds maximum length of 1000 characters.");
-          }
-        }
+        const rlValidErr = validateTargetFolder(rlRawTarget);
+        if (rlValidErr) throw new McpError(ErrorCode.InvalidParams, rlValidErr);
         const rlTarget = rlRawTarget || "INBOX";
         await imapService.moveEmail(args.emailId as string, rlTarget);
         return actionOk();
@@ -2032,14 +2012,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           .slice(0, MAX_BULK_IDS);
         const brlRawTarget = args.targetFolder as string | undefined;
         // Validate caller-supplied targetFolder — same guards as remove_label.
-        if (brlRawTarget !== undefined && brlRawTarget !== "") {
-          if (/[\x00-\x1f]/.test(brlRawTarget) || brlRawTarget.includes("..")) {
-            throw new McpError(ErrorCode.InvalidParams, "targetFolder contains invalid characters (.. or control characters).");
-          }
-          if (brlRawTarget.length > 1000) {
-            throw new McpError(ErrorCode.InvalidParams, "targetFolder exceeds maximum length of 1000 characters.");
-          }
-        }
+        const brlValidErr = validateTargetFolder(brlRawTarget);
+        if (brlValidErr) throw new McpError(ErrorCode.InvalidParams, brlValidErr);
         const brlTarget = brlRawTarget || "INBOX";
         const brlTotal = brlEmailIds.length;
         const brlResults = { success: 0, failed: 0, errors: [] as string[] };
@@ -2658,7 +2632,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
     analyticsService.wipeData();
     smtpService.wipeCredentials();
 
-    // 3. Wipe top-level config credentials
+    // 4. Wipe top-level config credentials
     if (config?.smtp) {
       (config.smtp as any).password = "";
       (config.smtp as any).username = "";

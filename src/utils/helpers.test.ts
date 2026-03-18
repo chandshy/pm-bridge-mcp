@@ -9,6 +9,9 @@ import {
   sanitizeForLog,
   formatBytes,
   bytesToMB,
+  validateLabelName,
+  validateFolderName,
+  validateTargetFolder,
 } from './helpers.js';
 
 describe('helpers', () => {
@@ -153,6 +156,135 @@ describe('helpers', () => {
 
     it('should handle zero', () => {
       expect(bytesToMB(0)).toBe(0);
+    });
+  });
+
+  // ── validateLabelName ──────────────────────────────────────────────────────
+  // These tests cover the validation added in Cycle #1 to prevent IMAP path
+  // traversal attacks in get_emails_by_label, move_to_label, and bulk_move_to_label.
+
+  describe('validateLabelName', () => {
+    it('returns null for a valid label name', () => {
+      expect(validateLabelName('Work')).toBeNull();
+    });
+
+    it('returns null for a label with spaces and hyphens', () => {
+      expect(validateLabelName('My Important-Label')).toBeNull();
+    });
+
+    it('returns an error for an empty string', () => {
+      expect(validateLabelName('')).toMatch(/non-empty/i);
+    });
+
+    it('returns an error for a whitespace-only string', () => {
+      expect(validateLabelName('   ')).toMatch(/non-empty/i);
+    });
+
+    it('returns an error for a null value', () => {
+      expect(validateLabelName(null)).toMatch(/non-empty/i);
+    });
+
+    it('returns an error when label contains a forward slash', () => {
+      expect(validateLabelName('Work/Personal')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error for a directory traversal with ..', () => {
+      expect(validateLabelName('../INBOX')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error when label contains a null byte (control character)', () => {
+      expect(validateLabelName('Work\x00Hack')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error when label contains other C0 control characters', () => {
+      expect(validateLabelName('Work\x1fHack')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error when label exceeds 255 characters', () => {
+      expect(validateLabelName('a'.repeat(256))).toMatch(/exceeds maximum length/i);
+    });
+
+    it('returns null for a label exactly 255 characters long', () => {
+      expect(validateLabelName('a'.repeat(255))).toBeNull();
+    });
+  });
+
+  // ── validateFolderName ─────────────────────────────────────────────────────
+  // These tests cover the validation added in Cycle #1 for move_to_folder.
+
+  describe('validateFolderName', () => {
+    it('returns null for a valid folder name', () => {
+      expect(validateFolderName('Projects')).toBeNull();
+    });
+
+    it('returns an error for an empty string', () => {
+      expect(validateFolderName('')).toMatch(/non-empty/i);
+    });
+
+    it('returns an error for a whitespace-only string', () => {
+      expect(validateFolderName('   ')).toMatch(/non-empty/i);
+    });
+
+    it('returns an error when folder contains a forward slash', () => {
+      expect(validateFolderName('Work/Q1')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error for a directory traversal with ..', () => {
+      expect(validateFolderName('../INBOX')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error when folder contains control characters', () => {
+      expect(validateFolderName('Work\x00')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error when folder name exceeds 255 characters', () => {
+      expect(validateFolderName('b'.repeat(256))).toMatch(/exceeds maximum length/i);
+    });
+
+    it('returns null for a folder exactly 255 characters long', () => {
+      expect(validateFolderName('b'.repeat(255))).toBeNull();
+    });
+  });
+
+  // ── validateTargetFolder ───────────────────────────────────────────────────
+  // Covers remove_label and bulk_remove_label targetFolder validation (Cycle #1).
+  // Unlike label/folder, slashes are allowed (full IMAP path), but .. is rejected.
+
+  describe('validateTargetFolder', () => {
+    it('returns null when targetFolder is omitted (undefined)', () => {
+      expect(validateTargetFolder(undefined)).toBeNull();
+    });
+
+    it('returns null when targetFolder is empty string (caller uses default)', () => {
+      expect(validateTargetFolder('')).toBeNull();
+    });
+
+    it('returns null for a plain folder like INBOX', () => {
+      expect(validateTargetFolder('INBOX')).toBeNull();
+    });
+
+    it('returns null for a path with a forward slash like Folders/Work', () => {
+      expect(validateTargetFolder('Folders/Work')).toBeNull();
+    });
+
+    it('returns an error for a path traversal with ..', () => {
+      expect(validateTargetFolder('../INBOX')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error for embedded .. in path', () => {
+      expect(validateTargetFolder('Folders/../INBOX')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error when targetFolder contains control characters', () => {
+      expect(validateTargetFolder('INBOX\x00hack')).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error when targetFolder exceeds 1000 characters', () => {
+      expect(validateTargetFolder('c'.repeat(1001))).toMatch(/exceeds maximum length/i);
+    });
+
+    it('returns null for a targetFolder exactly 1000 characters long', () => {
+      expect(validateTargetFolder('c'.repeat(1000))).toBeNull();
     });
   });
 });

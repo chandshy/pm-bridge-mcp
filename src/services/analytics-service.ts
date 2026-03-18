@@ -127,9 +127,10 @@ export class AnalyticsService {
 
     let averageEmailsPerDay = 0;
     if (allEmails.length > 0) {
-      const dates = allEmails.map(e => e.date.getTime());
-      const oldestDate = Math.min(...dates);
-      const newestDate = Math.max(...dates);
+      // Use reduce instead of spread (Math.min/max(...array)) to avoid
+      // "Maximum call stack size exceeded" on very large arrays.
+      const oldestDate = allEmails.reduce((min, e) => Math.min(min, e.date.getTime()), Infinity);
+      const newestDate = allEmails.reduce((max, e) => Math.max(max, e.date.getTime()), -Infinity);
       const daysDiff = Math.max(1, (newestDate - oldestDate) / (1000 * 60 * 60 * 24));
       averageEmailsPerDay = Math.round(totalEmails / daysDiff);
     }

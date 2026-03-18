@@ -158,6 +158,74 @@ export function generateId(): string {
 }
 
 /**
+ * Validate a label name before constructing an IMAP path (e.g. `Labels/<name>`).
+ *
+ * Returns `null` on success or an error message string on failure.
+ * Rules mirror those used in `move_to_label`:
+ *   - Must be a non-empty string after trimming
+ *   - Must not contain `/` (path separator) or `..` (traversal)
+ *   - Must not contain C0 control characters (U+0000–U+001F)
+ *   - Must not exceed 255 characters
+ */
+export function validateLabelName(label: unknown): string | null {
+  if (!label || typeof label !== "string" || !label.trim()) {
+    return "label must be a non-empty string.";
+  }
+  if (label.includes("/") || label.includes("..") || /[\x00-\x1f]/.test(label)) {
+    return "label contains invalid characters (/, .., or control characters).";
+  }
+  if (label.length > 255) {
+    return "label exceeds maximum length of 255 characters.";
+  }
+  return null;
+}
+
+/**
+ * Validate a folder name before constructing an IMAP path (e.g. `Folders/<name>`).
+ *
+ * Returns `null` on success or an error message string on failure.
+ * Same rules as validateLabelName — the folder name is the leaf segment only;
+ * the `Folders/` prefix is added by the caller.
+ */
+export function validateFolderName(folder: unknown): string | null {
+  if (!folder || typeof folder !== "string" || !folder.trim()) {
+    return "folder must be a non-empty string.";
+  }
+  if (folder.includes("/") || folder.includes("..") || /[\x00-\x1f]/.test(folder)) {
+    return "folder contains invalid characters (/, .., or control characters).";
+  }
+  if ((folder as string).length > 255) {
+    return "folder exceeds maximum length of 255 characters.";
+  }
+  return null;
+}
+
+/**
+ * Validate a `targetFolder` argument used as a direct IMAP path (not prefixed).
+ *
+ * Returns `null` on success or an error message string on failure.
+ * Unlike validateLabelName/validateFolderName, a forward slash IS allowed here
+ * since the full path may include separators (e.g. `Folders/Work`).
+ * Rejects `..` (traversal) and C0 control characters.
+ * Max length 1000 characters.
+ */
+export function validateTargetFolder(targetFolder: unknown): string | null {
+  if (targetFolder === undefined || targetFolder === null || targetFolder === "") {
+    return null; // omitted/empty — caller uses a default (e.g. INBOX)
+  }
+  if (typeof targetFolder !== "string") {
+    return "targetFolder must be a string.";
+  }
+  if (/[\x00-\x1f]/.test(targetFolder) || targetFolder.includes("..")) {
+    return "targetFolder contains invalid characters (.. or control characters).";
+  }
+  if (targetFolder.length > 1000) {
+    return "targetFolder exceeds maximum length of 1000 characters.";
+  }
+  return null;
+}
+
+/**
  * Truncate text with ellipsis
  */
 export function truncate(text: string, maxLength: number): string {

@@ -21,6 +21,10 @@ const MIN_LEAD_TIME_MS = 60 * 1000;
 const POLL_INTERVAL_MS = 60 * 1000;
 /** Number of send attempts before marking an item as permanently failed. */
 const MAX_RETRIES = 3;
+/** Maximum age (ms) for completed/failed/cancelled records kept in history. */
+const MAX_HISTORY_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+/** Hard cap on non-pending records retained in history (safety valve). */
+const MAX_HISTORY_RECORDS = 1000;
 
 const VALID_STATUSES = new Set(["pending", "sent", "failed", "cancelled"]);
 
@@ -185,13 +189,53 @@ export class SchedulerService {
         if (skipped > 0) {
           logger.warn(`Skipped ${skipped} malformed record(s) from scheduled email store`, "Scheduler");
         }
-        this.items = valid;
+        this.items = this.pruneHistory(valid);
         logger.debug(`Loaded ${this.items.length} scheduled emails from disk`, "Scheduler");
       }
     } catch (err) {
       logger.warn("Failed to load scheduled emails from disk — starting fresh", "Scheduler", err);
       this.items = [];
     }
+  }
+
+  /**
+   * Remove old non-pending records to prevent unbounded array growth.
+   *
+   * Strategy:
+   *   1. Keep all pending items (they must not be dropped).
+   *   2. For non-pending (sent/failed/cancelled), keep only those created
+   *      within MAX_HISTORY_AGE_MS.
+   *   3. If the remaining non-pending count still exceeds MAX_HISTORY_RECORDS,
+   *      keep only the most-recently-created MAX_HISTORY_RECORDS entries.
+   */
+  private pruneHistory(items: ScheduledEmail[]): ScheduledEmail[] {
+    const cutoff = Date.now() - MAX_HISTORY_AGE_MS;
+
+    const pending = items.filter(i => i.status === "pending");
+    let history = items.filter(
+      i => i.status !== "pending" && Date.parse(i.createdAt) >= cutoff
+    );
+
+    if (history.length > MAX_HISTORY_RECORDS) {
+      // Sort newest-first, keep only the cap
+      history = history
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .slice(0, MAX_HISTORY_RECORDS);
+      logger.warn(
+        `Pruned scheduled email history to ${MAX_HISTORY_RECORDS} most-recent non-pending records`,
+        "Scheduler"
+      );
+    }
+
+    const pruned = pending.length + history.length;
+    if (pruned < items.length) {
+      logger.debug(
+        `Pruned ${items.length - pruned} old non-pending scheduled email record(s)`,
+        "Scheduler"
+      );
+    }
+
+    return [...pending, ...history];
   }
 
   private persist(): void {
