@@ -1804,6 +1804,10 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         res.writeHead(200, {
           "Content-Type":             "text/html; charset=utf-8",
           "Content-Security-Policy":  "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+          "X-Content-Type-Options":   "nosniff",
+          "X-Frame-Options":          "DENY",
+          "Referrer-Policy":          "no-referrer",
+          "Cache-Control":            "no-store, no-cache, must-revalidate",
         });
         res.end(html);
         return;

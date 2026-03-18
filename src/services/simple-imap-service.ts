@@ -97,6 +97,11 @@ export class SimpleIMAPService {
     if (/[\x00-\x1f]/.test(name)) {
       throw new Error(`Folder name contains invalid control characters: ${JSON.stringify(name.slice(0, 80))}`);
     }
+    // Reject path-traversal sequences (e.g. "../../etc") — defence-in-depth
+    // alongside the handler-level validateTargetFolder() checks.
+    if (name.includes('..')) {
+      throw new Error(`Folder name contains invalid path traversal sequence: ${JSON.stringify(name.slice(0, 80))}`);
+    }
   }
 
   /**

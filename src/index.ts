@@ -1732,6 +1732,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "search_emails": {
         const folder = (args.folder as string) || "INBOX";
         const folders = args.folders as string[] | undefined;
+        // Validate single-folder path when `folders` is not set.
+        if (!folders) {
+          const seFolderErr = validateTargetFolder(folder);
+          if (seFolderErr) throw new McpError(ErrorCode.InvalidParams, `folder: ${seFolderErr}`);
+        }
+        // Validate each explicit folder in the multi-folder array.
+        // The wildcard sentinel ["*"] is exempt — the service expands it.
+        if (folders && !(folders.length === 1 && folders[0] === "*")) {
+          for (let i = 0; i < folders.length; i++) {
+            const fErr = validateTargetFolder(folders[i]);
+            if (fErr) throw new McpError(ErrorCode.InvalidParams, `folders[${i}]: ${fErr}`);
+          }
+        }
         // Guard free-text search fields against excessively long strings that could
         // produce oversized IMAP SEARCH commands (imapflow handles encoding; this is
         // a defence-in-depth limit, not an injection guard).
@@ -1880,7 +1893,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "cancel_scheduled_email": {
-        const cancelled = schedulerService.cancel(args.id as string);
+        // Validate UUID format before calling into the scheduler to give callers
+        // a clear InvalidParams error instead of a silent "not found".
+        const rawCancelId = args.id;
+        if (
+          !rawCancelId ||
+          typeof rawCancelId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawCancelId)
+        ) {
+          throw new McpError(ErrorCode.InvalidParams, "id must be a valid UUID (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
+        }
+        const cancelled = schedulerService.cancel(rawCancelId);
         if (!cancelled) {
           return { content: [{ type: "text" as const, text: "Not found or not pending" }], isError: true, structuredContent: { success: false, reason: "Not found or not pending" } };
         }

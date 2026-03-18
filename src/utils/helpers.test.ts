@@ -1325,4 +1325,71 @@ describe('helpers', () => {
       expect(msg!.length).toBeGreaterThan(5);
     });
   });
+
+  // ── Cycle #22: UUID format guard used by cancel_scheduled_email ─────────────
+  // These tests verify the UUID regex pattern used at the handler level.
+  // The pattern is /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+  describe('UUID format validation (cancel_scheduled_email guard)', () => {
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    it('accepts a well-formed lowercase UUID', () => {
+      expect(UUID_RE.test('550e8400-e29b-41d4-a716-446655440000')).toBe(true);
+    });
+
+    it('accepts a well-formed uppercase UUID', () => {
+      expect(UUID_RE.test('550E8400-E29B-41D4-A716-446655440000')).toBe(true);
+    });
+
+    it('rejects an empty string', () => {
+      expect(UUID_RE.test('')).toBe(false);
+    });
+
+    it('rejects a plain numeric string', () => {
+      expect(UUID_RE.test('12345')).toBe(false);
+    });
+
+    it('rejects a UUID with missing hyphens', () => {
+      expect(UUID_RE.test('550e8400e29b41d4a716446655440000')).toBe(false);
+    });
+
+    it('rejects a UUID with extra characters', () => {
+      expect(UUID_RE.test('550e8400-e29b-41d4-a716-44665544000x')).toBe(false);
+    });
+
+    it('rejects a path traversal string', () => {
+      expect(UUID_RE.test('../../etc/passwd')).toBe(false);
+    });
+
+    it('rejects a UUID with wrong segment lengths', () => {
+      expect(UUID_RE.test('550e8400-e29b-41d4-a716-44665544')).toBe(false);
+    });
+  });
+
+  // ── Cycle #22: search_emails multi-folder validation ──────────────────────
+  // Verify that validateTargetFolder correctly rejects traversal paths that
+  // might appear in the folders[] array of search_emails.
+
+  describe('validateTargetFolder for search_emails folders array entries', () => {
+    it('rejects a path traversal string in a folder entry', () => {
+      const err = validateTargetFolder('../../etc');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+
+    it('rejects a folder entry with a null byte', () => {
+      const err = validateTargetFolder('INBOX\x00evil');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+
+    it('accepts a valid multi-segment folder path', () => {
+      const err = validateTargetFolder('Folders/Work/Projects');
+      expect(err).toBeNull();
+    });
+
+    it('accepts "Labels/MyLabel" as a valid folder path', () => {
+      expect(validateTargetFolder('Labels/MyLabel')).toBeNull();
+    });
+  });
 });

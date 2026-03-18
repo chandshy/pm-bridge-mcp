@@ -282,3 +282,37 @@ describe("SimpleIMAPService.healthCheck", () => {
     await expect(svc.healthCheck()).resolves.toBe(false);
   });
 });
+
+// ─── Cycle #22: service-level validateFolderName traversal guard ───────────────
+
+describe("SimpleIMAPService private validateFolderName — path traversal guard", () => {
+  it("throws for a folder name containing '..'", () => {
+    const svc = new SimpleIMAPService();
+    expect(() => (svc as any).validateFolderName("../../etc")).toThrow(/path traversal/i);
+  });
+
+  it("throws for a folder name that is exactly '..'", () => {
+    const svc = new SimpleIMAPService();
+    expect(() => (svc as any).validateFolderName("..")).toThrow(/path traversal/i);
+  });
+
+  it("throws for 'Folders/../INBOX' traversal", () => {
+    const svc = new SimpleIMAPService();
+    expect(() => (svc as any).validateFolderName("Folders/../INBOX")).toThrow(/path traversal/i);
+  });
+
+  it("accepts a normal folder path with no traversal", () => {
+    const svc = new SimpleIMAPService();
+    expect(() => (svc as any).validateFolderName("Folders/Work")).not.toThrow();
+  });
+
+  it("accepts 'Labels/MyLabel'", () => {
+    const svc = new SimpleIMAPService();
+    expect(() => (svc as any).validateFolderName("Labels/MyLabel")).not.toThrow();
+  });
+
+  it("still throws for control characters (existing behaviour preserved)", () => {
+    const svc = new SimpleIMAPService();
+    expect(() => (svc as any).validateFolderName("INBOX\x00evil")).toThrow(/control characters/i);
+  });
+});
