@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] — 2026-03-19
+
+### Improved
+
+- **Test coverage** — 1,251 tests passing across 21 test files; branch coverage raised from ~84% to **95.4%** (threshold enforced at 95%); line coverage **96.3%**; `escalation.ts` and `analytics-service.ts` now at **100% branch coverage**
+- **Coverage thresholds** — Vitest enforces statements ≥ 95%, branches ≥ 95%, functions ≥ 94%, lines ≥ 96%
+- New test patterns: async-generator UID scan mocks, per-test `simpleParser` overrides, module-level `fs`/`os`/`imapflow`/`mailparser` mocks in isolated files
+
 ## [Unreleased] — Autonomous Improvement Cycles #1–#48 (2026-03-18)
 
 ### Security

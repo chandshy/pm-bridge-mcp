@@ -1,6 +1,6 @@
 {
   "name": "protonmail-agentic-mcp",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "ProtonMail Agentic MCP — 51 tools, Resources, and Prompts for agentic email management, folder operations, analytics, and Proton Bridge integration.",
   "type": "module",
   "main": "dist/index.js",
