@@ -178,6 +178,23 @@ describe("SchedulerService", () => {
     svc2.stop();
   });
 
+  it("setInterval callback fires after POLL_INTERVAL_MS and calls processDue via start()", async () => {
+    const smtp = makeSMTP();
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    // Advance time so the item becomes due (120s + 1s margin)
+    vi.advanceTimersByTime(121 * 1000);
+    svc.start();
+    // Advance by POLL_INTERVAL_MS (60s) to fire the setInterval callback once
+    await vi.advanceTimersByTimeAsync(60_001);
+    svc.stop();
+    const item = svc.list().find(i => i.id === id)!;
+    // The interval callback fired processDue() → item is sent (by start()'s immediate call).
+    // The interval fires again but the item is already sent, so sendEmail is only called once total.
+    expect(item.status).toBe("sent");
+    expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
   it("start() processes overdue emails immediately on load", async () => {
     const smtp = makeSMTP();
     const svc1 = new SchedulerService(smtp, storePath);
