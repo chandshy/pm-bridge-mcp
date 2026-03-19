@@ -475,6 +475,54 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
     expect(results.failed).toBe(1);
     expect(results.success).toBe(0);
   });
+
+  it("falls back to INBOX when email not in cache (line 1526 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    // Email 95 is NOT in cache — folder defaults to 'INBOX'
+
+    const results = await svc.bulkMoveEmails(["95"], "Archive");
+
+    expect(results.success).toBe(1);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("INBOX");
+  });
+
+  it("handles String() fallback when validateEmailId throws non-Error (line 1531 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc);
+    vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => { throw 42; }); // non-Error
+
+    const results = await svc.bulkMoveEmails(["99"], "Trash");
+
+    expect(results.failed).toBe(1);
+    expect(results.errors[0]).toContain("42"); // String(42)
+  });
+
+  it("handles non-Error in per-email fallback (line 1559 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc, {
+      messageMove: vi.fn()
+        .mockRejectedValueOnce(new Error("batch fail")) // batch fails
+        .mockRejectedValueOnce("string error"),          // per-email fails with non-Error
+    });
+    (svc as any).setCacheEntry("96", makeEmail("96", "INBOX"));
+
+    const results = await svc.bulkMoveEmails(["96"], "Trash");
+
+    expect(results.failed).toBe(1);
+    expect(results.errors[0]).toContain("string error"); // String("string error")
+  });
+
+  it("skips cache update when email not in cache after successful batch move (line 1545 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc);
+    // Email 97 is NOT in cache — after successful move, no cache update needed
+
+    const results = await svc.bulkMoveEmails(["97"], "Archive");
+
+    expect(results.success).toBe(1);
+    // No crash — getCacheEntry returned null and the if(cachedForBulkMove) was false
+  });
 });
 
 // ─── bulkDeleteEmails ─────────────────────────────────────────────────────────
@@ -538,6 +586,32 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
 
     expect(results.failed).toBe(1);
     expect(results.success).toBe(0);
+  });
+
+  it("handles String() fallback when validateEmailId throws non-Error (line 1640 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc);
+    vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => { throw { code: 99 }; }); // non-Error
+
+    const results = await svc.bulkDeleteEmails(["99"]);
+
+    expect(results.failed).toBe(1);
+    expect(results.errors[0]).toContain("[object Object]"); // String({code:99})
+  });
+
+  it("handles non-Error in per-email delete fallback (line 1665 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc, {
+      messageDelete: vi.fn()
+        .mockRejectedValueOnce(new Error("batch fail"))
+        .mockRejectedValueOnce("delete-error-string"),
+    });
+    (svc as any).setCacheEntry("96", makeEmail("96", "INBOX"));
+
+    const results = await svc.bulkDeleteEmails(["96"]);
+
+    expect(results.failed).toBe(1);
+    expect(results.errors[0]).toContain("delete-error-string");
   });
 
   it("falls back to INBOX folder for emails not in cache", async () => {
@@ -1051,7 +1125,7 @@ describe("SimpleIMAPService.getEmails", () => {
     expect(emails).toEqual([]);
   });
 
-  it("uses default limit/offset when called with undefined (lines 557-558 binary-expr fallback)", async () => {
+  it("uses ?? 50/0 fallback when limit/offset are null (lines 557-558)", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
     vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
@@ -1061,9 +1135,57 @@ describe("SimpleIMAPService.getEmails", () => {
       mailbox: { exists: 0 },
     };
 
-    // Passing undefined explicitly triggers the ?? 50 and ?? 0 branches
-    const emails = await (svc as any).getEmails("INBOX", undefined, undefined);
+    // Passing null bypasses default params and triggers ?? 50 / ?? 0 branches at runtime
+    const emails = await (svc as any).getEmails("INBOX", null, null);
     expect(emails).toEqual([]);
+  });
+
+  it("uses 0 when mailbox is null (line 583 cond-expr branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
+    vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
+    vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      mailbox: null, // → cond-expr false branch → total=0
+    };
+
+    const emails = await svc.getEmails("INBOX");
+    expect(emails).toEqual([]);
+  });
+
+  it("handles from with no name and no address (line 619 address ?? '' branch)", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
+    vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
+    vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
+    vi.spyOn(svc as any, "countAttachments").mockReturnValue(0);
+
+    const mockMsg = {
+      uid: 211,
+      envelope: {
+        date: new Date("2024-01-01"),
+        subject: "No from details",
+        from: [{}],          // no name, no address → else branch, address ?? '' = ''
+        to: [{ name: "Bob" }], // name, no address → a.address ?? '' = '' (line 623)
+        cc: [{}],            // no name, no address → a.address ?? '' = '' (line 626)
+      },
+      flags: new Set(),
+      bodyParts: new Map([["1", Buffer.from("body")]]),
+      bodyStructure: {},
+    };
+
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      mailbox: { exists: 1 },
+      fetch: vi.fn().mockReturnValue(asyncMessages([mockMsg])),
+    };
+
+    const emails = await svc.getEmails("INBOX");
+    expect(emails).toHaveLength(1);
+    expect(emails[0].from).toBe(""); // no name, no address → ''
+    expect(emails[0].to).toEqual(["Bob <>"]); // name but no address
+    expect(emails[0].cc).toEqual([""]); // no name, no address → a.address ?? '' = ''
   });
 
   it("uses empty bodyPreview when bodyParts has no '1' key (line 43 truncateBody)", async () => {

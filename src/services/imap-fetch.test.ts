@@ -560,6 +560,103 @@ describe("SimpleIMAPService private searchSingleFolder", () => {
     const results = await (svc as any).searchSingleFolder("INBOX", {}, 50);
     expect(results).toEqual([]);
   });
+
+  it("returns [] when search() returns a non-array (line 857 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      search: vi.fn().mockResolvedValue(null), // not an array → branch 1 → []
+    };
+
+    const results = await (svc as any).searchSingleFolder("INBOX", {}, 50);
+    expect(results).toEqual([]);
+  });
+
+  it("skips invalid dateTo date string (line 825 branch 1)", async () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      search: vi.fn().mockResolvedValue([]),
+    };
+
+    await (svc as any).searchSingleFolder("INBOX", { dateTo: "invalid-date" }, 50);
+    const criteria = (svc as any).client.search.mock.calls[0][0];
+    expect(criteria.before).toBeUndefined(); // invalid date → skipped
+  });
+});
+
+// ─── fetchEmailFullSource: fallback branches ──────────────────────────────────
+
+describe("SimpleIMAPService private fetchEmailFullSource fallback branches", () => {
+  it("uses html body when text is null, cc with text, date fallback, no subject (lines 1060-1070)", async () => {
+    const { simpleParser } = await import("mailparser");
+    (simpleParser as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      text: null,
+      html: "<b>html</b>",        // → line 1060: parsed.text || parsed.html → html
+      subject: null,              // → line 1066: || '(No Subject)'
+      date: null,                 // → line 1070: || new Date()
+      from: null,                 // → line 1063: || ''
+      to: null,                   // → line 1064: [] branch
+      cc: { text: "cc@example.com" }, // → line 1065: [text] branch
+      attachments: [],
+      headers: new Map(),
+    });
+
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    const mockMessage = { uid: 90, source: Buffer.from("raw"), flags: new Set() };
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      fetch: vi.fn().mockReturnValue(asyncYield(mockMessage)),
+    };
+    vi.spyOn(svc, "getFolders").mockResolvedValue([
+      { name: "INBOX", path: "INBOX", totalMessages: 0, unreadMessages: 0, folderType: "system" as const },
+    ]);
+
+    const result = await (svc as any).fetchEmailFullSource("90");
+    expect(result).not.toBeNull();
+    expect(result!.body).toBe("<b>html</b>"); // html branch
+    expect(result!.subject).toBe("(No Subject)"); // null subject fallback
+    expect(result!.from).toBe(""); // null from fallback
+    expect(result!.cc).toEqual(["cc@example.com"]); // cc with text
+    expect(result!.date).toBeInstanceOf(Date); // null date fallback
+  });
+
+  it("uses '' body when both text and html are null (line 1060 branch 2)", async () => {
+    const { simpleParser } = await import("mailparser");
+    (simpleParser as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      text: null,
+      html: null,               // → line 1060: '' fallback
+      subject: "Empty",
+      date: new Date(),
+      from: { text: "a@b.com" },
+      to: { text: "b@c.com" },
+      cc: null,
+      attachments: [
+        { filename: null, contentType: "application/pdf", size: 0, content: Buffer.from(""), cid: undefined },
+        // filename null → line 1076: || 'unnamed'
+      ],
+      headers: new Map(),
+    });
+
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    const mockMessage = { uid: 91, source: Buffer.from("raw"), flags: new Set() };
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      fetch: vi.fn().mockReturnValue(asyncYield(mockMessage)),
+    };
+    vi.spyOn(svc, "getFolders").mockResolvedValue([
+      { name: "INBOX", path: "INBOX", totalMessages: 0, unreadMessages: 0, folderType: "system" as const },
+    ]);
+
+    const result = await (svc as any).fetchEmailFullSource("91");
+    expect(result).not.toBeNull();
+    expect(result!.body).toBe(""); // both text and html null → ''
+    expect(result!.attachments![0].filename).toBe("unnamed"); // null filename fallback
+  });
 });
 
 // ─── fetchEmailFullSource: null source branch ─────────────────────────────────
