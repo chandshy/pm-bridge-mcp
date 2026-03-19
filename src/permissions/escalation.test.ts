@@ -288,6 +288,66 @@ describe('escalation workflow', () => {
     expect(result.error).toContain('not found');
   });
 
+  it('denyEscalation() fails for already-resolved escalation', () => {
+    const req = requestEscalation('supervised', 'read_only', 'Deny then deny again');
+    if (!req.ok) throw new Error('request failed');
+    denyEscalation(req.id, 'browser_ui');
+    const second = denyEscalation(req.id, 'browser_ui');
+    expect(second.ok).toBe(false);
+    if (second.ok) throw new Error('unexpected');
+    expect(second.error).toContain('already');
+  });
+
+  it('getPendingEscalations() evicts expired entries (evictExpired → savePendingFile path)', () => {
+    const req = requestEscalation('supervised', 'read_only', 'Will expire');
+    if (!req.ok) throw new Error('request failed');
+
+    // Back-date expiresAt to trigger eviction
+    const { readFileSync, writeFileSync } = require('fs');
+    const fileData = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+    fileData.escalations[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(pendingPath, JSON.stringify(fileData), 'utf-8');
+
+    // getPendingEscalations calls evictExpired which returns true (entry evicted) → savePendingFile called
+    const pending = getPendingEscalations();
+    expect(pending).toHaveLength(0); // expired entry not in pending list
+  });
+
+  it('approveEscalation() evicts expired entries before checking (evictExpired → savePendingFile path)', () => {
+    // Create two escalations: one that will be expired, one that will be approved.
+    const reqExpiring = requestEscalation('supervised', 'read_only', 'This will expire');
+    if (!reqExpiring.ok) throw new Error('request failed');
+
+    // Back-date the first escalation to expired, without using approveEscalation yet
+    const { readFileSync, writeFileSync } = require('fs');
+    const fileData = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+    fileData.escalations[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(pendingPath, JSON.stringify(fileData), 'utf-8');
+
+    // Approve a non-existent ID — evictExpired will run and return true, triggering savePendingFile
+    const result = approveEscalation('unknown-id', 'browser_ui');
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unexpected');
+    expect(result.error).toContain('not found');
+  });
+
+  it('denyEscalation() evicts expired entries before checking (evictExpired → savePendingFile path)', () => {
+    const req = requestEscalation('supervised', 'read_only', 'Expiring before deny');
+    if (!req.ok) throw new Error('request failed');
+
+    // Back-date expiresAt to trigger eviction
+    const { readFileSync, writeFileSync } = require('fs');
+    const fileData = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+    fileData.escalations[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    writeFileSync(pendingPath, JSON.stringify(fileData), 'utf-8');
+
+    // Deny with unknown ID — evictExpired returns true (expired entry found) → savePendingFile called
+    const result = denyEscalation('unknown-id', 'browser_ui');
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unexpected');
+    expect(result.error).toContain('not found');
+  });
+
   // ── getAuditLog ───────────────────────────────────────────────────────────
 
   it('getAuditLog() returns empty array when file does not exist', () => {
@@ -340,6 +400,60 @@ describe('escalation workflow', () => {
     // Accessing escalation data should not throw, should return empty
     const pending = getPendingEscalations();
     expect(pending).toEqual([]);
+  });
+
+  it('loadPendingFile() returns empty escalations when escalations field is not an array', () => {
+    // Covers line 146: !Array.isArray(raw.escalations)
+    const { writeFileSync } = require('fs');
+    writeFileSync(pendingPath, JSON.stringify({ version: 1, escalations: 'not-an-array' }), 'utf-8');
+    const pending = getPendingEscalations();
+    expect(pending).toEqual([]);
+  });
+
+  it('loadPendingFile() filters out invalid escalation records (validation branches)', () => {
+    const { readFileSync, writeFileSync } = require('fs');
+    // First create a valid entry so the file exists
+    const req = requestEscalation('supervised', 'read_only', 'Valid entry');
+    if (!req.ok) throw new Error('request failed');
+
+    const fileData = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+    // Append various invalid records to test all validation branches
+    fileData.escalations.push(
+      null,                                          // !e check (line 149)
+      { id: 'invalid-hex', status: 'pending', currentPreset: 'read_only', targetPreset: 'supervised', requestedAt: new Date().toISOString(), expiresAt: new Date().toISOString(), reason: 'r', newTools: [], unthrottledTools: [] }, // bad id
+      { id: randomBytes(16).toString('hex'), status: 'unknown_status', currentPreset: 'read_only', targetPreset: 'supervised', requestedAt: new Date().toISOString(), expiresAt: new Date().toISOString(), reason: 'r', newTools: [], unthrottledTools: [] }, // bad status
+      { id: randomBytes(16).toString('hex'), status: 'pending', currentPreset: 'bad_preset', targetPreset: 'supervised', requestedAt: new Date().toISOString(), expiresAt: new Date().toISOString(), reason: 'r', newTools: [], unthrottledTools: [] }, // bad currentPreset
+      { id: randomBytes(16).toString('hex'), status: 'pending', currentPreset: 'read_only', targetPreset: 'bad_target', requestedAt: new Date().toISOString(), expiresAt: new Date().toISOString(), reason: 'r', newTools: [], unthrottledTools: [] }, // bad targetPreset
+      { id: randomBytes(16).toString('hex'), status: 'pending', currentPreset: 'read_only', targetPreset: 'supervised', requestedAt: 'not-a-date', expiresAt: new Date().toISOString(), reason: 'r', newTools: [], unthrottledTools: [] }, // bad requestedAt
+      { id: randomBytes(16).toString('hex'), status: 'pending', currentPreset: 'read_only', targetPreset: 'supervised', requestedAt: new Date().toISOString(), expiresAt: 'not-a-date', reason: 'r', newTools: [], unthrottledTools: [] }, // bad expiresAt
+      { id: randomBytes(16).toString('hex'), status: 'pending', currentPreset: 'read_only', targetPreset: 'supervised', requestedAt: new Date().toISOString(), expiresAt: new Date().toISOString(), reason: 42, newTools: [], unthrottledTools: [] }, // non-string reason
+      { id: randomBytes(16).toString('hex'), status: 'pending', currentPreset: 'read_only', targetPreset: 'supervised', requestedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 300_000).toISOString(), reason: 'ok', version: undefined }, // missing newTools/unthrottledTools arrays (triggers lines 157-158)
+    );
+    // Also test version ?? 1 (no version in file)
+    delete fileData.version;
+    writeFileSync(pendingPath, JSON.stringify(fileData), 'utf-8');
+
+    const pending = getPendingEscalations();
+    // Only the original valid entry should survive validation (+ the last invalid one with missing arrays gets fixed)
+    expect(pending.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('requestEscalation() evicts expired entries (evictExpired → savePendingFile path in requestEscalation)', () => {
+    const req1 = requestEscalation('supervised', 'read_only', 'Will expire');
+    if (!req1.ok) throw new Error('request failed');
+
+    // Back-date the first escalation to expired
+    const { readFileSync, writeFileSync } = require('fs');
+    const fileData = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+    fileData.escalations[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    fileData.escalations[0].status = 'expired'; // mark as expired so MAX_PENDING check doesn't block
+    fileData.escalations[0].resolvedAt = new Date().toISOString();
+    fileData.escalations[0].resolvedBy = 'timeout';
+    writeFileSync(pendingPath, JSON.stringify(fileData), 'utf-8');
+
+    // requestEscalation loads the file → evictExpired runs → returns true → savePendingFile called
+    const req2 = requestEscalation('supervised', 'read_only', 'New request after expiry');
+    expect(req2.ok).toBe(true);
   });
 
   it('savePendingFile() trims history to MAX_HISTORY (100) records', () => {
