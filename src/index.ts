@@ -54,6 +54,32 @@ import {
 } from "./permissions/escalation.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName, PermissionPreset } from "./config/schema.js";
+import { DESTRUCTIVE_TOOLS } from "./config/schema.js";
+
+/**
+ * Build a short, user-readable preview of what a destructive tool call would
+ * do, based on its arguments. Shown in the confirmation-required response so
+ * the user can see the proposed action in their client before approving.
+ */
+function describeDestructivePreview(tool: string, args: Record<string, unknown>): string {
+  switch (tool) {
+    case "delete_email":
+      return `Would permanently delete email with ID ${String(args.emailId ?? "(missing)")}.`;
+    case "bulk_delete":
+    case "bulk_delete_emails": {
+      const ids = Array.isArray(args.emailIds) ? args.emailIds : [];
+      const preview = ids.slice(0, 5).map(String).join(", ");
+      const tail = ids.length > 5 ? `, … +${ids.length - 5} more` : "";
+      return `Would permanently delete ${ids.length} email(s): [${preview}${tail}].`;
+    }
+    case "move_to_trash":
+      return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Trash.`;
+    case "move_to_spam":
+      return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Spam.`;
+    default:
+      return `Would run a destructive operation on the Proton mailbox.`;
+  }
+}
 import { isValidChallengeId, sanitizeText, isValidEscalationTarget } from "./settings/security.js";
 import { tracer } from "./utils/tracer.js";
 
@@ -750,11 +776,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "move_to_trash",
         title: "Move Email to Trash",
         description:
-          "Move an email to the Trash folder. Convenience wrapper for move_email targeting Trash. Note: labels are lost when an email is moved — label copies in Labels/ folders are not preserved.",
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+          "Move an email to the Trash folder. Convenience wrapper for move_email targeting Trash. Note: labels are lost when an email is moved — label copies in Labels/ folders are not preserved. Destructive: requires { confirmed: true }.",
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: {
           type: "object",
-          properties: { emailId: { type: "string" } },
+          properties: {
+            emailId: { type: "string" },
+            confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+          },
           required: ["emailId"],
         },
         outputSchema: ACTION_RESULT_SCHEMA,
@@ -763,11 +792,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "move_to_spam",
         title: "Move Email to Spam",
         description:
-          "Move an email to the Spam folder. Convenience wrapper for move_email targeting Spam.",
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+          "Move an email to the Spam folder. Convenience wrapper for move_email targeting Spam. Destructive: requires { confirmed: true }.",
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: {
           type: "object",
-          properties: { emailId: { type: "string" } },
+          properties: {
+            emailId: { type: "string" },
+            confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+          },
           required: ["emailId"],
         },
         outputSchema: ACTION_RESULT_SCHEMA,
@@ -916,11 +948,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "delete_email",
         title: "Delete Email",
         description:
-          "Permanently delete an email. This action cannot be undone. Consider move_email to Trash first.",
+          "Permanently delete an email. This action cannot be undone. Consider move_email to Trash first. Destructive: requires { confirmed: true }.",
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: {
           type: "object",
-          properties: { emailId: { type: "string" } },
+          properties: {
+            emailId: { type: "string" },
+            confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+          },
           required: ["emailId"],
         },
         outputSchema: ACTION_RESULT_SCHEMA,
@@ -929,12 +964,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "bulk_delete_emails",
         title: "Bulk Delete Emails",
         description:
-          "Permanently delete multiple emails. Irreversible. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts.",
+          "Permanently delete multiple emails. Irreversible. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Destructive: requires { confirmed: true }.",
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: {
           type: "object",
           properties: {
             emailIds: { type: "array", items: { type: "string" } },
+            confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
           },
           required: ["emailIds"],
         },
@@ -944,12 +980,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "bulk_delete",
         title: "Bulk Delete Emails",
         description:
-          "Alias for bulk_delete_emails. Permanently delete multiple emails. Irreversible.",
+          "Alias for bulk_delete_emails. Permanently delete multiple emails. Irreversible. Destructive: requires { confirmed: true }.",
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: {
           type: "object",
           properties: {
             emailIds: { type: "array", items: { type: "string" } },
+            confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
           },
           required: ["emailIds"],
         },
@@ -1612,6 +1649,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
       structuredContent: { success: false, reason: permResult.reason },
     };
+  }
+
+  // ── Destructive-tool confirmation gate ────────────────────────────────────
+  // Second-layer protection on top of the permission preset: destructive
+  // calls require an explicit { confirmed: true } argument so the user sees
+  // the intent in their client before it executes. Keeps the workflow user-
+  // initiated per Proton ToS §2.10 (automated-access restriction). Can be
+  // disabled by setting requireDestructiveConfirm: false in the config.
+  if (DESTRUCTIVE_TOOLS.has(name) && (loadConfig() ?? defaultConfig()).requireDestructiveConfirm !== false) {
+    if (args.confirmed !== true) {
+      const preview = describeDestructivePreview(name, args);
+      return {
+        content: [{
+          type: "text" as const,
+          text:
+            `Confirmation required for '${name}'.\n\n` +
+            `${preview}\n\n` +
+            `This tool is destructive. Retry the call with the exact same arguments plus ` +
+            `{ "confirmed": true } — the user will see the confirmation flag in the tool call and can cancel it. ` +
+            `Set requireDestructiveConfirm: false in ~/.protonmail-mcp.json to disable this guard system-wide.`,
+        }],
+        isError: false,
+        structuredContent: { success: false, confirmationRequired: true, tool: name, preview },
+      };
+    }
+    logger.info(`Destructive tool '${name}' executing with { confirmed: true }`, "MCPServer");
   }
 
   // Response-size limits — hot-reloaded from config every 15 s.

@@ -1453,6 +1453,18 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             Bridge 3.21+ hardening.
           </div>
         </div>
+        <div class="field" style="margin-top:6px">
+          <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="require-destructive-confirm" checked><span class="slider"></span></span>
+            <span>Require <code>{ confirmed: true }</code> on destructive tool calls</span>
+          </label>
+          <div class="hint" style="margin-top:4px">
+            When on (the default), every delete / move-to-trash / move-to-spam call must carry an
+            explicit <code>confirmed: true</code> argument. The agent has to surface the destructive
+            intent to you through the tool-call UI before it executes — the cornerstone of keeping
+            the workflow user-initiated per Proton ToS §2.10.
+          </div>
+        </div>
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
           <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px"
@@ -2129,6 +2141,8 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.getElementById('auto-start-bridge').checked = !!cn.autoStartBridge;
     var insecureEl = document.getElementById('allow-insecure-bridge');
     if (insecureEl) insecureEl.checked = !!cn.allowInsecureBridge;
+    var confirmEl = document.getElementById('require-destructive-confirm');
+    if (confirmEl) confirmEl.checked = c.requireDestructiveConfirm !== false;
     set('settings-port', c.settingsPort || 8765);
     checkPortMismatch();
     const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
@@ -2203,6 +2217,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           autoStartBridge:  document.getElementById('auto-start-bridge').checked,
           allowInsecureBridge: !!(document.getElementById('allow-insecure-bridge') && document.getElementById('allow-insecure-bridge').checked),
         },
+        requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
         settingsPort: parseInt(get('settings-port'), 10) || 8765,
       };
       const r = await fetch('/api/config', {
@@ -3105,6 +3120,17 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (typeof body.settingsPort === "number") {
           const sp = Math.round(body.settingsPort);
           if (sp >= 1 && sp <= 65535) current.settingsPort = sp;
+        }
+
+        // Merge compliance flags (destructive-confirm, ToS ack)
+        if (typeof body.requireDestructiveConfirm === "boolean") {
+          current.requireDestructiveConfirm = body.requireDestructiveConfirm;
+        }
+        if (body.tosAcknowledged && typeof body.tosAcknowledged === "object") {
+          const t = body.tosAcknowledged as Record<string, unknown>;
+          if (typeof t.accepted === "boolean" && typeof t.timestamp === "string") {
+            current.tosAcknowledged = { accepted: t.accepted, timestamp: t.timestamp };
+          }
         }
 
         // Merge permissions

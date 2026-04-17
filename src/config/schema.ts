@@ -217,4 +217,26 @@ export interface ServerConfig {
   responseLimits?: ResponseLimits;
   /** Port the settings UI server listens on (default 8765). */
   settingsPort?: number;
+  /**
+   * Require an explicit { confirmed: true } argument on destructive tool calls.
+   * Default true. Intended to keep the workflow user-initiated (per Proton
+   * ToS §2.10 on automated access) — the agent must surface each destructive
+   * intent to the user before it executes, via a separate tool call.
+   */
+  requireDestructiveConfirm?: boolean;
+  /**
+   * Records the user's acknowledgement of the Proton ToS §2.10 automated-access
+   * clause and the third-party-tool disclaimer. Unset means the user has not yet
+   * been shown the first-run compliance banner.
+   */
+  tosAcknowledged?: { accepted: boolean; timestamp: string };
 }
+
+/** Tools that mutate or destroy Proton-side state and require { confirmed: true }. */
+export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
+  "delete_email",
+  "bulk_delete",
+  "bulk_delete_emails",
+  "move_to_trash",
+  "move_to_spam",
+]);

@@ -143,6 +143,7 @@ export function defaultConfig(): ServerConfig {
     // access via the settings UI (npm run settings).
     permissions: buildPermissions("read_only"),
     responseLimits: { ...DEFAULT_RESPONSE_LIMITS },
+    requireDestructiveConfirm: true,
   };
 }
 
@@ -223,6 +224,11 @@ export function loadConfig(): ServerConfig | null {
         tools: { ...base.permissions.tools, ...filteredTools },
       },
       responseLimits: mergedLimits,
+      // Destructive-tool confirmation defaults to TRUE; only an explicit false
+      // opts out. This keeps the safe default for existing configs that never
+      // set the field.
+      requireDestructiveConfirm: parsed.requireDestructiveConfirm !== false,
+      tosAcknowledged: parsed.tosAcknowledged,
     };
     tags.found = true;
     return result;

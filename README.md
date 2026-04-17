@@ -8,7 +8,24 @@
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.27+-green.svg)](https://github.com/modelcontextprotocol/sdk)
 [![Tests](https://img.shields.io/badge/tests-1%2C251%20passing-brightgreen.svg)](#development)
 
-**Read, compose, and manage your encrypted ProtonMail inbox from any AI assistant — with human-controlled permissions.**
+**Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — with human-controlled permissions.**
+
+---
+
+## ⚠ Proton Terms of Service Notice
+
+This is an **unofficial third-party tool** that connects to Proton Mail through Proton Bridge's local IMAP/SMTP surface. It is **not affiliated with, endorsed by, or authored by Proton AG**.
+
+Proton's Terms of Service ([proton.me/legal/terms](https://proton.me/legal/terms)) §2.10 prohibits "accessing the Services through automated means (including but not limited to bots, scripts, or similar technologies)". The textual reading covers agentic / scripted workloads against Bridge even though Bridge itself is a sanctioned surface.
+
+This server is designed to keep access **user-initiated**, not autonomous:
+
+- Default permission preset is `read_only`. Sending, deletion, and folder mutation require explicit user opt-in via the settings UI.
+- Destructive tools (delete / move-to-trash / move-to-spam) require a per-call `{ confirmed: true }` argument so the user sees the intent in their MCP client and can cancel it.
+- Elevated permissions require out-of-band human approval (settings UI button or terminal), not an agent-only grant.
+- The settings UI shows a first-run ToS acknowledgement the user must click through before credentials are accepted.
+
+You remain the operator of your Proton account. Running this server against your own account is your decision to make under Proton's ToS; the authors disclaim responsibility for ToS compliance on your behalf.
 
 ---
 
