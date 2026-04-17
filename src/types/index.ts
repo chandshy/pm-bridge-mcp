@@ -12,6 +12,12 @@ export interface SMTPConfig {
   smtpToken?: string;
   /** Path to exported Proton Bridge TLS certificate for proper localhost cert trust */
   bridgeCertPath?: string;
+  /**
+   * Explicit opt-in to accept the local Bridge connection without a pinned TLS cert.
+   * Default false → the service refuses to start when localhost is used without a cert.
+   * Set true (or PROTONMAIL_MCP_INSECURE_BRIDGE=1) to preserve the pre-2026-04 behavior.
+   */
+  allowInsecureBridge?: boolean;
 }
 
 export interface IMAPConfig {
@@ -22,6 +28,8 @@ export interface IMAPConfig {
   password: string;
   /** Path to exported Proton Bridge TLS certificate for proper localhost cert trust */
   bridgeCertPath?: string;
+  /** See SMTPConfig.allowInsecureBridge — same semantics for IMAP. */
+  allowInsecureBridge?: boolean;
 }
 
 export interface ProtonMailConfig {

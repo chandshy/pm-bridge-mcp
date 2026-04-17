@@ -3,7 +3,7 @@
  * Isolated in its own file so that vi.mock('fs') does not bleed into other suites.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SimpleIMAPService } from "./simple-imap-service.js";
 
 // ─── Module-level mocks ──────────────────────────────────────────────────────
@@ -47,6 +47,8 @@ describe("SimpleIMAPService.connect() bridgeCertPath handling", () => {
     statSync.mockReset();
     readFileSync.mockReset();
   });
+
+  describe("with allowInsecureBridge opt-out in effect (env var)", () => {
 
   it("loads cert from file path when statSync says it is not a directory (lines 315-331)", async () => {
     statSync.mockReturnValue({ isDirectory: () => false });
@@ -93,5 +95,57 @@ describe("SimpleIMAPService.connect() bridgeCertPath handling", () => {
     await svc.connect("localhost", 1143, "user", "pass", "/path/cert.pem");
 
     expect(readFileSync).toHaveBeenCalledWith("/path/cert.pem");
+  });
+  }); // end "with allowInsecureBridge opt-out"
+
+  describe("strict mode (no allowInsecureBridge opt-in)", () => {
+    // Tests in this block run with the env var temporarily cleared so that
+    // the strict default (throw when no cert or cert load fails) is exercised.
+    let prevEnv: string | undefined;
+    beforeEach(() => {
+      prevEnv = process.env.PROTONMAIL_MCP_INSECURE_BRIDGE;
+      delete process.env.PROTONMAIL_MCP_INSECURE_BRIDGE;
+    });
+    afterEach(() => {
+      if (prevEnv !== undefined) process.env.PROTONMAIL_MCP_INSECURE_BRIDGE = prevEnv;
+    });
+
+    it("throws when localhost and no cert path is configured", async () => {
+      const svc = new SimpleIMAPService();
+      await expect(svc.connect("localhost", 1143, "user", "pass")).rejects.toThrow(
+        /No Bridge certificate configured/
+      );
+      expect((svc as any).isConnected).toBe(false);
+    });
+
+    it("throws when cert path is configured but readFileSync fails", async () => {
+      statSync.mockReturnValue({ isDirectory: () => false });
+      readFileSync.mockImplementation(() => { throw new Error("ENOENT: no such file"); });
+
+      const svc = new SimpleIMAPService();
+      await expect(
+        svc.connect("localhost", 1143, "user", "pass", "/bad/cert.pem")
+      ).rejects.toThrow(/could not be loaded and allowInsecureBridge is not set/);
+      expect((svc as any).isConnected).toBe(false);
+    });
+
+    it("connects successfully when cert loads cleanly (strict default)", async () => {
+      statSync.mockReturnValue({ isDirectory: () => false });
+      readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
+
+      const svc = new SimpleIMAPService();
+      await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+
+      expect((svc as any).insecureTls).toBeFalsy();
+      expect((svc as any).isConnected).toBe(true);
+    });
+
+    it("respects allowInsecureBridge=true passed as explicit parameter", async () => {
+      const svc = new SimpleIMAPService();
+      // No cert + explicit opt-in via parameter → falls back to insecure, does not throw
+      await svc.connect("localhost", 1143, "user", "pass", undefined, undefined, true);
+      expect((svc as any).insecureTls).toBe(true);
+      expect((svc as any).isConnected).toBe(true);
+    });
   });
 });

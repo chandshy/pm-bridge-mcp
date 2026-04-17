@@ -1442,6 +1442,17 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           </label>
           <div class="hint" style="margin-top:4px">Automatically launches Bridge if it is not reachable when the MCP server starts.</div>
         </div>
+        <div class="field" style="margin-top:6px">
+          <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="allow-insecure-bridge"><span class="slider"></span></span>
+            <span>Allow insecure Bridge connection (skip TLS validation)</span>
+          </label>
+          <div class="hint" style="margin-top:4px">
+            Only enable if you cannot set a Bridge certificate path above. With this off (the default),
+            the server refuses to connect to a localhost Bridge without a pinned cert — matching Proton
+            Bridge 3.21+ hardening.
+          </div>
+        </div>
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
           <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px"
@@ -2116,6 +2127,8 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     set('bridge-path', cn.bridgePath || '');
     document.getElementById('debug-mode').checked = !!cn.debug;
     document.getElementById('auto-start-bridge').checked = !!cn.autoStartBridge;
+    var insecureEl = document.getElementById('allow-insecure-bridge');
+    if (insecureEl) insecureEl.checked = !!cn.allowInsecureBridge;
     set('settings-port', c.settingsPort || 8765);
     checkPortMismatch();
     const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
@@ -2188,6 +2201,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           tlsMode:          tlsModeVal,
           debug:            document.getElementById('debug-mode').checked,
           autoStartBridge:  document.getElementById('auto-start-bridge').checked,
+          allowInsecureBridge: !!(document.getElementById('allow-insecure-bridge') && document.getElementById('allow-insecure-bridge').checked),
         },
         settingsPort: parseInt(get('settings-port'), 10) || 8765,
       };
@@ -3080,6 +3094,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             bridgePath:      typeof c.bridgePath === "string" ? c.bridgePath.trim().replace(/^["']|["']$/g, "") : current.connection.bridgePath,
             debug:           typeof c.debug === "boolean" ? c.debug : current.connection.debug,
             autoStartBridge: typeof c.autoStartBridge === "boolean" ? c.autoStartBridge : current.connection.autoStartBridge,
+            allowInsecureBridge: typeof c.allowInsecureBridge === "boolean" ? c.allowInsecureBridge : current.connection.allowInsecureBridge,
             // Only overwrite credentials if a non-empty, non-placeholder string was sent
             ...(typeof c.password  === "string" && c.password  && c.password  !== "••••••••" ? { password:  c.password  } : {}),
             ...(typeof c.smtpToken === "string" && c.smtpToken && c.smtpToken !== "••••••••" ? { smtpToken: c.smtpToken } : {}),

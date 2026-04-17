@@ -138,6 +138,12 @@ export interface ConnectionSettings {
   /** Path to exported Proton Bridge TLS certificate */
   bridgeCertPath: string;
   /**
+   * Explicit opt-in to run IMAP/SMTP against localhost Bridge without a pinned cert.
+   * Default false — the services throw at startup if localhost is used with neither
+   * a loaded cert nor this flag. Override per-launch with PROTONMAIL_MCP_INSECURE_BRIDGE=1.
+   */
+  allowInsecureBridge?: boolean;
+  /**
    * TLS mode for SMTP/IMAP connections.
    * 'starttls' (default) — use STARTTLS upgrade; correct for Proton Bridge.
    * 'ssl'               — implicit TLS (ports 465/993); only for non-Bridge setups.
@@ -149,6 +155,15 @@ export interface ConnectionSettings {
   bridgePath?: string;
   debug: boolean;
 }
+
+/**
+ * Minimum Proton Bridge version the MCP server targets.
+ * Bumped when Proton ships security-relevant Bridge changes (e.g. v3.21.2
+ * strict TLS validation, v3.22.0 FIDO2 + 50 MB import cap). Detected at
+ * startup via the IMAP ID command; running an older Bridge logs a warning
+ * but does not block connection.
+ */
+export const BRIDGE_MIN_VERSION = "3.22.0";
 
 // ─── Response Limits ──────────────────────────────────────────────────────────
 
@@ -183,7 +198,14 @@ export const DEFAULT_RESPONSE_LIMITS: ResponseLimits = {
 
 // ─── Top-Level Config ──────────────────────────────────────────────────────────
 
-export const CONFIG_VERSION = 1;
+/**
+ * Config schema version.
+ *   v1 → pre-2026-04 — no explicit insecure-Bridge opt-in (TLS validation was
+ *        silently disabled when no cert was configured).
+ *   v2 → 2026-04 hardening — allowInsecureBridge is required to keep the legacy
+ *        behavior. v1 configs are grandfathered in the loader with a warning.
+ */
+export const CONFIG_VERSION = 2;
 
 export interface ServerConfig {
   configVersion: number;

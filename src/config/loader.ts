@@ -135,6 +135,7 @@ export function defaultConfig(): ServerConfig {
       password: "",
       smtpToken: "",
       bridgeCertPath: "",
+      allowInsecureBridge: false,
       bridgePath: "",
       debug: false,
     },
@@ -197,9 +198,24 @@ export function loadConfig(): ServerConfig | null {
     mergedLimits.maxEmailListResults = clamp(mergedLimits.maxEmailListResults, 1,       200);
     mergedLimits.maxAttachmentBytes  = clamp(mergedLimits.maxAttachmentBytes,  0,       1_048_576);
 
+    const loadedVersion = parsed.configVersion ?? 1;
+    const mergedConnection = { ...base.connection, ...(parsed.connection ?? {}) };
+
+    // v1 → v2 grandfather: legacy configs ran with TLS validation silently
+    // disabled when no Bridge cert was set. Preserve that behavior (so existing
+    // installs keep working) but make the opt-in explicit on the next save, and
+    // leave a breadcrumb the services surface as a startup warning.
+    if (
+      loadedVersion < 2 &&
+      !mergedConnection.bridgeCertPath &&
+      parsed.connection?.allowInsecureBridge === undefined
+    ) {
+      mergedConnection.allowInsecureBridge = true;
+    }
+
     const result: ServerConfig = {
-      configVersion: parsed.configVersion ?? base.configVersion,
-      connection: { ...base.connection, ...(parsed.connection ?? {}) },
+      configVersion: CONFIG_VERSION,
+      connection: mergedConnection,
       permissions: {
         // Default to "read_only" — not "full" — for pre-permissions config files.
         // Silently upgrading old configs to full access would be a privilege-escalation risk.

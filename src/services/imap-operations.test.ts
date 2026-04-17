@@ -1486,7 +1486,7 @@ describe("SimpleIMAPService private reconnect", () => {
 
     await (svc as any).reconnect();
 
-    expect(connectSpy).toHaveBeenCalledWith("localhost", 1143, "user@example.com", "secret", undefined, undefined);
+    expect(connectSpy).toHaveBeenCalledWith("localhost", 1143, "user@example.com", "secret", undefined, undefined, false);
   });
 });
 

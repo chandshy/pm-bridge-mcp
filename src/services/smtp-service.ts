@@ -59,6 +59,10 @@ export class SMTPService {
       ? this.config.smtp.smtpToken
       : this.config.smtp.password;
 
+    const allowInsecure =
+      this.config.smtp.allowInsecureBridge === true ||
+      process.env.PROTONMAIL_MCP_INSECURE_BRIDGE === "1";
+
     // Build TLS options based on connection type
     let tlsOptions: Record<string, unknown>;
     if (isLocalhost) {
@@ -82,26 +86,44 @@ export class SMTPService {
           };
           logger.info(`SMTP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, "SMTPService");
         } catch (err: unknown) {
-          logger.error(
-            `SMTP: Failed to load Bridge cert at "${resolvedCertPath}" — TLS certificate validation DISABLED. ` +
-            "Update the Bridge Certificate Path in Settings → Connection to secure this connection.",
+          if (!allowInsecure) {
+            throw new Error(
+              `SMTP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
+              `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
+              `(or PROTONMAIL_MCP_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
+              `Underlying error: ${(err as Error).message}`
+            );
+          }
+          logger.warn(
+            `SMTP: Failed to load Bridge cert at "${resolvedCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set). ` +
+            "Export a fresh cert from Bridge → Help → Export TLS Certificate and update Settings → Connection to re-secure.",
             "SMTPService",
             err
           );
           tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
           this.insecureTls = true;
         }
-      } else {
-        // Only warn after credentials have been loaded (i.e. not during the pre-config constructor call)
-        if (this.config.smtp.username) {
-          logger.warn(
-            "SMTP: No Bridge certificate configured — TLS certificate validation DISABLED for localhost. " +
-            "Export the cert from Bridge → Help → Export TLS Certificate, then set the path in Settings → Connection.",
-            "SMTPService"
+      } else if (this.config.smtp.username) {
+        // Credentials are loaded — this is a real connection attempt.
+        if (!allowInsecure) {
+          throw new Error(
+            "SMTP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate " +
+            "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
+            "disabled for localhost), set allowInsecureBridge: true or launch with PROTONMAIL_MCP_INSECURE_BRIDGE=1."
           );
-        } else {
-          logger.debug("SMTP: transporter pre-initialized (no config loaded yet — reinitialize() will be called after config loads)", "SMTPService");
         }
+        logger.warn(
+          "SMTP: No Bridge certificate configured and allowInsecureBridge is set — " +
+          "TLS certificate validation DISABLED for localhost. Export the cert from Bridge → Help → " +
+          "Export TLS Certificate and clear the insecure flag to re-secure.",
+          "SMTPService"
+        );
+        tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
+        this.insecureTls = true;
+      } else {
+        // Pre-config constructor call — credentials haven't loaded yet. Skip the hard
+        // check until reinitialize() runs after main() populates the config.
+        logger.debug("SMTP: transporter pre-initialized (no config loaded yet — reinitialize() will be called after config loads)", "SMTPService");
         tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
         this.insecureTls = true;
       }
