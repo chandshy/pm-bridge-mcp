@@ -394,6 +394,44 @@ describe("loadConfig", () => {
     const cfg = loadConfig();
     expect(cfg!.connection.allowInsecureBridge).toBe(false);
   });
+
+  it("defaults requireDestructiveConfirm to true when the field is absent on disk", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const cfgjson = JSON.stringify({
+      configVersion: 2,
+      connection: {},
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.requireDestructiveConfirm).toBe(true);
+  });
+
+  it("preserves an explicit requireDestructiveConfirm: false from disk", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const cfgjson = JSON.stringify({
+      configVersion: 2,
+      connection: {},
+      permissions: { preset: "full", tools: {} },
+      requireDestructiveConfirm: false,
+    });
+    mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.requireDestructiveConfirm).toBe(false);
+  });
+
+  it("loads tosAcknowledged when present on disk", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const cfgjson = JSON.stringify({
+      configVersion: 2,
+      connection: {},
+      permissions: { preset: "full", tools: {} },
+      tosAcknowledged: { accepted: true, timestamp: "2026-04-17T00:00:00Z" },
+    });
+    mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.tosAcknowledged).toEqual({ accepted: true, timestamp: "2026-04-17T00:00:00Z" });
+  });
 });
 
 // ─── saveConfig ────────────────────────────────────────────────────────────────
