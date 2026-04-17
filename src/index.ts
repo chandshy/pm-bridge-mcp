@@ -4038,18 +4038,26 @@ async function main() {
     // Desktop spawns.
     const loadedCfg = loadConfig();
     const remoteCn = loadedCfg?.connection;
-    if (remoteCn?.remoteMode && remoteCn?.remoteBearerToken) {
+    // Remote mode requires at least one auth mechanism: static bearer OR OAuth.
+    const hasBearer = !!remoteCn?.remoteBearerToken;
+    const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!remoteCn?.remoteOauthAdminPassword;
+    if (remoteCn?.remoteMode && (hasBearer || hasOAuth)) {
       const { startHttpTransport } = await import("./transports/http.js");
       const handle = await startHttpTransport({
         server,
         host: remoteCn.remoteHost || "127.0.0.1",
         port: remoteCn.remotePort ?? 8788,
         path: remoteCn.remotePath || "/mcp",
-        bearerToken: remoteCn.remoteBearerToken,
+        bearerToken: remoteCn.remoteBearerToken || "",
         tlsCertPath: remoteCn.remoteTlsCertPath || undefined,
         tlsKeyPath:  remoteCn.remoteTlsKeyPath  || undefined,
+        oauthEnabled: !!remoteCn.remoteOauthEnabled,
+        oauthAdminPassword: remoteCn.remoteOauthAdminPassword || undefined,
+        oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
+        rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
+        rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,
       });
-      logger.info(`pm-bridge-mcp started on HTTP transport at ${handle.url}`, "MCPServer");
+      logger.info(`pm-bridge-mcp started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
       (globalThis as unknown as { __pmBridgeHttpHandle?: { close(): Promise<void> } }).__pmBridgeHttpHandle = handle;
     } else {
       const transport = new StdioServerTransport();

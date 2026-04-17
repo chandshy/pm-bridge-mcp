@@ -171,6 +171,28 @@ export interface ConnectionSettings {
   remoteTlsCertPath?: string;
   /** Optional HTTPS key path for the HTTP transport. Must be paired with remoteTlsCertPath. */
   remoteTlsKeyPath?: string;
+  /**
+   * Enable OAuth 2.1 endpoints alongside the static bearer. MCP hosts can
+   * register themselves via /oauth/register and obtain tokens via a
+   * PKCE-guarded consent flow. Recommended when exposing beyond a trusted
+   * tunnel; still works with any static-bearer callers.
+   */
+  remoteOauthEnabled?: boolean;
+  /**
+   * Admin password required to approve OAuth consent. Required when
+   * remoteOauthEnabled=true. High-value secret — keychain storage is preferred.
+   */
+  remoteOauthAdminPassword?: string;
+  /**
+   * Externally-visible issuer URL for OAuth metadata (defaults to
+   * http[s]://remoteHost:remotePort). Override when behind a reverse
+   * proxy, e.g. https://mcp.example.com.
+   */
+  remoteOauthIssuer?: string;
+  /** Sustained requests/sec per caller (default 20). */
+  remoteRateLimitPerSecond?: number;
+  /** Burst size per caller (default 40). */
+  remoteRateLimitBurst?: number;
   debug: boolean;
 }
 

@@ -3,16 +3,27 @@
  *
  * Spec reference: https://modelcontextprotocol.io/specification/2025-11-25
  *
- * Authentication in this v1 is a **shared bearer token** that the user
- * configures via \`remoteBearerToken\` in the settings file. This is
- * deliberately simpler than full OAuth 2.1 + PKCE — most self-hosted
- * deployments only need "me on my phone talking to my laptop's Bridge
- * over a Tailscale tunnel." A follow-up PR can add an OAuth 2.1
- * authorization server on top of this transport for public deployments.
+ * Auth supports two modes that can be mixed on the same listener:
  *
- * The bearer token is compared with timingSafeEqual to avoid leaking it
- * through response-time analysis. Requests without a valid token get a
- * 401 with a `WWW-Authenticate: Bearer` header per RFC 6750.
+ *   1. **Static bearer token** — programmatic use. The user configures
+ *      `remoteBearerToken` in the settings file and clients present it
+ *      as `Authorization: Bearer <token>`. This is the minimal deployment
+ *      (me-on-my-phone talking to my laptop's Bridge over a trusted
+ *      tunnel). Token is compared with timingSafeEqual.
+ *
+ *   2. **OAuth 2.1 + PKCE** — spec-compliant mode. When `oauthEnabled`
+ *      is true the server also mounts the RFC 8414 authorization-server
+ *      metadata, RFC 9728 protected-resource metadata, RFC 7591 Dynamic
+ *      Client Registration endpoint, and the authorize/token/revoke
+ *      endpoints. MCP hosts register themselves and obtain tokens via a
+ *      human-in-the-loop consent screen gated on the admin password.
+ *
+ * Every unauthenticated path is rate-limited per IP. The authed /mcp
+ * endpoint is rate-limited per token key so a compromised token can't
+ * DoS Bridge.
+ *
+ * Requests without a valid credential get 401 with a `WWW-Authenticate`
+ * header per RFC 6750.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
@@ -22,6 +33,9 @@ import { timingSafeEqual } from "crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { logger } from "../utils/logger.js";
+import { OAuthStore } from "./oauth-store.js";
+import { OAuthHandlers } from "./oauth-handlers.js";
+import { TokenBucketLimiter } from "./rate-limit.js";
 
 export interface HttpTransportOptions {
   /** MCP server instance to wire the transport into. */
@@ -37,27 +51,33 @@ export interface HttpTransportOptions {
   /** Optional TLS cert/key paths for HTTPS. If omitted, serves over plain HTTP. */
   tlsCertPath?: string;
   tlsKeyPath?: string;
+  /** Enable OAuth 2.1 authorization-server endpoints alongside the static bearer. */
+  oauthEnabled?: boolean;
+  /** Admin password required to complete the consent step. Required when oauthEnabled=true. */
+  oauthAdminPassword?: string;
+  /** Externally-visible issuer URL. When omitted we derive it from the bind host/port. */
+  oauthIssuer?: string;
+  /** Requests per second per client for rate limiting (default 20). */
+  rateLimitPerSecond?: number;
+  /** Burst size (default 40). */
+  rateLimitBurst?: number;
 }
 
 export interface HttpTransportHandle {
-  /** Scheme (http/https), host, port the server is actually listening on. */
+  /** URL of the MCP endpoint (http[s]://host:port/mcp). */
   url: string;
+  /** OAuth issuer URL, present when OAuth is enabled. */
+  issuer?: string;
   /** Stop accepting new connections and close existing ones. */
   close: () => Promise<void>;
 }
 
-/**
- * Constant-time compare a candidate token to the configured one.
- * Returns false when lengths differ (does NOT leak length via early-exit).
- */
+/** Constant-time compare, safe against length-leak. */
 function tokenMatches(actual: string, expected: string): boolean {
   if (!expected || !actual) return false;
   const a = Buffer.from(actual, "utf-8");
   const b = Buffer.from(expected, "utf-8");
   if (a.length !== b.length) {
-    // timingSafeEqual requires equal-length inputs — fall back to compare
-    // a pair of equal-length dummy buffers so the caller path still runs
-    // in ~constant time regardless of length mismatch.
     const pad = Buffer.alloc(b.length, 0);
     try { timingSafeEqual(pad, b); } catch { /* ignore */ }
     return false;
@@ -72,10 +92,6 @@ function extractBearer(req: IncomingMessage): string | null {
   return m ? m[1] : null;
 }
 
-/**
- * Accumulate the request body into a single string and JSON.parse it once
- * the stream ends. Returns null for non-JSON bodies or empty bodies.
- */
 async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -102,34 +118,83 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise
   });
 }
 
+function clientIp(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? "0.0.0.0";
+}
+
 /**
  * Start the HTTP MCP server. Resolves to a handle you can close on shutdown.
- * Blocks the MCP server's internal call to transport.start() by connecting
- * it once the first message arrives — the StreamableHTTPServerTransport
- * manages per-request sessions internally.
  */
 export async function startHttpTransport(opts: HttpTransportOptions): Promise<HttpTransportHandle> {
   const host = opts.host ?? "127.0.0.1";
   const path = opts.path ?? "/mcp";
 
-  if (!opts.bearerToken) {
-    throw new Error("HTTP transport requires remoteBearerToken to be set in the config");
+  if (!opts.bearerToken && !opts.oauthEnabled) {
+    throw new Error("HTTP transport requires remoteBearerToken to be set in the config (or enable OAuth)");
   }
 
   const transport = new StreamableHTTPServerTransport({});
   await opts.server.connect(transport);
 
+  // Rate limiters — one bucket per client IP for unauthed endpoints; one
+  // bucket per token (sha256-fingerprint) for authed /mcp calls.
+  const unauthLimiter = new TokenBucketLimiter({
+    capacity: opts.rateLimitBurst ?? 40,
+    refillPerSecond: opts.rateLimitPerSecond ?? 20,
+  });
+  const authLimiter = new TokenBucketLimiter({
+    capacity: (opts.rateLimitBurst ?? 40) * 3,          // authed calls get a bigger bucket
+    refillPerSecond: (opts.rateLimitPerSecond ?? 20) * 3,
+  });
+
+  // OAuth state (only populated when enabled).
+  const scheme = opts.tlsCertPath && opts.tlsKeyPath ? "https" : "http";
+  const derivedIssuer = `${scheme}://${host}:${opts.port}`;
+  const issuer = opts.oauthIssuer ?? derivedIssuer;
+  const oauthStore = new OAuthStore();
+  const oauthHandlers = opts.oauthEnabled && opts.oauthAdminPassword
+    ? new OAuthHandlers(
+        oauthStore,
+        { issuer, resource: `${issuer}${path}`, adminPassword: opts.oauthAdminPassword },
+        unauthLimiter,
+      )
+    : null;
+
+  if (opts.oauthEnabled && !opts.oauthAdminPassword) {
+    throw new Error("OAuth is enabled but no oauthAdminPassword is set. Generate one or disable OAuth.");
+  }
+
+  const sweep = setInterval(() => {
+    oauthStore.sweep();
+    unauthLimiter.sweep();
+    authLimiter.sweep();
+  }, 60_000).unref();
+
   const listener = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    // Health check (no auth required) — lets operators confirm the port is up
-    // without exposing the authenticated endpoint.
-    if (req.url === "/health" && req.method === "GET") {
+    const url = new URL(req.url ?? "/", `${scheme}://${host}:${opts.port}`);
+
+    // Unauthenticated endpoints — all rate-limited per client IP.
+    if (req.method === "GET" && url.pathname === "/health") {
+      if (!unauthLimiter.take(`ip:${clientIp(req)}`)) {
+        res.statusCode = 429; res.end(JSON.stringify({ error: "rate_limited" })); return;
+      }
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ status: "ok", transport: "streamable-http" }));
+      res.end(JSON.stringify({
+        status: "ok",
+        transport: "streamable-http",
+        oauth: !!oauthHandlers,
+      }));
       return;
     }
 
-    if (req.url !== path) {
+    // OAuth endpoints — delegated to OAuthHandlers when enabled.
+    if (oauthHandlers && (url.pathname.startsWith("/oauth/") || url.pathname.startsWith("/.well-known/"))) {
+      const result = await oauthHandlers.dispatch(req, res, url);
+      if (result.handled) return;
+    }
+
+    if (url.pathname !== path) {
       res.statusCode = 404;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: "not_found" }));
@@ -137,11 +202,44 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     }
 
     const token = extractBearer(req);
-    if (!token || !tokenMatches(token, opts.bearerToken)) {
+    let tokenKey: string | null = null;
+    let ok = false;
+
+    if (token && opts.bearerToken && tokenMatches(token, opts.bearerToken)) {
+      ok = true;
+      tokenKey = "bearer:static";
+    } else if (token && oauthHandlers) {
+      const rec = oauthStore.verifyToken(token);
+      if (rec) {
+        // Resource Indicators: if the token was bound to a resource, it
+        // must match this endpoint's URL.
+        const expectedResource = `${issuer}${path}`;
+        if (rec.resource && rec.resource !== expectedResource) {
+          res.statusCode = 401;
+          res.setHeader("WWW-Authenticate", `Bearer realm="pm-bridge-mcp", error="invalid_token", error_description="token resource does not match endpoint"`);
+          res.end(JSON.stringify({ error: "invalid_token" }));
+          return;
+        }
+        ok = true;
+        tokenKey = `oauth:${rec.clientId}`;
+      }
+    }
+
+    if (!ok || !tokenKey) {
       res.statusCode = 401;
-      res.setHeader("WWW-Authenticate", 'Bearer realm="pm-bridge-mcp"');
+      res.setHeader("WWW-Authenticate",
+        oauthHandlers
+          ? `Bearer realm="pm-bridge-mcp", resource_metadata="${issuer}/.well-known/oauth-protected-resource"`
+          : 'Bearer realm="pm-bridge-mcp"',
+      );
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: "invalid_token" }));
+      return;
+    }
+
+    if (!authLimiter.take(tokenKey)) {
+      res.statusCode = 429;
+      res.end(JSON.stringify({ error: "rate_limited" }));
       return;
     }
 
@@ -173,13 +271,17 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     server.listen(opts.port, host);
   });
 
-  const scheme = opts.tlsCertPath && opts.tlsKeyPath ? "https" : "http";
   const url = `${scheme}://${host}:${opts.port}${path}`;
-  logger.info(`MCP HTTP transport listening at ${url}`, "HttpTransport");
+  logger.info(
+    `MCP HTTP transport listening at ${url}${oauthHandlers ? ` (OAuth enabled, issuer ${issuer})` : ""}`,
+    "HttpTransport",
+  );
 
   return {
     url,
+    issuer: oauthHandlers ? issuer : undefined,
     close: async () => {
+      clearInterval(sweep);
       try { await transport.close(); } catch { /* best effort */ }
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

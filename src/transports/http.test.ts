@@ -161,6 +161,503 @@ describe("HTTP transport", () => {
     expect(initRes.status).toBeLessThan(400);
   });
 
+  describe("OAuth 2.1 mode", () => {
+    async function startOauth(): Promise<{ url: string; port: number }> {
+      const port = await freePort();
+      handle = await startHttpTransport({
+        server: buildServer(),
+        port,
+        host: "127.0.0.1",
+        bearerToken: "",
+        oauthEnabled: true,
+        oauthAdminPassword: "admin-pw",
+      });
+      return { url: `http://127.0.0.1:${port}`, port };
+    }
+
+    it("refuses to start when oauthEnabled is true but no admin password is set", async () => {
+      const port = await freePort();
+      await expect(
+        startHttpTransport({
+          server: buildServer(),
+          port,
+          host: "127.0.0.1",
+          bearerToken: "",
+          oauthEnabled: true,
+        }),
+      ).rejects.toThrow(/oauthAdminPassword|admin password/i);
+    });
+
+    it("serves RFC 8414 oauth-authorization-server metadata", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/.well-known/oauth-authorization-server`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { issuer: string; token_endpoint: string; code_challenge_methods_supported: string[] };
+      expect(body.issuer).toMatch(/^http:\/\/127\.0\.0\.1:/);
+      expect(body.token_endpoint).toContain("/oauth/token");
+      expect(body.code_challenge_methods_supported).toContain("S256");
+    });
+
+    it("serves RFC 9728 oauth-protected-resource metadata", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/.well-known/oauth-protected-resource`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { resource: string; authorization_servers: string[] };
+      expect(body.resource).toContain("/mcp");
+      expect(body.authorization_servers).toHaveLength(1);
+    });
+
+    it("rejects DCR without any redirect_uris", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_name: "Test" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("completes an end-to-end PKCE flow: register → authorize → token → /mcp", async () => {
+      const { url } = await startOauth();
+      // 1. DCR
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_name: "E2E",
+          redirect_uris: ["http://localhost:9999/cb"],
+        }),
+      });
+      expect(reg.status).toBe(201);
+      const client = await reg.json() as { client_id: string };
+
+      // 2. PKCE challenge
+      const { createHash, randomBytes: rb } = await import("crypto");
+      const verifier = rb(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+
+      // 3. Consent submit (skips the GET HTML page).
+      const consent = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9999/cb",
+          code_challenge: challenge,
+          state: "xyz",
+          scope: "mcp:full",
+          admin_password: "admin-pw",
+        }).toString(),
+        redirect: "manual",
+      });
+      expect(consent.status).toBe(302);
+      const location = consent.headers.get("location") ?? "";
+      expect(location).toContain("http://localhost:9999/cb");
+      const code = new URL(location).searchParams.get("code") ?? "";
+      expect(code).toBeTruthy();
+
+      // 4. Token exchange.
+      const tokenRes = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9999/cb",
+          code_verifier: verifier,
+        }).toString(),
+      });
+      expect(tokenRes.status).toBe(200);
+      const tok = await tokenRes.json() as { access_token: string; token_type: string };
+      expect(tok.token_type).toBe("Bearer");
+
+      // 5. Authenticated /mcp call with the issued token.
+      const mcp = await fetch(`${url}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${tok.access_token}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "e2e-test", version: "0" },
+          },
+        }),
+      });
+      expect(mcp.status).toBeLessThan(400);
+    });
+
+    it("rejects an authorize POST with the wrong admin password", async () => {
+      const { url } = await startOauth();
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
+      });
+      const client = await reg.json() as { client_id: string };
+
+      const res = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9999/cb",
+          code_challenge: "x".repeat(43),
+          admin_password: "wrong",
+        }).toString(),
+        redirect: "manual",
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects a token request with a tampered code_verifier (PKCE fails)", async () => {
+      const { url } = await startOauth();
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
+      });
+      const client = await reg.json() as { client_id: string };
+      const { createHash: h, randomBytes: rb2 } = await import("crypto");
+      const verifier = rb2(32).toString("base64url");
+      const challenge = h("sha256").update(verifier).digest("base64url");
+      const consent = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9999/cb",
+          code_challenge: challenge,
+          admin_password: "admin-pw",
+        }).toString(),
+        redirect: "manual",
+      });
+      const code = new URL(consent.headers.get("location") ?? "").searchParams.get("code") ?? "";
+      const tokenRes = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9999/cb",
+          code_verifier: "totally-different",
+        }).toString(),
+      });
+      expect(tokenRes.status).toBe(400);
+      const body = await tokenRes.json() as { error: string };
+      expect(body.error).toBe("invalid_grant");
+    });
+
+    it("serves the consent HTML on GET /oauth/authorize", async () => {
+      const { url } = await startOauth();
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"], client_name: "Inky" }),
+      });
+      const client = await reg.json() as { client_id: string };
+      const q = new URLSearchParams({
+        client_id: client.client_id,
+        redirect_uri: "http://localhost:9999/cb",
+        code_challenge: "x".repeat(43),
+        code_challenge_method: "S256",
+      });
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain("Authorize pm-bridge-mcp");
+      expect(html).toContain("Inky");
+    });
+
+    it("returns WWW-Authenticate pointing to the resource-metadata doc when OAuth is on", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+      expect(res.status).toBe(401);
+      const auth = res.headers.get("www-authenticate") ?? "";
+      expect(auth).toContain("resource_metadata");
+      expect(auth).toContain("/.well-known/oauth-protected-resource");
+    });
+
+    it("rate-limits aggressive OAuth probing from a single IP", async () => {
+      const port = await freePort();
+      handle = await startHttpTransport({
+        server: buildServer(),
+        port,
+        host: "127.0.0.1",
+        bearerToken: "",
+        oauthEnabled: true,
+        oauthAdminPassword: "admin-pw",
+        rateLimitPerSecond: 5,
+        rateLimitBurst: 3,
+      });
+      const responses = await Promise.all(
+        Array.from({ length: 10 }, () =>
+          fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`),
+        ),
+      );
+      const statuses = responses.map(r => r.status);
+      expect(statuses).toContain(429);
+    });
+
+    it("token endpoint rejects unsupported grant types", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "password" }).toString(),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { error: string }).error).toBe("unsupported_grant_type");
+    });
+
+    it("token endpoint rejects mismatched redirect_uri / client_id / unknown codes", async () => {
+      const { url } = await startOauth();
+      // Unknown code
+      const unknown = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: "nope",
+          client_id: "pmc_x",
+          redirect_uri: "http://x/cb",
+          code_verifier: "v",
+        }).toString(),
+      });
+      expect(unknown.status).toBe(400);
+      expect((await unknown.json() as { error: string }).error).toBe("invalid_grant");
+
+      // Wrong client_id / redirect_uri on a valid code.
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://localhost:9998/cb"] }),
+      });
+      const client = await reg.json() as { client_id: string };
+      const { createHash, randomBytes: rb } = await import("crypto");
+      const verifier = rb(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      const consent = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9998/cb",
+          code_challenge: challenge,
+          admin_password: "admin-pw",
+        }).toString(),
+        redirect: "manual",
+      });
+      const code = new URL(consent.headers.get("location") ?? "").searchParams.get("code") ?? "";
+
+      // Wrong client_id
+      const wrongClient = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          client_id: "pmc_wrong",
+          redirect_uri: "http://localhost:9998/cb",
+          code_verifier: verifier,
+        }).toString(),
+      });
+      expect(wrongClient.status).toBe(400);
+    });
+
+    it("revoke endpoint returns 200 even for unknown tokens (RFC 7009)", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/oauth/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: "does-not-exist" }).toString(),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("GET /oauth/authorize rejects unknown client_id with 400", async () => {
+      const { url } = await startOauth();
+      const q = new URLSearchParams({
+        client_id: "pmc_unknown",
+        redirect_uri: "http://x/cb",
+        code_challenge: "x".repeat(43),
+        code_challenge_method: "S256",
+      });
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
+      expect(res.status).toBe(400);
+    });
+
+    it("GET /oauth/authorize rejects non-S256 PKCE method", async () => {
+      const { url } = await startOauth();
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
+      });
+      const client = await reg.json() as { client_id: string };
+      const q = new URLSearchParams({
+        client_id: client.client_id,
+        redirect_uri: "http://localhost:9999/cb",
+        code_challenge: "x".repeat(43),
+        code_challenge_method: "plain",
+      });
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
+      expect(res.status).toBe(400);
+    });
+
+    it("DCR rejects malformed redirect_uri entries", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["not-a-url"] }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("token/revoke endpoints surface a 400 for malformed bodies", async () => {
+      const { url } = await startOauth();
+      // Token: application/json content-type but non-JSON body
+      const token = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{not json",
+      });
+      expect(token.status).toBe(400);
+      // Revoke: same trick
+      const revoke = await fetch(`${url}/oauth/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{not json",
+      });
+      expect(revoke.status).toBe(400);
+    });
+
+    it("rejects an OAuth token bound to a different resource (RFC 8707)", async () => {
+      const port = await freePort();
+      // Start with an explicit issuer + resource that DIFFERS from the request URL.
+      handle = await startHttpTransport({
+        server: buildServer(),
+        port,
+        host: "127.0.0.1",
+        bearerToken: "",
+        oauthEnabled: true,
+        oauthAdminPassword: "admin-pw",
+        oauthIssuer: `http://127.0.0.1:${port}`,
+      });
+      const baseUrl = `http://127.0.0.1:${port}`;
+
+      const reg = await fetch(`${baseUrl}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://localhost:9998/cb"] }),
+      });
+      const client = await reg.json() as { client_id: string };
+      const { createHash, randomBytes: rb } = await import("crypto");
+      const verifier = rb(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      // Authorize with a foreign resource URI.
+      const consent = await fetch(`${baseUrl}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9998/cb",
+          code_challenge: challenge,
+          resource: "https://other.example.com/mcp",
+          admin_password: "admin-pw",
+        }).toString(),
+        redirect: "manual",
+      });
+      const code = new URL(consent.headers.get("location") ?? "").searchParams.get("code") ?? "";
+
+      const tokRes = await fetch(`${baseUrl}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          client_id: client.client_id,
+          redirect_uri: "http://localhost:9998/cb",
+          code_verifier: verifier,
+        }).toString(),
+      });
+      expect(tokRes.status).toBe(200);
+      const token = (await tokRes.json() as { access_token: string }).access_token;
+
+      // The token is bound to other.example.com, but we're hitting 127.0.0.1.
+      const mcp = await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+      expect(mcp.status).toBe(401);
+      expect(mcp.headers.get("www-authenticate")).toMatch(/resource does not match/i);
+    });
+  });
+
+  it("rate-limits authed /mcp callers per token", async () => {
+    const port = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(),
+      port,
+      host: "127.0.0.1",
+      bearerToken: "secret",
+      rateLimitPerSecond: 1,
+      rateLimitBurst: 2,
+    });
+    // auth bucket is 3x the burst (see http.ts), so burst=2 ⇒ authed cap ≈ 6.
+    const responses = await Promise.all(
+      Array.from({ length: 15 }, () =>
+        fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            Authorization: "Bearer secret",
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+        }),
+      ),
+    );
+    expect(responses.map(r => r.status)).toContain(429);
+  });
+
+  it("returns 500 when the transport handler throws", async () => {
+    // Stand up a real listener, then monkey-patch the transport to throw.
+    const port = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(),
+      port,
+      host: "127.0.0.1",
+      bearerToken: "secret",
+    });
+    // Reach into the internals via a deliberately malformed JSON body —
+    // readJsonBody throws, the listener catches, writes 500.
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer secret" },
+      body: "{malformed json",
+    });
+    expect(res.status).toBe(500);
+  });
+
   it("rejects bodies that exceed the size cap", async () => {
     const port = await freePort();
     handle = await startHttpTransport({
