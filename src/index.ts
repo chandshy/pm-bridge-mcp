@@ -4033,9 +4033,29 @@ async function main() {
       }, intervalMs).unref(); // .unref() so the timer doesn't prevent clean exit
     }
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    logger.info("Proton Mail MCP Server started. Tools, Resources, and Prompts are available.", "MCPServer");
+    // Transport selection: HTTP when remoteMode=true in the config (with a
+    // bearer token), otherwise the default stdio transport that Claude
+    // Desktop spawns.
+    const loadedCfg = loadConfig();
+    const remoteCn = loadedCfg?.connection;
+    if (remoteCn?.remoteMode && remoteCn?.remoteBearerToken) {
+      const { startHttpTransport } = await import("./transports/http.js");
+      const handle = await startHttpTransport({
+        server,
+        host: remoteCn.remoteHost || "127.0.0.1",
+        port: remoteCn.remotePort ?? 8788,
+        path: remoteCn.remotePath || "/mcp",
+        bearerToken: remoteCn.remoteBearerToken,
+        tlsCertPath: remoteCn.remoteTlsCertPath || undefined,
+        tlsKeyPath:  remoteCn.remoteTlsKeyPath  || undefined,
+      });
+      logger.info(`pm-bridge-mcp started on HTTP transport at ${handle.url}`, "MCPServer");
+      (globalThis as unknown as { __pmBridgeHttpHandle?: { close(): Promise<void> } }).__pmBridgeHttpHandle = handle;
+    } else {
+      const transport = new StdioServerTransport();
+      await server.connect(transport);
+      logger.info("pm-bridge-mcp started on stdio transport.", "MCPServer");
+    }
 
     // ── Daemon: start settings HTTP server + system tray ───────────────────
     // Both run alongside the MCP stdio transport. stdout is now owned by the

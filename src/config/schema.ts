@@ -153,6 +153,24 @@ export interface ConnectionSettings {
   autoStartBridge?: boolean;
   /** Explicit path to the Proton Bridge executable. Leave blank to auto-detect. */
   bridgePath?: string;
+  /**
+   * Remote (HTTP) transport mode. When true, pm-bridge-mcp listens on an
+   * HTTP port for MCP requests instead of stdio, gated by a bearer token.
+   * Default false — stdio transport, which is what Claude Desktop spawns.
+   */
+  remoteMode?: boolean;
+  /** Bind host for the HTTP transport. Default 127.0.0.1. */
+  remoteHost?: string;
+  /** Port for the HTTP transport. Default 8788. */
+  remotePort?: number;
+  /** HTTP path for the MCP endpoint. Default /mcp. */
+  remotePath?: string;
+  /** Required when remoteMode=true. Shared bearer token clients send in Authorization: Bearer ... */
+  remoteBearerToken?: string;
+  /** Optional HTTPS cert path for the HTTP transport. Required for public exposure. */
+  remoteTlsCertPath?: string;
+  /** Optional HTTPS key path for the HTTP transport. Must be paired with remoteTlsCertPath. */
+  remoteTlsKeyPath?: string;
   debug: boolean;
 }
 
