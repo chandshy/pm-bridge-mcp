@@ -55,6 +55,8 @@ import { currentCaller } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
 import { notifications as agentNotifications } from "./agents/notifications.js";
 import { AccountManager, registerAccountManager } from "./accounts/manager.js";
+import { DesktopNotifier } from "./notifications/desktop.js";
+import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -217,6 +219,38 @@ const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
 const grantManager = new GrantManager(agentGrants);
 const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
 registerAgentServices(agentGrants, agentAudit);
+
+// ─── Notification channels (B2) ──────────────────────────────────────────────
+// Subscribe an OS desktop notifier and an outbound webhook dispatcher to the
+// agent-notification bus. Both read their settings from the ServerConfig on
+// every event (no restart needed when toggling / adding endpoints).
+const desktopNotifier = new DesktopNotifier();
+const webhookDispatcher = new WebhookDispatcher();
+agentNotifications.subscribe((ev) => {
+  const cfg = loadConfig();
+  // Desktop: default ON; only skip when explicitly disabled.
+  if (cfg?.desktopNotificationsEnabled !== false) {
+    const titleByKind: Record<string, string> = {
+      "grant-created":  "pm-bridge-mcp — agent awaiting approval",
+      "grant-approved": "pm-bridge-mcp — agent approved",
+      "grant-denied":   "pm-bridge-mcp — agent denied",
+      "grant-revoked":  "pm-bridge-mcp — agent revoked",
+      "grant-expired":  "pm-bridge-mcp — agent expired",
+    };
+    const title = titleByKind[ev.kind] ?? "pm-bridge-mcp";
+    const body = `${ev.grant.clientName}`;
+    // Fire-and-forget — notifier failures never touch the caller.
+    void desktopNotifier.notify({ title, body, sound: ev.kind === "grant-created" ? "Glass" : undefined })
+      .catch(() => { /* logged inside notifier */ });
+  }
+  // Webhooks: dispatch to every enabled endpoint in parallel.
+  const endpoints = cfg?.webhooks ?? [];
+  if (endpoints.length > 0) {
+    void webhookDispatcher.deliverAll(endpoints, ev).catch(err => {
+      logger.warn("Webhook deliverAll failed", "Webhooks", err);
+    });
+  }
+});
 
 // ─── Bridge Auto-Start State ──────────────────────────────────────────────────
 /** Set to true when this process launched Proton Bridge; triggers kill on shutdown. */

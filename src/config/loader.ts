@@ -245,6 +245,10 @@ export function loadConfig(): ServerConfig | null {
       tosAcknowledged: parsed.tosAcknowledged,
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : undefined,
       activeAccountId: typeof parsed.activeAccountId === "string" ? parsed.activeAccountId : undefined,
+      desktopNotificationsEnabled: typeof parsed.desktopNotificationsEnabled === "boolean"
+        ? parsed.desktopNotificationsEnabled
+        : undefined,
+      webhooks: Array.isArray(parsed.webhooks) ? parsed.webhooks : undefined,
     };
     tags.found = true;
     return result;

@@ -299,6 +299,16 @@ export const DEFAULT_RESPONSE_LIMITS: ResponseLimits = {
  */
 export const CONFIG_VERSION = 3;
 
+/** Shape-only declaration for schema.ts — see src/notifications/webhooks.ts WebhookEndpoint. */
+export interface WebhookEndpointShape {
+  id: string;
+  url: string;
+  secret?: string;
+  format?: "cloudevents" | "slack" | "discord" | "raw";
+  enabled?: boolean;
+  subscribe?: Array<"grant-created" | "grant-approved" | "grant-denied" | "grant-revoked" | "grant-expired">;
+}
+
 /** Shape-only declaration for schema.ts — see src/accounts/types.ts AccountSpec. */
 export interface AccountSpecShape {
   id: string;
@@ -354,6 +364,10 @@ export interface ServerConfig {
   accounts?: AccountSpecShape[];
   /** Which entry in `accounts` drives the singleton IMAP/SMTP services. */
   activeAccountId?: string;
+  /** Fire native OS notifications on new pending grants (default true). */
+  desktopNotificationsEnabled?: boolean;
+  /** Outbound webhook endpoints that receive grant-change events. */
+  webhooks?: WebhookEndpointShape[];
   /**
    * Require an explicit { confirmed: true } argument on destructive tool calls.
    * Default true. Intended to keep the workflow user-initiated (per Proton
