@@ -64,7 +64,7 @@ import {
   type EscalationRecord,
   type AuditEntry,
 } from "../permissions/escalation.js";
-import { getLogFilePath } from "../utils/logger.js";
+import { getLogFilePath, logger } from "../utils/logger.js";
 import { getAgentGrantStore, getAgentAuditLog } from "../agents/registry.js";
 import { notifications as agentNotifications } from "../agents/notifications.js";
 import {
@@ -74,6 +74,7 @@ import {
   deleteAccount,
   setActiveAccount,
 } from "../accounts/registry.js";
+import { getAccountManager } from "../accounts/manager.js";
 import type { AccountSpecShape } from "../config/schema.js";
 
 // ─── TCP connectivity test ─────────────────────────────────────────────────────
@@ -4283,7 +4284,21 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (!requireCsrf(req, res)) return;
           const set = setActiveAccount(activateMatch[1]);
           if (!set) { json(res, 404, { error: "Account not found." }); return; }
-          json(res, 200, { account: { ...set, password: set.password ? "••••••••" : "" }, restartRequired: true });
+          // Hot-swap: ask the AccountManager to rebuild from the persisted
+          // registry and flip its active pointer. Emits "active-changed"
+          // which rewires the module-level imap/smtp references in index.ts.
+          const mgr = getAccountManager();
+          let restartRequired = true;
+          if (mgr) {
+            try {
+              mgr.rebuildFromRegistry();
+              await mgr.setActive(set.id);
+              restartRequired = false;
+            } catch (err) {
+              logger.warn("Hot-swap failed, falling back to restart-required", "Accounts", err);
+            }
+          }
+          json(res, 200, { account: { ...set, password: set.password ? "••••••••" : "" }, restartRequired });
           return;
         }
 
