@@ -3547,7 +3547,8 @@ function startBridgeWatchdog(): void {
         await imapService.connect(
           config.imap.host, config.imap.port,
           config.imap.username, config.imap.password,
-          config.imap.bridgeCertPath, config.imap.secure
+          config.imap.bridgeCertPath, config.imap.secure,
+          config.imap.allowInsecureBridge ?? false
         );
         logger.info("IMAP reconnected after Bridge restart", "MCPServer");
       } catch (e: unknown) {
@@ -3825,6 +3826,8 @@ async function main() {
       config.imap.username      = cn.username  || "";
       config.smtp.bridgeCertPath = cn.bridgeCertPath || undefined;
       config.imap.bridgeCertPath = cn.bridgeCertPath || undefined;
+      config.smtp.allowInsecureBridge = cn.allowInsecureBridge ?? false;
+      config.imap.allowInsecureBridge = cn.allowInsecureBridge ?? false;
       config.debug              = !!cn.debug;
       config.autoStartBridge    = !!cn.autoStartBridge;
       config.bridgePath         = cn.bridgePath || undefined;
@@ -3913,7 +3916,8 @@ async function main() {
         config.imap.username,
         config.imap.password,
         config.imap.bridgeCertPath,
-        config.imap.secure
+        config.imap.secure,
+        config.imap.allowInsecureBridge ?? false
       ).then(() => {
         logger.info("IMAP connection established", "MCPServer");
       }).catch((e: unknown) => {

@@ -355,6 +355,45 @@ describe("loadConfig", () => {
     // JSON null → 0 in number context; isFinite(0) is true, so clamp(0, 100000, ...) → 100000
     expect(cfg!.responseLimits!.maxResponseBytes).toBe(100_000);
   });
+
+  it("grandfathers v1 configs without allowInsecureBridge into the legacy insecure mode", () => {
+    mockedExistsSync.mockReturnValue(true);
+    // v1 file: no cert, no explicit flag — legacy insecure Bridge behavior
+    const v1 = JSON.stringify({
+      configVersion: 1,
+      connection: { smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143, username: "u", password: "p", smtpToken: "", bridgeCertPath: "", debug: false },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(v1 as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.connection.allowInsecureBridge).toBe(true);
+    // Loaded config is migrated to the current schema version
+    expect(cfg!.configVersion).toBe(2);
+  });
+
+  it("does NOT grandfather v1 configs that already set allowInsecureBridge explicitly", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const v1Explicit = JSON.stringify({
+      configVersion: 1,
+      connection: { smtpHost: "localhost", imapHost: "localhost", bridgeCertPath: "", allowInsecureBridge: false },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(v1Explicit as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.connection.allowInsecureBridge).toBe(false);
+  });
+
+  it("does NOT grandfather v1 configs that already have a bridgeCertPath", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const v1WithCert = JSON.stringify({
+      configVersion: 1,
+      connection: { smtpHost: "localhost", imapHost: "localhost", bridgeCertPath: "/path/to/cert.pem" },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(v1WithCert as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.connection.allowInsecureBridge).toBe(false);
+  });
 });
 
 // ─── saveConfig ────────────────────────────────────────────────────────────────

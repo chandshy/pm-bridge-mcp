@@ -11,6 +11,24 @@ import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
+import { BRIDGE_MIN_VERSION } from '../config/schema.js';
+
+/**
+ * Compare two dotted numeric version strings ("3.22.1" vs "3.22.0").
+ * Returns negative, zero, or positive in strcmp fashion.
+ * Non-numeric segments and missing trailing segments compare as 0.
+ */
+function compareSemver(a: string, b: string): number {
+  const parse = (s: string) => s.split('.').map(p => parseInt(p, 10) || 0);
+  const aa = parse(a);
+  const bb = parse(b);
+  const len = Math.max(aa.length, bb.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (aa[i] ?? 0) - (bb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
 interface AppendResult { uid?: number }
@@ -81,7 +99,7 @@ export class SimpleIMAPService {
   private folderCachedAt = 0;
   /** TTL for folderCache entries. After expiry, getFolders() fetches fresh data from IMAP. */
   private static readonly FOLDER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-  private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string; secure?: boolean } | null = null;
+  private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string; secure?: boolean; allowInsecureBridge?: boolean } | null = null;
   /** Tracks UIDVALIDITY per folder path to detect server-side mailbox rebuilds. */
   private uidValidityMap: Map<string, bigint> = new Map();
   /** True when TLS certificate validation is disabled (no Bridge cert configured). */
@@ -295,17 +313,19 @@ export class SimpleIMAPService {
    * @param password Bridge login password
    * @param bridgeCertPath Optional path to a Bridge TLS certificate for localhost trust
    * @param secure Whether to use implicit TLS (true) or STARTTLS (false, default for Bridge)
+   * @param allowInsecureBridge Explicit opt-in to run localhost without a pinned cert (default false)
    */
-  async connect(host: string = 'localhost', port: number = 1143, username?: string, password?: string, bridgeCertPath?: string, secure?: boolean): Promise<void> {
+  async connect(host: string = 'localhost', port: number = 1143, username?: string, password?: string, bridgeCertPath?: string, secure?: boolean, allowInsecureBridge: boolean = false): Promise<void> {
     return tracer.span('imap.connect', { host, port, hasCert: !!bridgeCertPath }, async () => {
     logger.debug('Connecting to IMAP server', 'IMAPService', { host, port });
 
     try {
       // Store connection config for reconnection
-      this.connectionConfig = { host, port, username, password, bridgeCertPath, secure };
+      this.connectionConfig = { host, port, username, password, bridgeCertPath, secure, allowInsecureBridge };
 
       // Check if using localhost (Proton Bridge)
       const isLocalhost = host === 'localhost' || host === '127.0.0.1';
+      const allowInsecure = allowInsecureBridge || process.env.PROTONMAIL_MCP_INSECURE_BRIDGE === '1';
 
       // Build TLS options
       let tlsOptions: Record<string, unknown> | undefined;
@@ -330,9 +350,17 @@ export class SimpleIMAPService {
             };
             logger.info(`IMAP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, 'IMAPService');
           } catch (err) {
-            logger.error(
-              `IMAP: Failed to load Bridge cert at "${resolvedCertPath}" — TLS certificate validation DISABLED. ` +
-              `Update the Bridge Certificate Path in Settings → Connection to secure this connection.`,
+            if (!allowInsecure) {
+              throw new Error(
+                `IMAP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
+                `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
+                `(or PROTONMAIL_MCP_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
+                `Underlying error: ${(err as Error).message}`
+              );
+            }
+            logger.warn(
+              `IMAP: Failed to load Bridge cert at "${resolvedCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set). ` +
+              `Export a fresh cert from Bridge → Help → Export TLS Certificate and update Settings → Connection to re-secure.`,
               'IMAPService',
               err
             );
@@ -340,9 +368,17 @@ export class SimpleIMAPService {
             this.insecureTls = true;
           }
         } else {
+          if (!allowInsecure) {
+            throw new Error(
+              'IMAP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate ' +
+              "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
+              'disabled for localhost), set allowInsecureBridge: true or launch with PROTONMAIL_MCP_INSECURE_BRIDGE=1.'
+            );
+          }
           logger.warn(
-            'IMAP: No Bridge certificate configured — TLS certificate validation DISABLED for localhost. ' +
-            'Export the cert from Bridge → Help → Export TLS Certificate, then set the path in Settings → Connection.',
+            'IMAP: No Bridge certificate configured and allowInsecureBridge is set — ' +
+            'TLS certificate validation DISABLED for localhost. Export the cert from Bridge → Help → ' +
+            'Export TLS Certificate and clear the insecure flag to re-secure.',
             'IMAPService'
           );
           tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
@@ -387,12 +423,50 @@ export class SimpleIMAPService {
       this.isConnected = true;
 
       logger.info('IMAP connection established', 'IMAPService');
+
+      // Fire-and-forget Bridge version probe — never block connect on this.
+      void this.checkBridgeVersion();
     } catch (error) {
       this.isConnected = false;
       logger.error('IMAP connection failed', 'IMAPService', error);
       throw error;
     }
     }); // end tracer.span('imap.connect')
+  }
+
+  /** Version detected from the IMAP ID response, populated after connect. */
+  bridgeVersion: string | null = null;
+
+  /**
+   * Issue an IMAP ID (RFC 2971) command and compare the reported Bridge
+   * version against BRIDGE_MIN_VERSION. Logs a warning if the running
+   * Bridge is older than the floor. Never throws — version detection is
+   * best-effort and must not break the connection path.
+   */
+  private async checkBridgeVersion(): Promise<void> {
+    if (!this.client || !this.isConnected) return;
+    try {
+      // imapflow exposes id() on ImapFlow; older builds may not. Guard and
+      // swallow any failure — a missing ID response is not actionable.
+      const idFn = (this.client as unknown as { id?: (info?: Record<string, string>) => Promise<Record<string, string>> }).id;
+      if (typeof idFn !== 'function') return;
+      const info = await idFn.call(this.client, { name: 'pm-bridge-mcp' });
+      const name = String(info?.name ?? '');
+      const version = String(info?.version ?? '');
+      if (!version) return;
+      this.bridgeVersion = version;
+      if (/bridge/i.test(name) && compareSemver(version, BRIDGE_MIN_VERSION) < 0) {
+        logger.warn(
+          `Proton Bridge ${version} is older than the recommended minimum ${BRIDGE_MIN_VERSION}. ` +
+          'Upgrade Bridge for current TLS hardening (v3.21.2) and FIDO2 support (v3.22.0).',
+          'IMAPService'
+        );
+      } else {
+        logger.info(`Bridge version ${version} detected (${name || 'unknown vendor'})`, 'IMAPService');
+      }
+    } catch (err) {
+      logger.debug('Bridge version probe failed (non-fatal)', 'IMAPService', err);
+    }
   }
 
   /** Log out and close the IMAP connection gracefully. */
@@ -418,8 +492,8 @@ export class SimpleIMAPService {
 
     logger.info('Attempting to reconnect to IMAP server', 'IMAPService');
 
-    const { host, port, username, password, bridgeCertPath, secure } = this.connectionConfig;
-    await this.connect(host, port, username, password, bridgeCertPath, secure);
+    const { host, port, username, password, bridgeCertPath, secure, allowInsecureBridge } = this.connectionConfig;
+    await this.connect(host, port, username, password, bridgeCertPath, secure, allowInsecureBridge ?? false);
   }
 
   /**

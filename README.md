@@ -401,7 +401,11 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 - Export the Bridge TLS certificate: Bridge app → **Settings → Export TLS certificates**.
 - Set the path in the settings UI under **Setup → Bridge TLS Certificate**.
 
-> If no Bridge TLS certificate is configured, TLS certificate validation is **disabled** for the localhost Bridge connection. The server logs a warning and `get_connection_status` reports `insecureTls: true` for the affected service.
+> As of v2.1 the server refuses to connect to a localhost Bridge without a pinned TLS certificate — this matches Proton Bridge's own v3.21.2+ hardening. If you cannot provide a cert, set **Allow insecure Bridge connection** under Setup (or launch with `PROTONMAIL_MCP_INSECURE_BRIDGE=1`) to opt back into the legacy behavior. Configs that predate this change are grandfathered into the legacy mode with a startup warning until the opt-in is set explicitly.
+
+### Bridge version warning on startup
+
+- The server issues an IMAP `ID` request after connect and warns when Bridge is older than **3.22.0** (the minimum supported). Upgrade from the Bridge app → **Check for updates** to pick up the v3.21.2 strict-TLS and v3.22 FIDO2 hardening.
 
 ### Claude Desktop doesn't show ProtonMail tools
 
