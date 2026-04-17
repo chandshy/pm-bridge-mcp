@@ -54,6 +54,7 @@ import { AgentAuditLog, hashArgs } from "./agents/audit.js";
 import { currentCaller } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
 import { notifications as agentNotifications } from "./agents/notifications.js";
+import { AccountManager, registerAccountManager } from "./accounts/manager.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -147,8 +148,21 @@ const config: ProtonMailConfig = {
   syncInterval: 5,
 };
 
-const smtpService = new SMTPService(config);
-const imapService = new SimpleIMAPService();
+// Multi-account: AccountManager owns one SimpleIMAPService + SMTPService per
+// configured account. The module-level `imapService`/`smtpService` symbols
+// below point at whichever account is currently "active" and get hot-swapped
+// when the user switches accounts via the settings UI — no restart needed.
+// Per-tool routing to a non-active account happens in the dispatcher via a
+// local shadow of these names.
+const accountManager = new AccountManager();
+registerAccountManager(accountManager);
+let imapService: SimpleIMAPService = accountManager.getActive().imap;
+let smtpService: SMTPService = accountManager.getActive().smtp;
+accountManager.on("active-changed", (ev: { services: { imap: SimpleIMAPService; smtp: SMTPService } }) => {
+  imapService = ev.services.imap;
+  smtpService = ev.services.smtp;
+  logger.info("Module-level imap/smtp services rebound to the new active account", "MCPServer");
+});
 // SimpleLogin client is lazy: constructed empty and reconfigured in main() once
 // the API key is loaded. Alias tools check isConfigured() before dispatching.
 let simpleloginService = new SimpleLoginService("");
@@ -2189,6 +2203,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
+  // ── Per-tool account routing ─────────────────────────────────────────────
+  // The dispatcher resolves an optional `account_id` argument before the
+  // gates so audit rows and permission checks both see the correct account.
+  // If an agent grant is bound to a specific account (conditions.accountId),
+  // the caller's requested account_id must match.
+  const requestedAccountId = typeof args.account_id === "string" && args.account_id.trim()
+    ? args.account_id.trim()
+    : accountManager.activeAccountId();
+  // Shadow the module-level `imapService` / `smtpService` when the caller
+  // picks a non-default account; the switch-case handlers below see these
+  // locals via lexical scope. No-op when the caller targets the active
+  // account (the module-level bindings already point there).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  let imapService = accountManager.getActive().imap;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  let smtpService = accountManager.getActive().smtp;
+  try {
+    const svcs = accountManager.getForAccount(requestedAccountId);
+    imapService = svcs.imap;
+    smtpService = svcs.smtp;
+  } catch (err) {
+    return {
+      content: [{ type: "text" as const, text: `Unknown account_id: ${requestedAccountId}` }],
+      isError: true,
+      structuredContent: { success: false, reason: "unknown_account_id", requestedAccountId },
+    };
+  }
+
   // ── Agent-grant gate ──────────────────────────────────────────────────────
   // Runs BEFORE the global permission gate. Only takes effect when the call
   // carries caller context (i.e. came in through the HTTP transport with an
@@ -2200,6 +2242,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
   if (caller && !caller.staticBearer) {
+    // Grant-bound account mismatch → deny before we even run the grant gate,
+    // so an agent that was approved for Account A cannot smuggle calls into
+    // Account B by passing `account_id` in args.
+    const callerGrant = agentGrants.get(caller.clientId);
+    const boundAccountId = callerGrant?.conditions?.accountId;
+    if (boundAccountId && boundAccountId !== requestedAccountId) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: `Grant is bound to account ${boundAccountId}; call targeted ${requestedAccountId}.`,
+        ip: caller.ip,
+      });
+      auditFailureRecorded = true;
+      return {
+        content: [{ type: "text" as const, text: `Blocked: this agent's grant is bound to account ${boundAccountId}.` }],
+        isError: true,
+        structuredContent: { success: false, reason: "account_mismatch", expected: boundAccountId, requested: requestedAccountId },
+      };
+    }
+
     const globalPreset = (loadConfig() ?? defaultConfig()).permissions.preset;
     const grantResult = grantManager.check({
       clientId: caller.clientId,
