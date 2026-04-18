@@ -61,6 +61,7 @@ import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain } from "./config/loader.js";
+import { migrateLegacyKeychainEntries } from "./security/keychain.js";
 import type { ToolName } from "./config/schema.js";
 import { DESTRUCTIVE_TOOLS, toolsForTier, parseToolTier } from "./config/schema.js";
 
@@ -111,7 +112,7 @@ function confirmGateFallbackResponse(name: string, preview: string): {
         `${preview}\n\n` +
         `This tool is destructive. Retry the call with the exact same arguments plus ` +
         `{ "confirmed": true } — the user will see the confirmation flag in the tool call and can cancel it. ` +
-        `Set requireDestructiveConfirm: false in ~/.pm-bridge-mcp.json to disable this guard system-wide.`,
+        `Set requireDestructiveConfirm: false in ~/.mail-ai-bridge.json to disable this guard system-wide.`,
     }],
     isError: false,
     structuredContent: { success: false, confirmationRequired: true, tool: name, preview },
@@ -123,7 +124,7 @@ import { allToolDefs, allHandlers, escalationHandlers, describeRequestEscalation
 import type { ToolCallContext, ToolSharedState } from "./tools/types.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
-// All credentials and connection settings are loaded from ~/.pm-bridge-mcp.json
+// All credentials and connection settings are loaded from ~/.mail-ai-bridge.json
 // and the OS keychain in main(). No credentials are read from environment variables
 // to prevent accidental exposure to other processes.
 
@@ -167,34 +168,76 @@ accountManager.on("active-changed", (ev: { services: { imap: SimpleIMAPService; 
 let simpleloginService = new SimpleLoginService("");
 const analyticsService = new AnalyticsService();
 
-// Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
-// New wins; legacy is silently honored for one release. Remove the
-// PROTONMAIL_SCHEDULER_STORE alias in v2.2.
+// Env-var alias chain: MAIL_AI_BRIDGE_* (canonical) → PM_BRIDGE_MCP_* (prior
+// rename) → PROTONMAIL_* (original). First match wins. Legacy names stay honored
+// through v3.0.0, then drop. Write path always uses the canonical name.
 function _resolveSchedulerStorePath(): string {
-  const envPath = process.env.PM_BRIDGE_MCP_SCHEDULER_STORE
+  const envPath = process.env.MAIL_AI_BRIDGE_SCHEDULER_STORE
+    || process.env.PM_BRIDGE_MCP_SCHEDULER_STORE
     || process.env.PROTONMAIL_SCHEDULER_STORE;
   if (envPath) return envPath;
   const home = process.env.HOME || process.env.USERPROFILE || ".";
-  // Read-old/write-new: keep using the legacy file if it exists and the new
-  // one doesn't, so a queue of pending scheduled emails survives the rename.
-  const preferred = `${home}/.pm-bridge-mcp-scheduled.json`;
-  const legacy = `${home}/.protonmail-mcp-scheduled.json`;
-  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  // Read-old/write-new: keep using a legacy file if the new path doesn't yet
+  // exist, so a queue of pending scheduled emails survives the rename(s).
+  const preferred = `${home}/.mail-ai-bridge-scheduled.json`;
+  const legacyPm = `${home}/.pm-bridge-mcp-scheduled.json`;
+  const legacyPr = `${home}/.protonmail-mcp-scheduled.json`;
+  if (!existsSync(preferred)) {
+    if (existsSync(legacyPm)) { logger.info(`Reading scheduler store from legacy path ${legacyPm}`, "MCPServer"); return legacyPm; }
+    if (existsSync(legacyPr)) { logger.info(`Reading scheduler store from legacy path ${legacyPr}`, "MCPServer"); return legacyPr; }
+  }
   return preferred;
 }
 const SCHEDULER_STORE = _resolveSchedulerStorePath();
 const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
 
-const REMINDERS_STORE = process.env.PM_BRIDGE_MCP_REMINDERS
-  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-reminders.json`;
+/**
+ * Resolve a per-install file path using the alias chain
+ *   MAIL_AI_BRIDGE_<KEY>  (canonical)
+ *   PM_BRIDGE_MCP_<KEY>   (prior rename — honored through v3.0.0)
+ *   PROTONMAIL_<KEY>      (original rename — honored through v3.0.0)
+ * before falling back to `~/.<canonicalFile>`, and logging a one-liner if
+ * the canonical file is absent but a legacy file is present.
+ */
+function _resolveStorePath(
+  keySuffix: string,
+  canonicalFile: string,
+  legacyFiles: string[],
+): string {
+  const env = process.env[`MAIL_AI_BRIDGE_${keySuffix}`]
+    || process.env[`PM_BRIDGE_MCP_${keySuffix}`]
+    || process.env[`PROTONMAIL_${keySuffix}`];
+  if (env) return env;
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  const preferred = `${home}/${canonicalFile}`;
+  if (!existsSync(preferred)) {
+    for (const f of legacyFiles) {
+      const p = `${home}/${f}`;
+      if (existsSync(p)) { logger.info(`Reading ${keySuffix.toLowerCase()} from legacy path ${p}`, "MCPServer"); return p; }
+    }
+  }
+  return preferred;
+}
+
+const REMINDERS_STORE = _resolveStorePath(
+  "REMINDERS",
+  ".mail-ai-bridge-reminders.json",
+  [".pm-bridge-mcp-reminders.json"],
+);
 const reminderService = new ReminderService(REMINDERS_STORE);
 
-const PASS_AUDIT_PATH = process.env.PM_BRIDGE_MCP_PASS_AUDIT
-  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-pass-audit.jsonl`;
+const PASS_AUDIT_PATH = _resolveStorePath(
+  "PASS_AUDIT",
+  ".mail-ai-bridge-pass-audit.jsonl",
+  [".pm-bridge-mcp-pass-audit.jsonl"],
+);
 let passService: PassService | null = null;
 
-const FTS_DB_PATH = process.env.PM_BRIDGE_MCP_FTS_DB
-  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-fts.db`;
+const FTS_DB_PATH = _resolveStorePath(
+  "FTS_DB",
+  ".mail-ai-bridge-fts.db",
+  [".pm-bridge-mcp-fts.db"],
+);
 let ftsService: FtsIndexService | null = null;
 
 function getFts(): FtsIndexService {
@@ -222,10 +265,16 @@ function recordFromEmail(m: EmailMessage): FtsRecord {
 // gate is consistent whether the transport is stdio or HTTP — but stdio
 // callers fall through to the global preset (no caller context), which
 // preserves the single-user Claude Desktop default.
-const AGENT_GRANTS_PATH = process.env.PM_BRIDGE_MCP_AGENTS
-  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-agents.json`;
-const AGENT_AUDIT_PATH = process.env.PM_BRIDGE_MCP_AGENT_AUDIT
-  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-agent-audit.jsonl`;
+const AGENT_GRANTS_PATH = _resolveStorePath(
+  "AGENTS",
+  ".mail-ai-bridge-agents.json",
+  [".pm-bridge-mcp-agents.json"],
+);
+const AGENT_AUDIT_PATH = _resolveStorePath(
+  "AGENT_AUDIT",
+  ".mail-ai-bridge-agent-audit.jsonl",
+  [".pm-bridge-mcp-agent-audit.jsonl"],
+);
 const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
 const grantManager = new GrantManager(agentGrants);
 const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
@@ -242,13 +291,13 @@ agentNotifications.subscribe((ev) => {
   // Desktop: default ON; only skip when explicitly disabled.
   if (cfg?.desktopNotificationsEnabled !== false) {
     const titleByKind: Record<string, string> = {
-      "grant-created":  "pm-bridge-mcp — agent awaiting approval",
-      "grant-approved": "pm-bridge-mcp — agent approved",
-      "grant-denied":   "pm-bridge-mcp — agent denied",
-      "grant-revoked":  "pm-bridge-mcp — agent revoked",
-      "grant-expired":  "pm-bridge-mcp — agent expired",
+      "grant-created":  "mail-ai-bridge — agent awaiting approval",
+      "grant-approved": "mail-ai-bridge — agent approved",
+      "grant-denied":   "mail-ai-bridge — agent denied",
+      "grant-revoked":  "mail-ai-bridge — agent revoked",
+      "grant-expired":  "mail-ai-bridge — agent expired",
     };
-    const title = titleByKind[ev.kind] ?? "pm-bridge-mcp";
+    const title = titleByKind[ev.kind] ?? "mail-ai-bridge";
     const body = `${ev.grant.clientName}`;
     // Fire-and-forget — notifier failures never touch the caller.
     void desktopNotifier.notify({ title, body, sound: ev.kind === "grant-created" ? "Glass" : undefined })
@@ -423,7 +472,7 @@ function truncateEmailBody(body: string, maxLength: number = 2000): string {
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "pm-bridge-mcp", version: _pkgVersion },
+  { name: "mail-ai-bridge", version: _pkgVersion },
   {
     capabilities: {
       tools: { listChanged: false },
@@ -439,12 +488,12 @@ const server = new Server(
 
 /**
  * Resolve the active tool tier at the moment of the ListTools call. Order:
- *   1. PM_BRIDGE_MCP_TIER env var (per-launch override)
+ *   1. MAIL_AI_BRIDGE_TIER / PM_BRIDGE_MCP_TIER env var (per-launch override)
  *   2. config.toolTier (persisted)
  *   3. "complete" (default — preserves pre-tiering behavior)
  */
 function activeToolTier(): ReturnType<typeof parseToolTier> {
-  const envTier = process.env.PM_BRIDGE_MCP_TIER;
+  const envTier = process.env.MAIL_AI_BRIDGE_TIER || process.env.PM_BRIDGE_MCP_TIER;
   if (envTier) return parseToolTier(envTier);
   const cfg = loadConfig();
   return parseToolTier(cfg?.toolTier);
@@ -581,7 +630,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // ── Permission gate ───────────────────────────────────────────────────────
-  // Checked against ~/.pm-bridge-mcp.json (refreshed every 15 s).
+  // Checked against ~/.mail-ai-bridge.json (refreshed every 15 s).
   // If no config file exists the read-only preset is enforced — agents can
   // read and search but cannot send, move, delete, or modify email state.
   // Run `npm run settings` to open the settings UI and grant broader access.
@@ -1486,7 +1535,7 @@ function startBridgeWatchdog(): void {
         "MCPServer"
       );
       process.stderr.write(
-        `[pm-bridge-mcp] CRITICAL: Proton Bridge did not recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
+        `[mail-ai-bridge] CRITICAL: Proton Bridge did not recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
         "Start Bridge manually and restart the MCP server.\n"
       );
       if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
@@ -1644,10 +1693,10 @@ function _buildTrayMenu(): SysTrayMenu {
   const pendingCount  = agentGrants.list({ status: "pending" }).length;
   const activeCount   = agentGrants.list({ status: "active" }).length;
   const tooltip = pendingCount > 0
-    ? `pm-bridge-mcp · ${pendingCount} agent(s) awaiting approval`
-    : "pm-bridge-mcp";
+    ? `mail-ai-bridge · ${pendingCount} agent(s) awaiting approval`
+    : "mail-ai-bridge";
   const items: MenuItem[] = [
-    { title: "pm-bridge-mcp", tooltip: "pm-bridge-mcp daemon", enabled: false, checked: false },
+    { title: "mail-ai-bridge", tooltip: "mail-ai-bridge daemon", enabled: false, checked: false },
     sep,
     { title: statusLabel, tooltip: "", enabled: false, checked: false },
     { title: emailLabel,  tooltip: "", enabled: false, checked: false },
@@ -1739,6 +1788,20 @@ async function main() {
   try { writeFileSync(getLogFilePath(), "", "utf8"); } catch { /* ignore */ }
 
   logger.info(`Starting Proton Mail MCP Server v${_pkgVersion}`, "MCPServer");
+
+  // One-shot keychain service-name migration: move entries from the legacy
+  // 'protonmail-mcp-server' / 'pm-bridge-mcp' services into 'mail-ai-bridge'
+  // so existing installs don't have to re-enter their Bridge password after
+  // upgrading. Runs before any keychain read so the rest of main() sees the
+  // migrated values.
+  try {
+    const { migrated } = await migrateLegacyKeychainEntries();
+    if (migrated > 0) {
+      logger.info(`Keychain: ${migrated} legacy entr${migrated === 1 ? "y" : "ies"} migrated to 'mail-ai-bridge'`, "MCPServer");
+    }
+  } catch (e: unknown) {
+    logger.debug("Keychain legacy-service migration skipped", "MCPServer", e);
+  }
 
   // Migrate plaintext credentials to OS keychain if available
   try {
@@ -1965,22 +2028,22 @@ async function main() {
         rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,
         agentGrants,
       });
-      logger.info(`pm-bridge-mcp started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
+      logger.info(`mail-ai-bridge started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
       (globalThis as unknown as { __pmBridgeHttpHandle?: { close(): Promise<void> } }).__pmBridgeHttpHandle = handle;
     } else {
       const transport = new StdioServerTransport();
       await server.connect(transport);
-      logger.info("pm-bridge-mcp started on stdio transport.", "MCPServer");
+      logger.info("mail-ai-bridge started on stdio transport.", "MCPServer");
     }
 
     // ── Daemon: start settings HTTP server + system tray ───────────────────
     // Both run alongside the MCP stdio transport. stdout is now owned by the
     // MCP protocol, so startSettingsServer is called with quiet=true.
     // Skip when running as a respawn child (stdio:ignore, no real MCP session).
-    // Honor either env name during the rename window — a child spawned by an
-    // older parent build sets PROTONMAIL_MCP_RESPAWN; a newer parent sets the
-    // PM_BRIDGE_MCP_RESPAWN form. Either one suppresses the daemon side-effects.
-    if (!process.env.PM_BRIDGE_MCP_RESPAWN && !process.env.PROTONMAIL_MCP_RESPAWN) {
+    // Honor any env name during the rename window — an older parent build
+    // sets PROTONMAIL_MCP_RESPAWN or PM_BRIDGE_MCP_RESPAWN; a current parent
+    // sets MAIL_AI_BRIDGE_RESPAWN. Any of them suppress the daemon side-effects.
+    if (!process.env.MAIL_AI_BRIDGE_RESPAWN && !process.env.PM_BRIDGE_MCP_RESPAWN && !process.env.PROTONMAIL_MCP_RESPAWN) {
       await _startSettingsServerDaemon();
       _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
     }

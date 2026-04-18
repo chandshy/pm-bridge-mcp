@@ -1,14 +1,14 @@
-# pm-bridge-mcp
+# mail-ai-bridge
 
 **MCP server for Proton Mail via Proton Bridge.** An unofficial, user-initiated bridge between agentic MCP clients and Proton Bridge's local IMAP/SMTP surface.
 
-[![CI](https://github.com/chandshy/pm-bridge-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/pm-bridge-mcp/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v2.1.0-blue.svg)](https://www.npmjs.com/package/pm-bridge-mcp)
+[![CI](https://github.com/chandshy/mail-ai-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mail-ai-bridge/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/badge/npm-v2.2.0-blue.svg)](https://www.npmjs.com/package/mail-ai-bridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-1%2C525%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-1%2C578%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -43,7 +43,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 
 - **67 tools** across 11 categories — reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services (SimpleLogin aliases, Proton Pass, local FTS5 search). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`) for the canonical inventory.
 - **Two transports** — stdio (default, Claude Desktop) and HTTP (remote / self-host). HTTP supports a static bearer **and/or** OAuth 2.1 with PKCE-S256, RFC 7591 Dynamic Client Registration, RFC 8414 authorization-server metadata, and RFC 9728 protected-resource metadata. Per-caller token-bucket rate limiting on every endpoint.
-- **Progressive tool tiering** — `core` / `extended` / `complete` controls how many tools land in the client's `ListTools` response, so context isn't burned on tools you don't use. Configurable via `toolTier` or `PM_BRIDGE_MCP_TIER`.
+- **Progressive tool tiering** — `core` / `extended` / `complete` controls how many tools land in the client's `ListTools` response, so context isn't burned on tools you don't use. Configurable via `toolTier` or `MAIL_AI_BRIDGE_TIER`.
 - **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
 - **5 permission presets** — read-only by default; write access requires explicit opt-in. Per-tool overrides and rate limits via the **Custom** preset.
 - **Human-gated escalation** — agents request elevated permissions, you approve via browser UI or terminal; the agent cannot approve its own requests.
@@ -57,7 +57,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **1,525 tests passing** (Vitest); zero `any` type annotations in production source.
+- **1,578 tests passing** (Vitest); zero `any` type annotations in production source.
 
 ---
 
@@ -108,14 +108,14 @@ Bridge listens locally on:
 ### Option A — npm (recommended)
 
 ```bash
-npm install -g github:chandshy/pm-bridge-mcp
+npm install -g github:chandshy/mail-ai-bridge
 ```
 
 ### Option B — From source
 
 ```bash
-git clone https://github.com/chandshy/pm-bridge-mcp.git
-cd pm-bridge-mcp
+git clone https://github.com/chandshy/mail-ai-bridge.git
+cd mail-ai-bridge
 npm install
 npm run build
 ```
@@ -139,7 +139,7 @@ Tools in unconfigured groups return a clean configuration error rather than fail
 Run the settings server to complete first-time setup:
 
 ```bash
-npx pm-bridge-mcp-settings
+npx mail-ai-bridge-settings
 # Then open http://localhost:8765
 ```
 
@@ -152,7 +152,7 @@ The **6-step wizard** walks you through everything automatically:
 5. **Review** — confirm your settings before saving
 6. **Done** — displays the exact JSON snippet to paste into your MCP client config; optionally writes it for you automatically
 
-Settings are saved to `~/.pm-bridge-mcp.json` with mode `0600` (owner read/write only). Bridge passwords, OAuth admin passwords, and Pass PATs prefer the OS keychain when available.
+Settings are saved to `~/.mail-ai-bridge.json` with mode `0600` (owner read/write only). Bridge passwords, OAuth admin passwords, and Pass PATs prefer the OS keychain when available.
 
 ---
 
@@ -173,7 +173,7 @@ The generated entry looks like this (your path will differ):
   "mcpServers": {
     "pm-bridge": {
       "command": "node",
-      "args": ["/path/to/node_modules/pm-bridge-mcp/dist/index.js"]
+      "args": ["/path/to/node_modules/mail-ai-bridge/dist/index.js"]
     }
   }
 }
@@ -215,7 +215,7 @@ Canonical code: [`src/accounts/registry.ts`](src/accounts/registry.ts), [`src/ac
 
 For headless boxes, phones, or sharing one Bridge across multiple devices, switch to HTTP transport. The same binary listens on a port instead of stdio.
 
-Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `~/.pm-bridge-mcp.json`:
+Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `~/.mail-ai-bridge.json`:
 
 ```json
 {
@@ -260,20 +260,20 @@ A static-bearer client config looks like:
 
 ### Environment variables
 
-Configuration is stored in `~/.pm-bridge-mcp.json` and managed via the settings UI — not environment variables. The following env vars are available for advanced/optional overrides:
+Configuration is stored in `~/.mail-ai-bridge.json` and managed via the settings UI — not environment variables. The following env vars are available for advanced/optional overrides:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PM_BRIDGE_MCP_CONFIG` | `~/.pm-bridge-mcp.json` | Override config file path |
-| `PM_BRIDGE_MCP_SCHEDULER_STORE` | `~/.pm-bridge-mcp-scheduled.json` | Scheduled email persistence file |
-| `PM_BRIDGE_MCP_LOG_FILE` | `~/.pm-bridge-mcp.log` | Override log file path |
-| `PM_BRIDGE_MCP_PENDING` | `~/.pm-bridge-mcp.pending.json` | Override pending escalations file path |
-| `PM_BRIDGE_MCP_AUDIT` | `~/.pm-bridge-mcp.audit.jsonl` | Override escalation audit log path |
-| `PM_BRIDGE_MCP_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
-| `PM_BRIDGE_MCP_TIER` | `complete` | Tool-tier override: `core` / `extended` / `complete` |
+| `MAIL_AI_BRIDGE_CONFIG` | `~/.mail-ai-bridge.json` | Override config file path |
+| `MAIL_AI_BRIDGE_SCHEDULER_STORE` | `~/.mail-ai-bridge-scheduled.json` | Scheduled email persistence file |
+| `MAIL_AI_BRIDGE_LOG_FILE` | `~/.mail-ai-bridge.log` | Override log file path |
+| `MAIL_AI_BRIDGE_PENDING` | `~/.mail-ai-bridge.pending.json` | Override pending escalations file path |
+| `MAIL_AI_BRIDGE_AUDIT` | `~/.mail-ai-bridge.audit.jsonl` | Override escalation audit log path |
+| `MAIL_AI_BRIDGE_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
+| `MAIL_AI_BRIDGE_TIER` | `complete` | Tool-tier override: `core` / `extended` / `complete` |
 | `PORT` | `8765` | Override settings UI HTTP server port |
 
-> The legacy `PROTONMAIL_*` forms of the first six variables are still honored for one release to avoid breaking existing installs; new docs and CLI help only mention the `PM_BRIDGE_MCP_*` names.
+> The prior `PM_BRIDGE_MCP_*` (from v2.1) and original `PROTONMAIL_*` (pre-v2.1) forms of these variables are still honored through v3.0.0 to avoid breaking existing installs; new docs and CLI help only mention the `MAIL_AI_BRIDGE_*` names. Precedence: `MAIL_AI_BRIDGE_*` > `PM_BRIDGE_MCP_*` > `PROTONMAIL_*`.
 
 ---
 
@@ -351,8 +351,8 @@ The escalation system lets an agent request broader permissions without permanen
 - You must type `APPROVE` before the button activates — no accidental clicks
 - CSRF-protected: the approval API requires a session token embedded only in the rendered HTML page
 - Rate-limited: max 5 escalation requests per hour, max 1 pending at a time
-- Audit trail: every request, approval, and denial is appended to `~/.pm-bridge-mcp.audit.jsonl`
-- Approve from another device: `npx pm-bridge-mcp-settings --lan`
+- Audit trail: every request, approval, and denial is appended to `~/.mail-ai-bridge.audit.jsonl`
+- Approve from another device: `npx mail-ai-bridge-settings --lan`
 
 ---
 
@@ -363,13 +363,13 @@ The settings UI starts automatically on `http://localhost:8765` whenever your MC
 To run the settings UI standalone (useful for initial setup, headless / SSH systems, or a dedicated remote-mode host):
 
 ```bash
-npx pm-bridge-mcp-settings           # auto-detects display; opens browser if available
-npx pm-bridge-mcp-settings --port 9000   # custom port (default: 8765)
-npx pm-bridge-mcp-settings --lan         # bind to 0.0.0.0 (approve from phone/other device)
-npx pm-bridge-mcp-settings --browser     # force browser UI even if no display detected
-npx pm-bridge-mcp-settings --tui         # force interactive terminal UI
-npx pm-bridge-mcp-settings --plain       # plain readline menus (no ANSI colors/escapes)
-npx pm-bridge-mcp-settings --no-open     # start server but don't auto-open browser
+npx mail-ai-bridge-settings           # auto-detects display; opens browser if available
+npx mail-ai-bridge-settings --port 9000   # custom port (default: 8765)
+npx mail-ai-bridge-settings --lan         # bind to 0.0.0.0 (approve from phone/other device)
+npx mail-ai-bridge-settings --browser     # force browser UI even if no display detected
+npx mail-ai-bridge-settings --tui         # force interactive terminal UI
+npx mail-ai-bridge-settings --plain       # plain readline menus (no ANSI colors/escapes)
+npx mail-ai-bridge-settings --no-open     # start server but don't auto-open browser
 ```
 
 Tabs:
@@ -388,12 +388,12 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 
 | Layer | Mechanism |
 |---|---|
-| Permission gate | Every tool call checked against `~/.pm-bridge-mcp.json` (refreshed every 15 s) |
+| Permission gate | Every tool call checked against `~/.mail-ai-bridge.json` (refreshed every 15 s) |
 | Tool tiering | `core` / `extended` / `complete` controls the `ListTools` surface — agents can't call what they can't see |
 | Rate limiting | Per-tool sliding-window limits in-process; per-caller token-bucket on the HTTP transport |
 | Destructive confirmation | MCP elicitation prompt (or required `{ confirmed: true }`) on delete / trash / spam / `alias_delete` / `pass_get` |
 | Escalation gate | Privilege increases require explicit human approval via a separate channel |
-| Audit log | Append-only log of all escalation events at `~/.pm-bridge-mcp.audit.jsonl` |
+| Audit log | Append-only log of all escalation events at `~/.mail-ai-bridge.audit.jsonl` |
 | OAuth 2.1 + PKCE-S256 | Spec-compliant DCR + consent flow gated on admin password (HTTP transport) |
 | CSRF protection | All mutating settings API calls require a session token (timing-safe comparison) |
 | Origin validation | Settings server validates `Origin`/`Referer` headers; rejects unknown origins |
@@ -409,18 +409,18 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 **What agents cannot do:**
 - Approve their own escalation requests
 - Bypass the permission gate (it runs in the server process, not the agent)
-- Read or modify `~/.pm-bridge-mcp.json` directly (not an exposed tool)
+- Read or modify `~/.mail-ai-bridge.json` directly (not an exposed tool)
 - Erase the audit log
 - Inject headers into outgoing email via crafted subjects, filenames, or custom headers
 - Execute destructive tools without surfacing the intent to the user
 
-**Credentials:** Stored in `~/.pm-bridge-mcp.json` with `0600` permissions (or in the OS keychain). Never commit this file. The settings UI never displays or transmits high-value secrets after they are first saved.
+**Credentials:** Stored in `~/.mail-ai-bridge.json` with `0600` permissions (or in the OS keychain). Never commit this file. The settings UI never displays or transmits high-value secrets after they are first saved.
 
 ---
 
 ## Agent Grants
 
-The global permission preset gates *what tools exist*; an **agent grant** gates *which MCP client gets to use them*. When an MCP host completes OAuth Dynamic Client Registration, pm-bridge-mcp creates a `pending` grant keyed by the new `client_id`. Nothing that client calls will succeed until you approve it.
+The global permission preset gates *what tools exist*; an **agent grant** gates *which MCP client gets to use them*. When an MCP host completes OAuth Dynamic Client Registration, mail-ai-bridge creates a `pending` grant keyed by the new `client_id`. Nothing that client calls will succeed until you approve it.
 
 Grant lifecycle: `pending` → `active` → `revoked` | `expired`. Each grant carries:
 
@@ -436,7 +436,7 @@ Grant lifecycle: `pending` → `active` → `revoked` | `expired`. Each grant ca
 
 Approve, deny, revoke, and "approve-with-conditions" all live in the **Agents** tab of the settings UI. The tab streams live updates over SSE from `GET /api/notifications` — new pending grants surface without a reload.
 
-Every gated tool call writes one row to an append-only JSONL audit log at `~/.pm-bridge-mcp-agent-audit.jsonl` (mode `0600`). Rows carry a truncated sha256 `argHash` — **never argument values, never response bodies** — so "same call repeated" patterns are observable without creating a parallel on-disk copy of your email. The log rotates at 10 MB and keeps 3 gzipped generations.
+Every gated tool call writes one row to an append-only JSONL audit log at `~/.mail-ai-bridge-agent-audit.jsonl` (mode `0600`). Rows carry a truncated sha256 `argHash` — **never argument values, never response bodies** — so "same call repeated" patterns are observable without creating a parallel on-disk copy of your email. The log rotates at 10 MB and keeps 3 gzipped generations.
 
 Caller identity propagates through the dispatcher via `AsyncLocalStorage` (see [`src/agents/caller-context.ts`](src/agents/caller-context.ts)); stdio callers (default Claude Desktop) have no context and bypass the grant gate as the local trusted caller.
 
@@ -481,7 +481,7 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 - Export the Bridge TLS certificate: Bridge app → **Settings → Export TLS certificates**.
 - Set the path in the settings UI under **Setup → Bridge TLS Certificate**.
 
-> The server refuses to connect to a localhost Bridge without a pinned TLS certificate — this matches Proton Bridge's own v3.21.2+ hardening. If you cannot provide a cert, set **Allow insecure Bridge connection** under Setup (or launch with `PM_BRIDGE_MCP_INSECURE_BRIDGE=1`) to opt back into the legacy behavior. Configs that predate this change are grandfathered into the legacy mode with a startup warning until the opt-in is set explicitly.
+> The server refuses to connect to a localhost Bridge without a pinned TLS certificate — this matches Proton Bridge's own v3.21.2+ hardening. If you cannot provide a cert, set **Allow insecure Bridge connection** under Setup (or launch with `MAIL_AI_BRIDGE_INSECURE_BRIDGE=1`) to opt back into the legacy behavior. Configs that predate this change are grandfathered into the legacy mode with a startup warning until the opt-in is set explicitly.
 
 ### Bridge version warning on startup
 
@@ -498,12 +498,12 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 - For OAuth clients, check that `/oauth/register` succeeded and the access token has not been revoked or expired.
 - The `WWW-Authenticate` header on the 401 response carries the failure reason per RFC 6750.
 
-### Claude Desktop doesn't show pm-bridge-mcp tools
+### Claude Desktop doesn't show mail-ai-bridge tools
 
 - Confirm the `mcpServers` block is valid JSON (no trailing commas).
 - Fully quit and reopen Claude Desktop.
 - Check MCP logs: **Help → Show Logs**.
-- Verify the server starts manually: `npx pm-bridge-mcp` — it should stay running silently.
+- Verify the server starts manually: `npx mail-ai-bridge` — it should stay running silently.
 
 ### Analytics show zero or empty data
 
@@ -515,13 +515,13 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 ## Development
 
 ```bash
-git clone https://github.com/chandshy/pm-bridge-mcp.git
-cd pm-bridge-mcp
+git clone https://github.com/chandshy/mail-ai-bridge.git
+cd mail-ai-bridge
 npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 1,525 tests)
+npm run test           # run test suite (Vitest, 1,578 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)
@@ -574,9 +574,9 @@ src/
 
 ## Works Best With…
 
-pm-bridge-mcp is deliberately scoped to email. Chain it with these MCP servers to cover the rest of an agentic workflow:
+mail-ai-bridge is deliberately scoped to email. Chain it with these MCP servers to cover the rest of an agentic workflow:
 
-| MCP server | Use with pm-bridge-mcp |
+| MCP server | Use with mail-ai-bridge |
 |---|---|
 | [`filesystem`](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) (reference) | Save attachments to disk; read local files to attach to outgoing mail |
 | [`fetch`](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) (reference) | Follow links the agent reads in an email without leaving the chat |
@@ -602,4 +602,4 @@ MIT — see [LICENSE](LICENSE)
 
 *Unofficial third-party server. Not affiliated with or endorsed by Proton AG.*
 
-[GitHub](https://github.com/chandshy/pm-bridge-mcp) · [npm](https://www.npmjs.com/package/pm-bridge-mcp) · [Issues](https://github.com/chandshy/pm-bridge-mcp/issues) · [Model Context Protocol](https://modelcontextprotocol.io)
+[GitHub](https://github.com/chandshy/mail-ai-bridge) · [npm](https://www.npmjs.com/package/mail-ai-bridge) · [Issues](https://github.com/chandshy/mail-ai-bridge/issues) · [Model Context Protocol](https://modelcontextprotocol.io)

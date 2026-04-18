@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-04-18
+
+Rename release: `pm-bridge-mcp` → `mail-ai-bridge`. Breaking changes to env-var
+prefix, file paths under `$HOME`, webhook signature header name, and bin names.
+Prior names are honored for one release; the aliases are removed in v3.0.0.
+
+### Breaking
+
+- **Package renamed** — `pm-bridge-mcp` → `mail-ai-bridge`. npm `name`, bin
+  entries (`mail-ai-bridge`, `mail-ai-bridge-settings`), repository URL, and
+  homepage all updated. The package has not been published to npm yet, so no
+  `npm install` compatibility is broken; self-installers should `git pull`
+  and rerun `npm install -g .`.
+- **MCP server identity** — the advertised MCP server `name` is now
+  `mail-ai-bridge`. Claude Desktop's generated config entry key is also
+  `mail-ai-bridge`; existing Claude-Desktop configs that registered the prior
+  `pm-bridge` key will keep working but are encouraged to regenerate via the
+  Setup tab.
+- **Webhook signature header renamed** — `X-PMBridge-Signature-256` is now
+  `X-MailAIBridge-Signature-256`. Downstream HMAC verifiers must update the
+  header name they check. The CloudEvents `source` field and `type` prefix
+  also changed (`pm-bridge-mcp` → `mail-ai-bridge`, `com.pmbridge.*` →
+  `com.mailaibridge.*`).
+
+### Added
+
+- **One-shot OS keychain migration** (`migrateLegacyKeychainEntries`) — at
+  server startup, Bridge-password and SMTP-token entries under the legacy
+  keychain service names `protonmail-mcp-server` and `pm-bridge-mcp` are
+  copied into the new `mail-ai-bridge` service, then removed from the legacy
+  slot. Skips any account whose new slot is already populated (logs a
+  conflict counter). Failures are non-fatal — a stranded credential just
+  prompts the user to re-enter the Bridge password. Runs before any keychain
+  read in `main()`.
+- **Env-var alias chain** — every process.env read site now checks
+  `MAIL_AI_BRIDGE_*` first, falls back to `PM_BRIDGE_MCP_*` (v2.1 rename),
+  then `PROTONMAIL_*` (original). First match wins. Canonical names for
+  docs/CLI are the `MAIL_AI_BRIDGE_*` forms; aliases kept through v3.0.0.
+- **File-path fallback chain** — config / log / scheduler store / reminders /
+  pass audit / FTS db / agent grants / agent audit / escalation pending /
+  escalation audit all prefer `~/.mail-ai-bridge-*`, fall back to
+  `~/.pm-bridge-mcp-*`, then `~/.protonmail-mcp-*`. Write path always uses
+  the new name; a `logger.info` line fires when a read is satisfied from a
+  legacy path so operators notice.
+
+### Changed
+
+- `package.json` version bumped to **2.2.0**.
+- `keywords` updated to include `mail-ai-bridge`, `proton-bridge`,
+  `proton-mail` (describing what the server talks to, not what it is).
+- Test count: **1,569 → 1,578** (+9 keychain-migration scenarios + expanded
+  env-var alias coverage in loader/escalation).
+
+### Upgrade notes
+
+Existing installs carry forward with no manual steps when both the keychain
+and the config file live in their default locations. When either is somewhere
+custom, set `MAIL_AI_BRIDGE_CONFIG` (or leave `PM_BRIDGE_MCP_CONFIG` in place
+for one more release). Webhook receivers: update the HMAC header name or
+pin verification against both until clients roll forward.
+
 ## [2.1.0] — 2026-04-18
 
 Adds multi-account support, per-agent permission grants, a remote HTTP

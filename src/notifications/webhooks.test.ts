@@ -71,7 +71,7 @@ describe("buildPayload", () => {
   it("produces a CloudEvents 1.0 envelope", () => {
     const p = buildPayload(stubEvent("grant-created"), "cloudevents");
     expect(p.specversion).toBe("1.0");
-    expect(p.type).toBe("com.pmbridge.grant.created");
+    expect(p.type).toBe("com.mailaibridge.grant.created");
     expect((p.data as Record<string, unknown>).clientId).toBe("pmc_abc");
   });
 
@@ -121,7 +121,7 @@ describe("WebhookDispatcher.deliver — SSRF guard", () => {
 });
 
 describe("WebhookDispatcher.deliver", () => {
-  it("sends a POST with the payload and sets X-PMBridge-Signature-256 when a secret is set", async () => {
+  it("sends a POST with the payload and sets X-MailAIBridge-Signature-256 when a secret is set", async () => {
     let captured: { url: string; init: RequestInit } | null = null;
     const fetcher = vi.fn(async (url: string | URL | Request, init: RequestInit = {}) => {
       captured = { url: String(url), init };
@@ -135,7 +135,7 @@ describe("WebhookDispatcher.deliver", () => {
     expect(r.ok).toBe(true);
     expect(r.attempts).toBe(1);
     expect(captured).not.toBeNull();
-    const hdr = (captured!.init.headers as Record<string, string>)["X-PMBridge-Signature-256"];
+    const hdr = (captured!.init.headers as Record<string, string>)["X-MailAIBridge-Signature-256"];
     expect(hdr).toMatch(/^sha256=[a-f0-9]{64}$/);
     // Verify the HMAC matches.
     const expected = createHmac("sha256", "shh").update(String(captured!.init.body), "utf-8").digest("hex");
@@ -153,7 +153,7 @@ describe("WebhookDispatcher.deliver", () => {
       { id: "w1", url: "https://hooks.example.com/x" },
       stubEvent("grant-created"),
     );
-    const hdr = (captured!.init.headers as Record<string, string>)["X-PMBridge-Signature-256"];
+    const hdr = (captured!.init.headers as Record<string, string>)["X-MailAIBridge-Signature-256"];
     expect(hdr).toBeUndefined();
   });
 

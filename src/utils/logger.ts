@@ -1,5 +1,5 @@
 /**
- * Logging utility for pm-bridge-mcp
+ * Logging utility for mail-ai-bridge
  */
 
 import { appendFile, existsSync } from "fs";
@@ -18,17 +18,21 @@ import { LogEntry } from "../types/index.js";
 const SENSITIVE_KEYS = /(password|token|secret|apikey|api_key|verifier|credential|authorization|bridgecertpath|attachments|content|^body$)/i;
 
 export function getLogFilePath(): string {
-  // Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
-  // New wins; legacy is silently honored for one release to avoid breaking
-  // existing installs. Remove the PROTONMAIL_LOG_FILE alias in v2.2.
-  const envPath = process.env.PM_BRIDGE_MCP_LOG_FILE || process.env.PROTONMAIL_LOG_FILE;
+  // Env-var alias chain: MAIL_AI_BRIDGE_LOG_FILE → PM_BRIDGE_MCP_LOG_FILE →
+  // PROTONMAIL_LOG_FILE. First match wins; legacy names honored through v3.0.0.
+  const envPath = process.env.MAIL_AI_BRIDGE_LOG_FILE
+    || process.env.PM_BRIDGE_MCP_LOG_FILE
+    || process.env.PROTONMAIL_LOG_FILE;
   if (envPath) return envPath;
-  // Read-old/write-new: if a legacy ~/.protonmail-mcp.log exists and the new
-  // one doesn't, keep appending to the legacy file so existing tail/grep
-  // workflows don't suddenly go silent. Otherwise, write to the new path.
-  const preferred = join(homedir(), ".pm-bridge-mcp.log");
-  const legacy = join(homedir(), ".protonmail-mcp.log");
-  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  // Read-old/write-new: if the new file is absent but a legacy one exists,
+  // keep appending to it so existing tail/grep workflows don't go silent.
+  const preferred = join(homedir(), ".mail-ai-bridge.log");
+  const legacyPm = join(homedir(), ".pm-bridge-mcp.log");
+  const legacyPr = join(homedir(), ".protonmail-mcp.log");
+  if (!existsSync(preferred)) {
+    if (existsSync(legacyPm)) return legacyPm;
+    if (existsSync(legacyPr)) return legacyPr;
+  }
   return preferred;
 }
 

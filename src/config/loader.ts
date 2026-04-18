@@ -1,10 +1,11 @@
 /**
- * Config file loader / saver for pm-bridge-mcp.
+ * Config file loader / saver for mail-ai-bridge.
  *
- * Config is persisted to a single JSON file (default: ~/.pm-bridge-mcp.json,
- * with read-fallback to the legacy ~/.protonmail-mcp.json for installs that
- * predate the rename). Override the path with the PM_BRIDGE_MCP_CONFIG env var
- * (the legacy PROTONMAIL_MCP_CONFIG name is also accepted for one release).
+ * Config is persisted to a single JSON file (default: ~/.mail-ai-bridge.json,
+ * with read-fallback to the legacy ~/.pm-bridge-mcp.json and
+ * ~/.protonmail-mcp.json for installs that predate the rename). Override the
+ * path with the MAIL_AI_BRIDGE_CONFIG env var (PM_BRIDGE_MCP_CONFIG /
+ * PROTONMAIL_MCP_CONFIG are also accepted through v3.0.0).
  *
  * On Unix systems the file is written with mode 0600 (owner-read/write only)
  * to reduce the risk of credential exposure.
@@ -43,7 +44,11 @@ function clamp(value: number, min: number, max: number): number {
 // ─── Config path ───────────────────────────────────────────────────────────────
 
 export function getConfigPath(): string {
-  const envPath = process.env.PM_BRIDGE_MCP_CONFIG ?? process.env.PROTONMAIL_MCP_CONFIG;
+  // Env-var alias chain: MAIL_AI_BRIDGE_CONFIG → PM_BRIDGE_MCP_CONFIG →
+  // PROTONMAIL_MCP_CONFIG. First match wins; legacy names kept through v3.0.0.
+  const envPath = process.env.MAIL_AI_BRIDGE_CONFIG
+    ?? process.env.PM_BRIDGE_MCP_CONFIG
+    ?? process.env.PROTONMAIL_MCP_CONFIG;
   if (envPath) {
     // Resolve to absolute path and ensure it stays within the user's home
     // directory — prevents path-traversal attacks (e.g. "../../etc/passwd").
@@ -51,16 +56,20 @@ export function getConfigPath(): string {
     const home = homedir();
     if (!resolved.startsWith(home + "/") && !resolved.startsWith(home + "\\") && resolved !== home) {
       throw new Error(
-        `PM_BRIDGE_MCP_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
+        `MAIL_AI_BRIDGE_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
       );
     }
     return resolved;
   }
-  // Prefer the new path, but fall back to the legacy ~/.protonmail-mcp.json
-  // if it exists and the new one doesn't — keeps existing installs working.
-  const preferred = join(homedir(), ".pm-bridge-mcp.json");
-  const legacy = join(homedir(), ".protonmail-mcp.json");
-  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  // Prefer the new path, falling back to prior names if only an older file
+  // exists — keeps existing installs working across renames.
+  const preferred = join(homedir(), ".mail-ai-bridge.json");
+  const legacyPm = join(homedir(), ".pm-bridge-mcp.json");
+  const legacyPr = join(homedir(), ".protonmail-mcp.json");
+  if (!existsSync(preferred)) {
+    if (existsSync(legacyPm)) return legacyPm;
+    if (existsSync(legacyPr)) return legacyPr;
+  }
   return preferred;
 }
 

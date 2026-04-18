@@ -12,12 +12,22 @@
  */
 
 import type { ServerConfig } from "../config/schema.js";
+import { logger } from "../utils/logger.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const SERVICE_NAME = "protonmail-mcp-server";
+const SERVICE_NAME = "mail-ai-bridge";
+/**
+ * Legacy service names probed at startup for one-shot migration into the
+ * new `mail-ai-bridge` service namespace. Listed newest-legacy first so a
+ * half-migrated install (`pm-bridge-mcp` exists but `protonmail-mcp-server`
+ * doesn't) is picked up before the older name.
+ */
+const LEGACY_SERVICE_NAMES = ["pm-bridge-mcp", "protonmail-mcp-server"] as const;
 const KEY_PASSWORD = "bridge-password";
 const KEY_SMTP_TOKEN = "smtp-token";
+/** All account keys known to live under the service — iterated by the migration pass. */
+const MIGRATED_ACCOUNT_KEYS = [KEY_PASSWORD, KEY_SMTP_TOKEN] as const;
 
 // ─── Lazy @napi-rs/keyring loading ────────────────────────────────────────────
 
@@ -50,6 +60,16 @@ async function getKeyring(): Promise<KeyringModule | null> {
     keyringModule = null;
     return null;
   }
+}
+
+/**
+ * Test-only reset. Clears the cached @napi-rs/keyring module so the next call
+ * re-runs `getKeyring()`. Exported for unit tests that vi.mock('@napi-rs/keyring')
+ * differently across cases; no production caller should invoke it.
+ */
+export function _resetKeyringCacheForTests(): void {
+  keyringModule = null;
+  keyringChecked = false;
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -160,4 +180,74 @@ export async function migrateFromConfig(
   saveConfigFn(config);
 
   return true;
+}
+
+// ─── Legacy service-name migration ────────────────────────────────────────────
+
+export interface LegacyMigrationResult {
+  /** Count of entries moved into the new service namespace. */
+  migrated: number;
+  /** Legacy entries skipped because a value already exists under the new name. */
+  conflicts: number;
+}
+
+/**
+ * One-shot migration from legacy `protonmail-mcp-server` / `pm-bridge-mcp`
+ * service names to the current `mail-ai-bridge` service. Runs at server boot.
+ *
+ * For each legacy service name, for each account key: read the legacy value;
+ * if present and the new entry is empty, copy it over; then delete the legacy
+ * entry regardless (so we don't re-migrate on the next boot and to keep the
+ * OS-level secret surface from lingering under a dead identity).
+ *
+ * Failures are non-fatal — a stranded credential just means the user will be
+ * re-prompted, which is strictly better than crashing the server.
+ */
+export async function migrateLegacyKeychainEntries(): Promise<LegacyMigrationResult> {
+  let migrated = 0;
+  let conflicts = 0;
+
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return { migrated, conflicts };
+
+    for (const legacyService of LEGACY_SERVICE_NAMES) {
+      for (const account of MIGRATED_ACCOUNT_KEYS) {
+        try {
+          const legacyEntry = new keyring.Entry(legacyService, account);
+          const legacyValue = legacyEntry.getPassword();
+          if (!legacyValue) continue;
+
+          const newEntry = new keyring.Entry(SERVICE_NAME, account);
+          const existing = newEntry.getPassword();
+          if (existing) {
+            // Don't clobber a newer value; still clear the legacy copy so
+            // OS-level credential lists don't show two conflicting entries.
+            conflicts++;
+            try { legacyEntry.deletePassword(); } catch { /* best-effort */ }
+            continue;
+          }
+
+          newEntry.setPassword(legacyValue);
+          try { legacyEntry.deletePassword(); } catch { /* best-effort */ }
+          migrated++;
+          logger.info(
+            `Keychain: migrated ${account} from '${legacyService}' to '${SERVICE_NAME}'`,
+            "Keychain",
+          );
+        } catch (err) {
+          // Non-fatal per account — keep scanning the rest.
+          logger.debug(
+            `Keychain: migration probe failed for ${legacyService}/${account}`,
+            "Keychain",
+            err,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    logger.debug("Keychain: legacy migration aborted (keyring unavailable)", "Keychain", err);
+  }
+
+  return { migrated, conflicts };
 }

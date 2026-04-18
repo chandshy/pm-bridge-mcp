@@ -169,65 +169,109 @@ describe("defaultConfig", () => {
 });
 
 describe("getConfigPath", () => {
+  function clearEnv() {
+    delete process.env.MAIL_AI_BRIDGE_CONFIG;
+    delete process.env.PM_BRIDGE_MCP_CONFIG;
+    delete process.env.PROTONMAIL_MCP_CONFIG;
+  }
+
   it("returns default path when no env var is set and no legacy file exists", () => {
     const existsMock = vi.mocked(existsSync);
+    const savedMa = process.env.MAIL_AI_BRIDGE_CONFIG;
     const saved = process.env.PROTONMAIL_MCP_CONFIG;
     const saved2 = process.env.PM_BRIDGE_MCP_CONFIG;
-    delete process.env.PROTONMAIL_MCP_CONFIG;
-    delete process.env.PM_BRIDGE_MCP_CONFIG;
+    clearEnv();
     existsMock.mockReturnValue(false);
     try {
-      expect(getConfigPath()).toBe(join(homedir(), ".pm-bridge-mcp.json"));
+      expect(getConfigPath()).toBe(join(homedir(), ".mail-ai-bridge.json"));
     } finally {
       if (saved !== undefined) process.env.PROTONMAIL_MCP_CONFIG = saved;
       if (saved2 !== undefined) process.env.PM_BRIDGE_MCP_CONFIG = saved2;
+      if (savedMa !== undefined) process.env.MAIL_AI_BRIDGE_CONFIG = savedMa;
       existsMock.mockReset();
     }
   });
 
-  it("falls back to the legacy ~/.protonmail-mcp.json when the new path doesn't exist and the legacy one does", () => {
+  it("falls back to ~/.pm-bridge-mcp.json when only the prior-name file exists", () => {
     const existsMock = vi.mocked(existsSync);
+    const savedMa = process.env.MAIL_AI_BRIDGE_CONFIG;
     const saved = process.env.PROTONMAIL_MCP_CONFIG;
     const saved2 = process.env.PM_BRIDGE_MCP_CONFIG;
-    delete process.env.PROTONMAIL_MCP_CONFIG;
-    delete process.env.PM_BRIDGE_MCP_CONFIG;
-    const legacy = join(homedir(), ".protonmail-mcp.json");
-    existsMock.mockImplementation((p: unknown) => p === legacy);
+    clearEnv();
+    const legacyPm = join(homedir(), ".pm-bridge-mcp.json");
+    existsMock.mockImplementation((p: unknown) => p === legacyPm);
     try {
-      expect(getConfigPath()).toBe(legacy);
+      expect(getConfigPath()).toBe(legacyPm);
     } finally {
       if (saved !== undefined) process.env.PROTONMAIL_MCP_CONFIG = saved;
       if (saved2 !== undefined) process.env.PM_BRIDGE_MCP_CONFIG = saved2;
+      if (savedMa !== undefined) process.env.MAIL_AI_BRIDGE_CONFIG = savedMa;
+      existsMock.mockReset();
+    }
+  });
+
+  it("falls back to ~/.protonmail-mcp.json when only the original-name file exists", () => {
+    const existsMock = vi.mocked(existsSync);
+    const savedMa = process.env.MAIL_AI_BRIDGE_CONFIG;
+    const saved = process.env.PROTONMAIL_MCP_CONFIG;
+    const saved2 = process.env.PM_BRIDGE_MCP_CONFIG;
+    clearEnv();
+    const legacyPr = join(homedir(), ".protonmail-mcp.json");
+    existsMock.mockImplementation((p: unknown) => p === legacyPr);
+    try {
+      expect(getConfigPath()).toBe(legacyPr);
+    } finally {
+      if (saved !== undefined) process.env.PROTONMAIL_MCP_CONFIG = saved;
+      if (saved2 !== undefined) process.env.PM_BRIDGE_MCP_CONFIG = saved2;
+      if (savedMa !== undefined) process.env.MAIL_AI_BRIDGE_CONFIG = savedMa;
       existsMock.mockReset();
     }
   });
 
   it("respects PROTONMAIL_MCP_CONFIG env var when path is within home dir", () => {
+    const savedMa = process.env.MAIL_AI_BRIDGE_CONFIG;
     const saved = process.env.PROTONMAIL_MCP_CONFIG;
+    const saved2 = process.env.PM_BRIDGE_MCP_CONFIG;
+    clearEnv();
     const customPath = join(homedir(), "custom-config.json");
     process.env.PROTONMAIL_MCP_CONFIG = customPath;
     try {
       expect(getConfigPath()).toBe(customPath);
     } finally {
-      if (saved !== undefined) {
-        process.env.PROTONMAIL_MCP_CONFIG = saved;
-      } else {
-        delete process.env.PROTONMAIL_MCP_CONFIG;
-      }
+      clearEnv();
+      if (saved !== undefined) process.env.PROTONMAIL_MCP_CONFIG = saved;
+      if (saved2 !== undefined) process.env.PM_BRIDGE_MCP_CONFIG = saved2;
+      if (savedMa !== undefined) process.env.MAIL_AI_BRIDGE_CONFIG = savedMa;
     }
   });
 
-  it("throws when PROTONMAIL_MCP_CONFIG points outside home dir", () => {
+  it("prefers MAIL_AI_BRIDGE_CONFIG over PM_BRIDGE_MCP_CONFIG over PROTONMAIL_MCP_CONFIG", () => {
+    const savedMa = process.env.MAIL_AI_BRIDGE_CONFIG;
     const saved = process.env.PROTONMAIL_MCP_CONFIG;
-    process.env.PROTONMAIL_MCP_CONFIG = "/tmp/evil-config.json";
+    const saved2 = process.env.PM_BRIDGE_MCP_CONFIG;
+    clearEnv();
+    process.env.MAIL_AI_BRIDGE_CONFIG = join(homedir(), "new-wins.json");
+    process.env.PM_BRIDGE_MCP_CONFIG  = join(homedir(), "pm-loses.json");
+    process.env.PROTONMAIL_MCP_CONFIG = join(homedir(), "legacy-loses.json");
+    try {
+      expect(getConfigPath()).toBe(join(homedir(), "new-wins.json"));
+    } finally {
+      clearEnv();
+      if (saved !== undefined) process.env.PROTONMAIL_MCP_CONFIG = saved;
+      if (saved2 !== undefined) process.env.PM_BRIDGE_MCP_CONFIG = saved2;
+      if (savedMa !== undefined) process.env.MAIL_AI_BRIDGE_CONFIG = savedMa;
+    }
+  });
+
+  it("throws when MAIL_AI_BRIDGE_CONFIG points outside home dir", () => {
+    const savedMa = process.env.MAIL_AI_BRIDGE_CONFIG;
+    clearEnv();
+    process.env.MAIL_AI_BRIDGE_CONFIG = "/tmp/evil-config.json";
     try {
       expect(() => getConfigPath()).toThrow("must point to a path within the home directory");
     } finally {
-      if (saved !== undefined) {
-        process.env.PROTONMAIL_MCP_CONFIG = saved;
-      } else {
-        delete process.env.PROTONMAIL_MCP_CONFIG;
-      }
+      clearEnv();
+      if (savedMa !== undefined) process.env.MAIL_AI_BRIDGE_CONFIG = savedMa;
     }
   });
 });
