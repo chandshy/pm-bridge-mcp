@@ -54,10 +54,29 @@ export interface IssuedToken {
 export const OAUTH_CODE_TTL_MS = 60_000;                // RFC 6749 §4.1.2: MAX 10 min; we go short
 export const OAUTH_ACCESS_TOKEN_TTL_MS = 24 * 60 * 60_000;  // 24 h — self-host session
 
+/**
+ * Absolute ceilings. The DCR endpoint is rate-limited per IP upstream, so
+ * a friendly client won't hit these. The caps exist so a broken or hostile
+ * client can't grow the Maps without bound between sweep() calls.
+ *
+ * When a cap is hit we evict the oldest entry rather than refusing the
+ * new one — matches the "self-host, keep the live session working"
+ * philosophy. Evicted clients will simply re-register on their next use.
+ */
+export const OAUTH_MAX_CLIENTS = 1000;
+export const OAUTH_MAX_CODES   = 500;
+export const OAUTH_MAX_TOKENS  = 5000;
+
 export class OAuthStore {
   private clients = new Map<string, RegisteredClient>();
   private codes = new Map<string, PendingAuth>();
   private tokens = new Map<string, IssuedToken>();
+
+  /** Drop the oldest entry from a Map (relies on Map's insertion-order iteration). */
+  private evictOldest<K, V>(m: Map<K, V>): void {
+    const first = m.keys().next();
+    if (!first.done) m.delete(first.value);
+  }
 
   registerClient(client: Omit<RegisteredClient, "client_id" | "client_id_issued_at">): RegisteredClient {
     const id = `pmc_${randomUUID().replace(/-/g, "")}`;
@@ -67,6 +86,7 @@ export class OAuthStore {
       client_id_issued_at: now,
       ...client,
     };
+    if (this.clients.size >= OAUTH_MAX_CLIENTS) this.evictOldest(this.clients);
     this.clients.set(id, record);
     return record;
   }
@@ -79,6 +99,7 @@ export class OAuthStore {
   issueAuthCode(params: Omit<PendingAuth, "code" | "createdAt">): PendingAuth {
     const code = randomBytes(32).toString("base64url");
     const record: PendingAuth = { code, createdAt: Date.now(), ...params };
+    if (this.codes.size >= OAUTH_MAX_CODES) this.evictOldest(this.codes);
     this.codes.set(code, record);
     return record;
   }
@@ -101,6 +122,7 @@ export class OAuthStore {
       resource: args.resource,
       expiresAt: Date.now() + OAUTH_ACCESS_TOKEN_TTL_MS,
     };
+    if (this.tokens.size >= OAUTH_MAX_TOKENS) this.evictOldest(this.tokens);
     this.tokens.set(token, rec);
     return rec;
   }

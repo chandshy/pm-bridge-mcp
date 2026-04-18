@@ -464,6 +464,18 @@ describe("HTTP transport", () => {
       expect((await res.json() as { error: string }).error).toBe("unsupported_grant_type");
     });
 
+    it("token endpoint rejects missing Content-Type with 415 (RFC 6749 strict)", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        // Note: NO Content-Type header. fetch() will add text/plain by default,
+        // which readBody also rejects — same 415 path.
+        body: "grant_type=authorization_code",
+      });
+      expect(res.status).toBe(415);
+      expect((await res.json() as { error: string }).error).toBe("invalid_request");
+    });
+
     it("token endpoint rejects mismatched redirect_uri / client_id / unknown codes", async () => {
       const { url } = await startOauth();
       // Unknown code

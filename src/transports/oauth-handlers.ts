@@ -38,6 +38,13 @@ export interface OAuthEndpointsConfig {
 }
 
 /** Read entire request body as a string, parse as JSON or form-urlencoded. */
+/**
+ * Parse an OAuth endpoint body according to RFC 6749 / 7591 / 7009 —
+ * which means *either* form-encoded *or* JSON, never guess. A missing
+ * Content-Type is an RFC violation; we reject with an `Error("unsupported_media_type")`
+ * that the caller maps to HTTP 415. This replaces an earlier best-effort
+ * fallback that was too permissive for a standards-compliance gate.
+ */
 async function readBody(req: IncomingMessage, maxBytes = 65_536): Promise<Record<string, string>> {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -51,7 +58,7 @@ async function readBody(req: IncomingMessage, maxBytes = 65_536): Promise<Record
       if (chunks.length === 0) { resolve({}); return; }
       try {
         const raw = Buffer.concat(chunks).toString("utf-8");
-        const ctype = String(req.headers["content-type"] ?? "");
+        const ctype = String(req.headers["content-type"] ?? "").toLowerCase();
         if (ctype.includes("application/json")) {
           resolve(JSON.parse(raw) as Record<string, string>);
         } else if (ctype.includes("application/x-www-form-urlencoded")) {
@@ -60,8 +67,7 @@ async function readBody(req: IncomingMessage, maxBytes = 65_536): Promise<Record
           for (const [k, v] of params) out[k] = v;
           resolve(out);
         } else {
-          // Best-effort: accept JSON even when Content-Type is missing (MCP clients sometimes omit it).
-          resolve(JSON.parse(raw) as Record<string, string>);
+          reject(new Error("unsupported_media_type"));
         }
       } catch (err) { reject(err); }
     });
@@ -184,7 +190,11 @@ export class OAuthHandlers {
   private async handleRegister(req: IncomingMessage, res: ServerResponse): Promise<OAuthHandlerResult> {
     let body: Record<string, unknown>;
     try { body = (await readBody(req)) as Record<string, unknown>; }
-    catch { error(res, 400, "invalid_request", "Could not parse registration body."); return { handled: true }; }
+    catch (err) {
+      const msg = (err as Error).message;
+      if (msg === "unsupported_media_type") { error(res, 415, "invalid_request", "Content-Type must be application/json or application/x-www-form-urlencoded."); return { handled: true }; }
+      error(res, 400, "invalid_request", "Could not parse registration body."); return { handled: true };
+    }
 
     const uris = Array.isArray(body.redirect_uris) ? (body.redirect_uris as string[]) : [];
     if (uris.length === 0) { error(res, 400, "invalid_redirect_uri", "At least one redirect_uri is required."); return { handled: true }; }
@@ -254,7 +264,11 @@ export class OAuthHandlers {
   private async handleAuthorizePost(req: IncomingMessage, res: ServerResponse): Promise<OAuthHandlerResult> {
     let body: Record<string, string>;
     try { body = await readBody(req); }
-    catch { error(res, 400, "invalid_request", "Could not parse form body."); return { handled: true }; }
+    catch (err) {
+      const msg = (err as Error).message;
+      if (msg === "unsupported_media_type") { error(res, 415, "invalid_request", "Content-Type must be application/x-www-form-urlencoded."); return { handled: true }; }
+      error(res, 400, "invalid_request", "Could not parse form body."); return { handled: true };
+    }
 
     if (!safeEqual(body.admin_password ?? "", this.cfg.adminPassword)) {
       error(res, 403, "access_denied", "Incorrect admin password.");
@@ -290,7 +304,11 @@ export class OAuthHandlers {
   private async handleToken(req: IncomingMessage, res: ServerResponse): Promise<OAuthHandlerResult> {
     let body: Record<string, string>;
     try { body = await readBody(req); }
-    catch { error(res, 400, "invalid_request", "Could not parse token body."); return { handled: true }; }
+    catch (err) {
+      const msg = (err as Error).message;
+      if (msg === "unsupported_media_type") { error(res, 415, "invalid_request", "Token endpoint requires Content-Type: application/x-www-form-urlencoded (RFC 6749)."); return { handled: true }; }
+      error(res, 400, "invalid_request", "Could not parse token body."); return { handled: true };
+    }
 
     const grantType = body.grant_type ?? "";
     if (grantType !== "authorization_code") {
@@ -334,7 +352,11 @@ export class OAuthHandlers {
   private async handleRevoke(req: IncomingMessage, res: ServerResponse): Promise<OAuthHandlerResult> {
     let body: Record<string, string>;
     try { body = await readBody(req); }
-    catch { error(res, 400, "invalid_request"); return { handled: true }; }
+    catch (err) {
+      const msg = (err as Error).message;
+      if (msg === "unsupported_media_type") { error(res, 415, "invalid_request", "Revocation endpoint requires application/x-www-form-urlencoded (RFC 7009)."); return { handled: true }; }
+      error(res, 400, "invalid_request"); return { handled: true };
+    }
     const token = body.token ?? "";
     // RFC 7009: respond 200 regardless of whether the token existed.
     this.store.revokeToken(token);

@@ -118,4 +118,27 @@ describe("OAuthStore", () => {
       expect(s).toEqual({ clients: 1, codes: 1, tokens: 1 });
     });
   });
+
+  describe("absolute caps (DoS resistance)", () => {
+    it("evicts the oldest token when the cap is reached", async () => {
+      const { OAUTH_MAX_TOKENS } = await import("./oauth-store.js");
+      const first = store.issueToken({ clientId: "c1", scopes: [] });
+      // Fill to exactly the cap, then add one more → first should be gone.
+      for (let i = 0; i < OAUTH_MAX_TOKENS; i++) {
+        store.issueToken({ clientId: `c${i + 2}`, scopes: [] });
+      }
+      expect(store.verifyToken(first.token)).toBeNull();
+      expect(store.stats().tokens).toBeLessThanOrEqual(OAUTH_MAX_TOKENS);
+    });
+
+    it("evicts the oldest code when the cap is reached", async () => {
+      const { OAUTH_MAX_CODES } = await import("./oauth-store.js");
+      const first = store.issueAuthCode({ clientId: "c", redirectUri: "http://x/cb", codeChallenge: "x", codeChallengeMethod: "S256", scopes: [] });
+      for (let i = 0; i < OAUTH_MAX_CODES; i++) {
+        store.issueAuthCode({ clientId: "c", redirectUri: "http://x/cb", codeChallenge: "x", codeChallengeMethod: "S256", scopes: [] });
+      }
+      expect(store.consumeAuthCode(first.code)).toBeNull();
+      expect(store.stats().codes).toBeLessThanOrEqual(OAUTH_MAX_CODES);
+    });
+  });
 });
