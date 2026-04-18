@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createHmac } from "crypto";
-import { WebhookDispatcher, detectFormat, buildPayload } from "./webhooks.js";
+import { WebhookDispatcher, detectFormat, buildPayload, isPrivateWebhookTarget } from "./webhooks.js";
 import type { GrantChangedEvent } from "../agents/notifications.js";
 import type { AgentGrant } from "../agents/types.js";
 
@@ -15,6 +15,38 @@ function stubEvent(kind: GrantChangedEvent["kind"] = "grant-created"): GrantChan
   };
   return { kind, grant, seq: 1 };
 }
+
+describe("isPrivateWebhookTarget", () => {
+  it("flags loopback / RFC-1918 / link-local / ULA / metadata", () => {
+    for (const u of [
+      "http://127.0.0.1/x",
+      "http://10.0.0.1/x",
+      "http://172.16.0.1/x",
+      "http://172.31.255.254/x",
+      "http://192.168.1.1/x",
+      "http://169.254.169.254/latest",
+      "http://0.0.0.0/x",
+      "http://localhost/x",
+      "http://foo.localhost/x",
+      "http://metadata.google.internal/computeMetadata",
+      "http://[::1]/x",
+      "http://[fe80::1]/x",
+      "http://[fd00::1]/x",
+    ]) expect(isPrivateWebhookTarget(u)).toBe(true);
+  });
+
+  it("rejects non-http(s) schemes and malformed URLs", () => {
+    expect(isPrivateWebhookTarget("file:///etc/passwd")).toBe(true);
+    expect(isPrivateWebhookTarget("ftp://example.com/")).toBe(true);
+    expect(isPrivateWebhookTarget("not a url")).toBe(true);
+  });
+
+  it("allows public http(s) destinations", () => {
+    expect(isPrivateWebhookTarget("https://hooks.slack.com/services/X/Y/Z")).toBe(false);
+    expect(isPrivateWebhookTarget("https://example.com/hook")).toBe(false);
+    expect(isPrivateWebhookTarget("http://172.32.0.1/")).toBe(false); // just outside RFC-1918
+  });
+});
 
 describe("detectFormat", () => {
   it("picks slack for hooks.slack.com URLs", () => {
@@ -59,6 +91,32 @@ describe("buildPayload", () => {
     const p = buildPayload(stubEvent("grant-denied"), "raw");
     expect(p.kind).toBe("grant-denied");
     expect(p.grant).toBeTruthy();
+  });
+});
+
+describe("WebhookDispatcher.deliver — SSRF guard", () => {
+  it("refuses a private target without delivering when allowPrivateTargets is false (default)", async () => {
+    const fetcher = vi.fn() as unknown as typeof globalThis.fetch;
+    const d = new WebhookDispatcher({ fetcher, sleep: () => Promise.resolve() });
+    const r = await d.deliver(
+      { id: "w1", url: "http://127.0.0.1:6379/", format: "cloudevents" },
+      stubEvent("grant-created"),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.attempts).toBe(0);
+    expect(r.lastError).toBe("private_target_rejected");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("delivers to a private target when allowPrivateTargets=true (opt-in for LAN routers)", async () => {
+    const fetcher = vi.fn(async () => new Response("", { status: 200 })) as unknown as typeof globalThis.fetch;
+    const d = new WebhookDispatcher({ fetcher, sleep: () => Promise.resolve(), allowPrivateTargets: true });
+    const r = await d.deliver(
+      { id: "w1", url: "http://192.168.1.50/hook", format: "cloudevents" },
+      stubEvent("grant-created"),
+    );
+    expect(r.ok).toBe(true);
+    expect(fetcher).toHaveBeenCalled();
   });
 });
 

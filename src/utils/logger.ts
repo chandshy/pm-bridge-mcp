@@ -7,8 +7,15 @@ import { join } from "path";
 import { homedir } from "os";
 import { LogEntry } from "../types/index.js";
 
-/** Keys whose values must be redacted before being stored in log entries */
-const SENSITIVE_KEYS = /^(password|body|content|attachments|smtpToken|bridgeCertPath)$/i;
+/**
+ * Keys whose values must be redacted before being stored in log entries.
+ * Matched as a substring so compound names like `remoteBearerToken`,
+ * `passAccessToken`, `simpleloginApiKey`, `codeVerifier`, `access_token`,
+ * `client_secret` are all covered. The first group is "values we never
+ * want on disk"; the second is "email body-like fields" that might carry
+ * user content we don't need in a debug log.
+ */
+const SENSITIVE_KEYS = /(password|token|secret|apikey|api_key|verifier|credential|authorization|bridgecertpath|attachments|content|^body$)/i;
 
 export function getLogFilePath(): string {
   return process.env.PROTONMAIL_LOG_FILE || join(homedir(), ".protonmail-mcp.log");

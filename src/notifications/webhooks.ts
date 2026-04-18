@@ -26,9 +26,56 @@
  */
 
 import { createHmac, randomBytes } from "crypto";
+import { isIP } from "net";
 import { logger } from "../utils/logger.js";
 import type { AgentGrant } from "../agents/types.js";
 import type { GrantChangedEvent } from "../agents/notifications.js";
+
+/**
+ * Reject URLs that would let an attacker-controlled (or mis-configured)
+ * endpoint hit internal services — cloud metadata, loopback, private
+ * ranges, link-local, IPv6 ULA. Admin can opt-in to private targets via
+ * the `allowPrivateTargets` flag on the dispatcher (for self-hosted
+ * routers like a local n8n or Home Assistant webhook).
+ *
+ * URL-host form is hostname-only; no DNS resolution is performed, so a
+ * hostname that resolves to a private IP at delivery time will still be
+ * caught by the server-side HTTP stack (Node's fetch honors redirects
+ * to the same guard on the first request but not on redirects — callers
+ * should treat redirects as suspicious regardless).
+ */
+export function isPrivateWebhookTarget(rawUrl: string): boolean {
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return true; } // malformed → treat as private / reject
+  if (url.protocol !== "http:" && url.protocol !== "https:") return true;
+  // URL.hostname for IPv6 keeps the surrounding brackets — strip them so
+  // net.isIP() recognises the address.
+  let host = url.hostname.toLowerCase();
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host === "metadata.google.internal") return true;
+  const kind = isIP(host);
+  if (kind === 4) {
+    const parts = host.split(".").map(Number);
+    const [a, b] = parts;
+    if (a === 127) return true;                       // loopback
+    if (a === 10) return true;                        // RFC 1918
+    if (a === 172 && b >= 16 && b <= 31) return true; // RFC 1918
+    if (a === 192 && b === 168) return true;          // RFC 1918
+    if (a === 169 && b === 254) return true;          // link-local (incl. cloud metadata 169.254.169.254)
+    if (a === 0) return true;                         // "this network"
+    if (a >= 224) return true;                        // multicast / reserved
+  } else if (kind === 6) {
+    // Normalize: strip zone, collapse case
+    const h = host.replace(/%.*/, "");
+    if (h === "::1") return true;                     // loopback
+    if (h.startsWith("::ffff:127.") || h.startsWith("::ffff:10.") ||
+        h.startsWith("::ffff:192.168.") || h.startsWith("::ffff:169.254.")) return true;
+    if (/^fe[89ab][0-9a-f]:/.test(h)) return true;    // link-local fe80::/10
+    if (/^f[cd][0-9a-f]{2}:/.test(h)) return true;    // ULA fc00::/7
+  }
+  return false;
+}
 
 export type WebhookFormat = "cloudevents" | "slack" | "discord" | "raw";
 
@@ -128,15 +175,24 @@ export interface WebhookDispatcherDeps {
   fetcher?: typeof globalThis.fetch;
   /** Override sleep for deterministic tests. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Permit webhooks to loopback / RFC-1918 / link-local / ULA targets.
+   * Off by default — SSRF-style defense for cloud deployments. Enable
+   * only for self-hosted routers (n8n on the LAN, local Home Assistant,
+   * etc.). See `isPrivateWebhookTarget` for the full guard list.
+   */
+  allowPrivateTargets?: boolean;
 }
 
 export class WebhookDispatcher {
   private readonly fetcher: typeof globalThis.fetch;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly allowPrivateTargets: boolean;
 
   constructor(deps: WebhookDispatcherDeps = {}) {
     this.fetcher = deps.fetcher ?? globalThis.fetch;
     this.sleep = deps.sleep ?? ((ms) => new Promise(r => setTimeout(r, ms)));
+    this.allowPrivateTargets = !!deps.allowPrivateTargets;
   }
 
   /**
@@ -147,6 +203,15 @@ export class WebhookDispatcher {
     const subscribe = endpoint.subscribe ?? DEFAULT_SUBSCRIBE;
     if (!subscribe.includes(ev.kind as typeof DEFAULT_SUBSCRIBE[number])) {
       return { endpointId: endpoint.id, url: endpoint.url, ok: true, attempts: 0, lastError: "skipped_by_subscription" };
+    }
+    // SSRF guard: reject non-http(s) schemes, loopback, RFC-1918, link-local
+    // (incl. cloud metadata), ULA. Opt-in via allowPrivateTargets for LAN
+    // routers. DNS-spoofing to internal ranges still possible but callers
+    // should pin an HMAC secret so a rogue upstream can't replay.
+    if (!this.allowPrivateTargets && isPrivateWebhookTarget(endpoint.url)) {
+      const msg = "private_target_rejected";
+      logger.warn(`Webhook ${endpoint.id} url targets a private/loopback/link-local address; rejecting`, "Webhooks");
+      return { endpointId: endpoint.id, url: endpoint.url, ok: false, attempts: 0, lastError: msg };
     }
     const format = endpoint.format ?? detectFormat(endpoint.url);
     const payload = buildPayload(ev, format);

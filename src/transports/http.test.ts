@@ -12,8 +12,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { startHttpTransport, type HttpTransportHandle } from "./http.js";
+import { startHttpTransport, type HttpTransportHandle, clientIp } from "./http.js";
 import { AddressInfo, createServer } from "net";
+import type { IncomingMessage } from "http";
+
+function fakeReq(remote: string, headers: Record<string, string | undefined> = {}): IncomingMessage {
+  return {
+    socket: { remoteAddress: remote } as unknown,
+    headers,
+  } as unknown as IncomingMessage;
+}
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -34,6 +42,40 @@ function buildServer(): McpServer {
   srv.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
   return srv;
 }
+
+describe("clientIp — X-Forwarded-For trust model", () => {
+  it("returns the socket address when no XFF header is present", () => {
+    expect(clientIp(fakeReq("203.0.113.7"))).toBe("203.0.113.7");
+  });
+
+  it("trusts XFF when the direct peer is loopback (IPv4)", () => {
+    expect(clientIp(fakeReq("127.0.0.1", { "x-forwarded-for": "203.0.113.7, 10.0.0.1" })))
+      .toBe("203.0.113.7");
+  });
+
+  it("trusts XFF when the direct peer is IPv6 loopback", () => {
+    expect(clientIp(fakeReq("::1", { "x-forwarded-for": "203.0.113.9" }))).toBe("203.0.113.9");
+  });
+
+  it("trusts XFF when the direct peer is IPv4-mapped IPv6 loopback", () => {
+    expect(clientIp(fakeReq("::ffff:127.0.0.1", { "x-forwarded-for": "198.51.100.4" })))
+      .toBe("198.51.100.4");
+  });
+
+  it("IGNORES XFF when the direct peer is NOT loopback (no header-spoofing wide open)", () => {
+    expect(clientIp(fakeReq("203.0.113.7", { "x-forwarded-for": "1.2.3.4" })))
+      .toBe("203.0.113.7");
+  });
+
+  it("takes the left-most token from a comma-separated XFF list", () => {
+    expect(clientIp(fakeReq("127.0.0.1", { "x-forwarded-for": "  198.51.100.5  , 10.0.0.1 " })))
+      .toBe("198.51.100.5");
+  });
+
+  it("falls back to the socket address when XFF is empty", () => {
+    expect(clientIp(fakeReq("127.0.0.1", { "x-forwarded-for": " , " }))).toBe("127.0.0.1");
+  });
+});
 
 describe("HTTP transport", () => {
   let handle: HttpTransportHandle | null = null;

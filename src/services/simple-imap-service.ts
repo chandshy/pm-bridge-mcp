@@ -442,6 +442,14 @@ export class SimpleIMAPService {
    * version against BRIDGE_MIN_VERSION. Logs a warning if the running
    * Bridge is older than the floor. Never throws — version detection is
    * best-effort and must not break the connection path.
+   *
+   * Intentionally warn-only, not a hard block: Bridge occasionally
+   * misreports its version via ID (macOS vendor strings sometimes elide
+   * the patch component, and some distributions carry security patches
+   * into older-looking version strings). Refusing to connect on a false
+   * "too old" signal would be worse than a noisy log — Proton's own
+   * release notes are the authoritative source. A user who wants a hard
+   * gate can wrap the server launch in their own pre-flight check.
    */
   private async checkBridgeVersion(): Promise<void> {
     if (!this.client || !this.isConnected) return;
