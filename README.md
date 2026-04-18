@@ -490,6 +490,22 @@ src/
 
 ---
 
+## Works Best With…
+
+pm-bridge-mcp is deliberately scoped to email. Chain it with these MCP servers to cover the rest of an agentic workflow:
+
+| MCP server | Use with pm-bridge-mcp |
+|---|---|
+| [`filesystem`](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) (reference) | Save attachments to disk; read local files to attach to outgoing mail |
+| [`fetch`](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) (reference) | Follow links the agent reads in an email without leaving the chat |
+| [`Doist/todoist-mcp`](https://github.com/Doist/todoist-mcp) | Turn an email into a task; complete triage in one pass |
+| [`linear-mcp`](https://github.com/jerhadf/linear-mcp-server) | File an issue from a bug-report email with full context |
+| Obsidian-vault MCPs ([example](https://github.com/MarkusPfundstein/mcp-obsidian)) | Archive important threads to notes with linked metadata |
+
+The project is intentionally Proton-focused; the positioning is "best email surface for your agent." Pair it with whichever non-email MCPs fit your workflow rather than waiting for this server to grow a second home.
+
+---
+
 ## Acknowledgements
 
 This project is built on the foundation originally created by **[Hawk94](https://github.com/Hawk94)**, whose initial IMAP/SMTP integration, tool architecture, and test setup made this project possible. The original work was published as [barhatch/protonmail-mcp-server](https://github.com/barhatch/protonmail-mcp-server).
