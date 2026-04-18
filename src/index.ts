@@ -83,6 +83,31 @@ function describeDestructivePreview(tool: string, args: Record<string, unknown>)
       return `Would run a destructive operation on the Proton mailbox.`;
   }
 }
+
+/**
+ * Response returned when destructive-confirmation is required but elicitation
+ * is unavailable (older MCP client). Tells the agent to retry with the
+ * { confirmed: true } argument — preserving the pre-elicitation behavior.
+ */
+function confirmGateFallbackResponse(name: string, preview: string): {
+  content: Array<{ type: "text"; text: string }>;
+  isError: boolean;
+  structuredContent: Record<string, unknown>;
+} {
+  return {
+    content: [{
+      type: "text" as const,
+      text:
+        `Confirmation required for '${name}'.\n\n` +
+        `${preview}\n\n` +
+        `This tool is destructive. Retry the call with the exact same arguments plus ` +
+        `{ "confirmed": true } — the user will see the confirmation flag in the tool call and can cancel it. ` +
+        `Set requireDestructiveConfirm: false in ~/.pm-bridge-mcp.json to disable this guard system-wide.`,
+    }],
+    isError: false,
+    structuredContent: { success: false, confirmationRequired: true, tool: name, preview },
+  };
+}
 import { isValidChallengeId, sanitizeText, isValidEscalationTarget } from "./settings/security.js";
 import { tracer } from "./utils/tracer.js";
 
@@ -1805,29 +1830,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // ── Destructive-tool confirmation gate ────────────────────────────────────
-  // Second-layer protection on top of the permission preset: destructive
-  // calls require an explicit { confirmed: true } argument so the user sees
-  // the intent in their client before it executes. Keeps the workflow user-
-  // initiated per Proton ToS §2.10 (automated-access restriction). Can be
-  // disabled by setting requireDestructiveConfirm: false in the config.
+  // Second-layer protection on top of the permission preset. Keeps the workflow
+  // user-initiated per Proton ToS §2.10. Two mutually-compatible paths:
+  //   1. MCP elicitation (2025-11-25 spec) — server asks the client to surface
+  //      a confirmation dialog; returned when the client advertises the
+  //      `elicitation` capability. Zero coupling to the tool's argument shape.
+  //   2. { confirmed: true } fallback — preview-then-retry for clients that do
+  //      not support elicitation yet. Disable the whole guard by setting
+  //      requireDestructiveConfirm: false in the config.
   if (DESTRUCTIVE_TOOLS.has(name) && (loadConfig() ?? defaultConfig()).requireDestructiveConfirm !== false) {
     if (args.confirmed !== true) {
       const preview = describeDestructivePreview(name, args);
-      return {
-        content: [{
-          type: "text" as const,
-          text:
-            `Confirmation required for '${name}'.\n\n` +
-            `${preview}\n\n` +
-            `This tool is destructive. Retry the call with the exact same arguments plus ` +
-            `{ "confirmed": true } — the user will see the confirmation flag in the tool call and can cancel it. ` +
-            `Set requireDestructiveConfirm: false in ~/.protonmail-mcp.json to disable this guard system-wide.`,
-        }],
-        isError: false,
-        structuredContent: { success: false, confirmationRequired: true, tool: name, preview },
-      };
+      const caps = server.getClientCapabilities();
+      if (caps?.elicitation) {
+        try {
+          const result = await server.elicitInput({
+            message: `Please confirm this destructive operation:\n\n${preview}`,
+            // Empty schema → the client renders a plain accept/decline prompt.
+            requestedSchema: { type: "object", properties: {} },
+          });
+          if (result.action !== "accept") {
+            logger.info(`Destructive tool '${name}' cancelled via elicitation (${result.action})`, "MCPServer");
+            return {
+              content: [{ type: "text" as const, text: `Cancelled: user ${result.action}d the confirmation prompt for '${name}'.` }],
+              isError: false,
+              structuredContent: { success: false, cancelled: true, action: result.action, tool: name },
+            };
+          }
+          logger.info(`Destructive tool '${name}' confirmed via elicitation`, "MCPServer");
+        } catch (err: unknown) {
+          // Elicitation advertised but request failed (network, protocol drift).
+          // Fall through to the arg-based gate — never execute silently.
+          logger.warn(`Elicitation request failed for '${name}', falling back to { confirmed: true } gate`, "MCPServer", err);
+          return confirmGateFallbackResponse(name, preview);
+        }
+      } else {
+        return confirmGateFallbackResponse(name, preview);
+      }
+    } else {
+      logger.info(`Destructive tool '${name}' executing with { confirmed: true }`, "MCPServer");
     }
-    logger.info(`Destructive tool '${name}' executing with { confirmed: true }`, "MCPServer");
   }
 
   // Response-size limits — hot-reloaded from config every 15 s.
