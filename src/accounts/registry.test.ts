@@ -8,13 +8,17 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { homedir } from "os";
+import { join } from "path";
 import type { ServerConfig } from "../config/schema.js";
 
-// Resolve the config path the SAME way the loader does (os.homedir()),
-// not via process.env.HOME — that variable is unset on Windows, where
-// node uses USERPROFILE under the hood. Using homedir() keeps the
-// in-memory fs mock's keys aligned with the real loader's resolved path.
-const CONFIG_PATH = `${homedir()}/.mailpouch.json`;
+// Resolve the config path the SAME way the loader does (`path.join(homedir(), ...)`),
+// not via `${process.env.HOME}/...` — that would fail on Windows twice:
+//   1. process.env.HOME is undefined there (Windows uses USERPROFILE).
+//   2. Even after switching to homedir(), template-string concat produces
+//      mixed-slash paths (`C:\Users\x/.mailpouch.json`) while `path.join`
+//      normalizes to all backslashes. The fs mock is keyed by the normalized
+//      form the loader writes, so the test must match it byte-for-byte.
+const CONFIG_PATH = join(homedir(), ".mailpouch.json");
 
 // Mock fs: one in-memory "disk" shared across the loader and the registry.
 let diskByPath = new Map<string, string>();
