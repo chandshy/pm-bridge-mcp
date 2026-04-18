@@ -45,6 +45,7 @@ import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import { SimpleLoginService } from "./services/simplelogin-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
+import { ReminderService } from "./services/reminder-service.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -146,6 +147,10 @@ const analyticsService = new AnalyticsService();
 const SCHEDULER_STORE = process.env.PROTONMAIL_SCHEDULER_STORE
   || `${process.env.HOME || process.env.USERPROFILE || "."}/.protonmail-mcp-scheduled.json`;
 const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
+
+const REMINDERS_STORE = process.env.PM_BRIDGE_MCP_REMINDERS
+  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-reminders.json`;
+const reminderService = new ReminderService(REMINDERS_STORE);
 
 // ─── Bridge Auto-Start State ──────────────────────────────────────────────────
 /** Set to true when this process launched Proton Bridge; triggers kill on shutdown. */
@@ -1623,6 +1628,102 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "remind_if_no_reply",
+        title: "Remind If No Reply",
+        description:
+          "Schedule a follow-up reminder for a message you've sent. Given the IMAP UID of a message in Sent, captures its Message-ID + recipient and fires a reminder after N days. Use check_reminders to retrieve due reminders; list_pending_reminders to audit; cancel_reminder to drop one.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            email_id: { type: "string", description: "IMAP UID of the sent message (from Sent folder)" },
+            after_days: { type: "number", description: "Days from the message's send date until the reminder fires (1–365)" },
+            note: { type: "string", description: "Optional note explaining the reminder" },
+          },
+          required: ["email_id", "after_days"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            recipient: { type: "string" },
+            subject: { type: "string" },
+            fireAt: { type: "string", format: "date-time" },
+          },
+          required: ["id", "recipient", "subject", "fireAt"],
+        },
+      },
+      {
+        name: "list_pending_reminders",
+        title: "List Pending Reminders",
+        description: "List every pending no-reply reminder, sorted by earliest fireAt.",
+        annotations: { readOnlyHint: true },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: {
+          type: "object",
+          properties: {
+            reminders: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  recipient: { type: "string" },
+                  subject: { type: "string" },
+                  sentAt: { type: "string", format: "date-time" },
+                  fireAt: { type: "string", format: "date-time" },
+                  note: { type: "string" },
+                },
+              },
+            },
+          },
+          required: ["reminders"],
+        },
+      },
+      {
+        name: "cancel_reminder",
+        title: "Cancel Reminder",
+        description: "Cancel a pending no-reply reminder by ID. Silently returns false if the ID is unknown or the reminder already fired.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            reminder_id: { type: "string" },
+          },
+          required: ["reminder_id"],
+        },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "check_reminders",
+        title: "Check Reminders",
+        description:
+          "Return every pending reminder whose deadline has passed. Each returned reminder is transitioned to 'fired' status so it won't appear in subsequent calls. The agent can then search INBOX for replies to messageId and decide whether to surface the reminder to the user.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: {
+          type: "object",
+          properties: {
+            fired: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  messageId: { type: "string" },
+                  recipient: { type: "string" },
+                  subject: { type: "string" },
+                  sentAt: { type: "string", format: "date-time" },
+                  fireAt: { type: "string", format: "date-time" },
+                  note: { type: "string" },
+                },
+              },
+            },
+          },
+          required: ["fired"],
+        },
+      },
+      {
         name: "cancel_scheduled_email",
         title: "Cancel Scheduled Email",
         description: "Cancel a pending scheduled email before it is sent. Returns false if the ID is not found or the email has already been sent.",
@@ -2720,6 +2821,79 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text" as const, text: "Not found or not pending" }], isError: true, structuredContent: { success: false, reason: "Not found or not pending" } };
         }
         return actionOk();
+      }
+
+      // ── Reminders (no-reply follow-ups) ────────────────────────────────────
+      case "remind_if_no_reply": {
+        const remEmailId = requireNumericEmailId(args.email_id, "email_id");
+        const afterDays = typeof args.after_days === "number" ? args.after_days : NaN;
+        if (!Number.isFinite(afterDays) || afterDays < 1 || afterDays > 365) {
+          throw new McpError(ErrorCode.InvalidParams, "after_days must be a number between 1 and 365.");
+        }
+        const msg = await imapService.getEmailById(remEmailId);
+        if (!msg) {
+          return { content: [{ type: "text" as const, text: "Source message not found" }], isError: true, structuredContent: { success: false, reason: "Source message not found" } };
+        }
+        // Pull the RFC 2822 Message-ID so the agent can later search for replies
+        // with In-Reply-To / References headers matching it.
+        const headers = msg.headers ?? {};
+        const rawMsgId = Array.isArray(headers["message-id"]) ? headers["message-id"][0] : (headers["message-id"] as string | undefined);
+        if (!rawMsgId) {
+          throw new McpError(ErrorCode.InvalidRequest, "Source message has no Message-ID header; cannot track replies.");
+        }
+        const recipient = (msg.to ?? [])[0] ?? "";
+        const reminder = reminderService.add({
+          messageId: rawMsgId,
+          imapUid: remEmailId,
+          recipient,
+          subject: msg.subject ?? "",
+          sentAt: msg.date ?? new Date(),
+          afterDays,
+          note: typeof args.note === "string" ? args.note : undefined,
+        });
+        return ok({
+          id: reminder.id,
+          recipient: reminder.recipient,
+          subject: reminder.subject,
+          fireAt: reminder.fireAt,
+        });
+      }
+
+      case "list_pending_reminders": {
+        const reminders = reminderService.listPending().map(r => ({
+          id: r.id,
+          recipient: r.recipient,
+          subject: r.subject,
+          sentAt: r.sentAt,
+          fireAt: r.fireAt,
+          note: r.note ?? "",
+        }));
+        return ok({ reminders });
+      }
+
+      case "cancel_reminder": {
+        const rid = typeof args.reminder_id === "string" ? args.reminder_id : "";
+        if (!rid) throw new McpError(ErrorCode.InvalidParams, "reminder_id must be a non-empty string.");
+        const cancelled = reminderService.cancel(rid);
+        if (!cancelled) {
+          return { content: [{ type: "text" as const, text: "Reminder not found or already fired" }], isError: true, structuredContent: { success: false, reason: "Not found or already fired" } };
+        }
+        return actionOk();
+      }
+
+      case "check_reminders": {
+        const fired = reminderService.scanDue().map(r => ({
+          id: r.id,
+          messageId: r.messageId,
+          recipient: r.recipient,
+          subject: r.subject,
+          sentAt: r.sentAt,
+          fireAt: r.fireAt,
+          note: r.note ?? "",
+        }));
+        // Keep the store small over time
+        reminderService.prune();
+        return ok({ fired });
       }
 
       case "download_attachment": {

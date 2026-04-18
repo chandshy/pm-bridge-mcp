@@ -10,6 +10,7 @@ export const ALL_TOOLS = [
   "send_email", "reply_to_email", "forward_email", "send_test_email",
   // Drafts & scheduling
   "save_draft", "schedule_email", "list_scheduled_emails", "cancel_scheduled_email", "list_proton_scheduled",
+  "remind_if_no_reply", "list_pending_reminders", "cancel_reminder", "check_reminders",
   // Reading
   "get_emails", "get_email_by_id", "search_emails", "get_unread_count",
   "list_labels", "get_emails_by_label", "download_attachment",
@@ -57,7 +58,10 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   drafts: {
     label: "Drafts & Scheduling",
     description: "Save drafts and schedule emails for future delivery",
-    tools: ["save_draft", "schedule_email", "list_scheduled_emails", "cancel_scheduled_email", "list_proton_scheduled"],
+    tools: [
+      "save_draft", "schedule_email", "list_scheduled_emails", "cancel_scheduled_email", "list_proton_scheduled",
+      "remind_if_no_reply", "list_pending_reminders", "cancel_reminder", "check_reminders",
+    ],
     risk: "moderate",
   },
   reading: {
