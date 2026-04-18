@@ -15,6 +15,7 @@ export const ALL_TOOLS = [
   "get_emails", "get_email_by_id", "search_emails", "get_unread_count",
   "list_labels", "get_emails_by_label", "download_attachment",
   "get_thread", "get_correspondence_profile",
+  "fts_search", "fts_rebuild", "fts_status",
   // Folder management
   "get_folders", "sync_folders", "create_folder", "delete_folder", "rename_folder",
   // Email actions
@@ -73,6 +74,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
       "get_emails", "get_email_by_id", "search_emails", "get_unread_count",
       "list_labels", "get_emails_by_label", "download_attachment",
       "get_thread", "get_correspondence_profile",
+      "fts_search", "fts_rebuild", "fts_status",
     ],
     risk: "safe",
   },

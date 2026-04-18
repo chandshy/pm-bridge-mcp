@@ -47,6 +47,7 @@ import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
 import { ReminderService } from "./services/reminder-service.js";
 import { PassService, PassCliUnavailableError } from "./services/pass-service.js";
+import { FtsIndexService, FtsUnavailableError, openFtsIndex, type FtsRecord } from "./services/fts-service.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -158,6 +159,30 @@ const reminderService = new ReminderService(REMINDERS_STORE);
 const PASS_AUDIT_PATH = process.env.PM_BRIDGE_MCP_PASS_AUDIT
   || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-pass-audit.jsonl`;
 let passService: PassService | null = null;
+
+const FTS_DB_PATH = process.env.PM_BRIDGE_MCP_FTS_DB
+  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-fts.db`;
+let ftsService: FtsIndexService | null = null;
+
+function getFts(): FtsIndexService {
+  if (ftsService) return ftsService;
+  ftsService = openFtsIndex(FTS_DB_PATH);
+  return ftsService;
+}
+
+function recordFromEmail(m: EmailMessage): FtsRecord {
+  const stableId = m.protonId ?? m.id;
+  const toAll = (m.to ?? []).join(", ");
+  return {
+    id: stableId,
+    subject: m.subject ?? "",
+    from: m.from ?? "",
+    to: toAll,
+    folder: m.folder ?? "",
+    body: (m.body ?? m.bodyPreview ?? "").slice(0, 200_000),
+    dateEpoch: Math.floor((m.date?.getTime?.() ?? 0) / 1000),
+  };
+}
 
 // ─── Bridge Auto-Start State ──────────────────────────────────────────────────
 /** Set to true when this process launched Proton Bridge; triggers kill on shutdown. */
@@ -1905,6 +1930,80 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
 
+      // ── Local FTS5 search index (requires better-sqlite3 optional dep) ──────
+      {
+        name: "fts_search",
+        title: "Full-Text Search (Local Index)",
+        description:
+          "BM25-ranked keyword search over the locally-indexed mail corpus. Supports FTS5 syntax: phrases (\"exact phrase\"), boolean (foo AND bar, foo OR bar, NOT baz), prefix (proto*), and column filters (subject:invoice from:alice). Faster and smarter than search_emails, but requires the local index to be built — call fts_rebuild if fts_status shows it empty.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "FTS5 query string" },
+            folder: { type: "string", description: "Restrict results to a single folder" },
+            sinceEpoch: { type: "number", description: "Filter to messages whose date is at or after this Unix-epoch second" },
+            limit: { type: "number", description: "Max hits to return (1–200, default 20)" },
+          },
+          required: ["query"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            hits: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  subject: { type: "string" },
+                  from: { type: "string" },
+                  to: { type: "string" },
+                  folder: { type: "string" },
+                  snippet: { type: "string" },
+                  dateEpoch: { type: "number" },
+                  score: { type: "number" },
+                },
+              },
+            },
+          },
+          required: ["hits"],
+        },
+      },
+      {
+        name: "fts_rebuild",
+        title: "Rebuild Local FTS Index",
+        description:
+          "Clear the local FTS5 index and rebuild it from the messages currently cached by the analytics layer (INBOX + Sent). Intended for use after major mailbox changes or when fts_search returns stale results. Returns the number of messages indexed.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: {
+          type: "object",
+          properties: {
+            indexed: { type: "number" },
+            messageCount: { type: "number" },
+            dbPath: { type: "string" },
+          },
+        },
+      },
+      {
+        name: "fts_status",
+        title: "FTS Index Status",
+        description: "Report the path, row count, and on-disk size of the local FTS5 index. Returns { available: false } when better-sqlite3 is not installed.",
+        annotations: { readOnlyHint: true },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: {
+          type: "object",
+          properties: {
+            available: { type: "boolean" },
+            messageCount: { type: "number" },
+            dbPath: { type: "string" },
+            databaseBytes: { type: "number" },
+            reason: { type: "string" },
+          },
+        },
+      },
+
       // ── Permission Escalation (always-available meta-tools) ────────────────
       {
         name: "request_permission_escalation",
@@ -3083,6 +3182,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           averageResponseTime: found.averageResponseTime ?? null,
           isFavorite: !!found.isFavorite,
         });
+      }
+
+      // ── FTS5 local search index ────────────────────────────────────────────
+      case "fts_search": {
+        const q = typeof args.query === "string" ? args.query.trim() : "";
+        if (!q) throw new McpError(ErrorCode.InvalidParams, "query must be a non-empty string.");
+        let fts: FtsIndexService;
+        try { fts = getFts(); } catch (err: unknown) {
+          if (err instanceof FtsUnavailableError) throw new McpError(ErrorCode.InvalidRequest, err.message);
+          throw err;
+        }
+        const hits = fts.search({
+          query: q,
+          limit: typeof args.limit === "number" ? args.limit : undefined,
+          folder: typeof args.folder === "string" ? args.folder : undefined,
+          sinceEpoch: typeof args.sinceEpoch === "number" ? args.sinceEpoch : undefined,
+        }).map(h => ({
+          id: h.id,
+          subject: h.subject,
+          from: h.from,
+          to: h.to,
+          folder: h.folder,
+          snippet: h.snippet,
+          dateEpoch: h.dateEpoch,
+          score: h.score,
+        }));
+        return ok({ hits });
+      }
+
+      case "fts_rebuild": {
+        let fts: FtsIndexService;
+        try { fts = getFts(); } catch (err: unknown) {
+          if (err instanceof FtsUnavailableError) throw new McpError(ErrorCode.InvalidRequest, err.message);
+          throw err;
+        }
+        const { inbox, sent } = await getAnalyticsEmails();
+        fts.clear();
+        const indexed = fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
+        const stats = fts.stats();
+        return ok({ indexed, messageCount: stats.messageCount, dbPath: stats.dbPath });
+      }
+
+      case "fts_status": {
+        try {
+          const fts = getFts();
+          const stats = fts.stats();
+          return ok({ available: true, ...stats });
+        } catch (err: unknown) {
+          if (err instanceof FtsUnavailableError) {
+            return ok({ available: false, reason: err.message });
+          }
+          throw err;
+        }
       }
 
       // ── Folder Management ─────────────────────────────────────────────────────
