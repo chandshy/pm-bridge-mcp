@@ -1,0 +1,252 @@
+/**
+ * SimpleLogin alias tools: alias_list, alias_create_random,
+ * alias_create_custom, alias_toggle, alias_delete, alias_get_activity.
+ */
+
+import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+
+const ACTION_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    success: { type: "boolean" },
+    messageId: { type: "string" },
+    reason: { type: "string" },
+  },
+  required: ["success"],
+};
+
+export const defs: ToolDef[] = [
+  {
+    name: "alias_list",
+    title: "List SimpleLogin Aliases",
+    description: "List aliases on the configured SimpleLogin account. Returns up to pageSize aliases (default 200). Requires simpleloginApiKey in settings.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        pageSize: { type: "number", description: "Max aliases to return (default 200, cap 1000)" },
+      },
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        aliases: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "number" },
+              email: { type: "string" },
+              enabled: { type: "boolean" },
+              note: { type: "string" },
+              nb_forward: { type: "number" },
+              nb_block: { type: "number" },
+              nb_reply: { type: "number" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "alias_create_random",
+    title: "Create Random SimpleLogin Alias",
+    description: "Create a new random SimpleLogin alias. mode='uuid' produces a long random hex local-part (hardest to guess, good for sensitive signups); mode='word' is two readable words (easier to type). Optional note lets you tag what the alias is for so you can audit later.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["uuid", "word"], default: "uuid" },
+        note: { type: "string", description: "Free-text note describing what this alias is for" },
+        hostname: { type: "string", description: "Optional hostname the alias is being created for (used by SimpleLogin for analytics)" },
+      },
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number" },
+        email: { type: "string" },
+        enabled: { type: "boolean" },
+        note: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "alias_create_custom",
+    title: "Create Custom SimpleLogin Alias",
+    description: "Create a custom SimpleLogin alias with a user-chosen prefix and a signed suffix (obtain suffixes from SimpleLogin's alias-options endpoint; the UI picker handles this for end users).",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        aliasPrefix: { type: "string", description: "Local-part of the alias (before the suffix)" },
+        signedSuffix: { type: "string", description: "Signed suffix returned by GET /api/v5/alias/options" },
+        mailboxIds: { type: "array", items: { type: "number" }, description: "Mailbox IDs to deliver to" },
+        note: { type: "string" },
+        name: { type: "string", description: "Display name shown in replies sent through the alias" },
+        hostname: { type: "string" },
+      },
+      required: ["aliasPrefix", "signedSuffix"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number" },
+        email: { type: "string" },
+        enabled: { type: "boolean" },
+      },
+    },
+  },
+  {
+    name: "alias_toggle",
+    title: "Toggle SimpleLogin Alias",
+    description: "Enable or disable a SimpleLogin alias. Disabled aliases block all incoming mail without deleting the alias record (useful when a service starts abusing an alias).",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        aliasId: { type: "number" },
+      },
+      required: ["aliasId"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: { enabled: { type: "boolean" } },
+    },
+  },
+  {
+    name: "alias_delete",
+    title: "Delete SimpleLogin Alias",
+    description: "Permanently delete a SimpleLogin alias. Irreversible — prefer alias_toggle unless you are certain. Destructive: requires { confirmed: true }.",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        aliasId: { type: "number" },
+        confirmed: { type: "boolean", description: "Must be true to execute." },
+      },
+      required: ["aliasId"],
+    },
+    outputSchema: ACTION_RESULT_SCHEMA,
+  },
+  {
+    name: "alias_get_activity",
+    title: "Get SimpleLogin Alias Activity",
+    description: "Return forward/block/reply activity log for a single SimpleLogin alias (most recent first). Useful for auditing what's hitting a specific alias before you disable or delete it.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        aliasId: { type: "number" },
+        pageSize: { type: "number", description: "Max activity rows (default 50, cap 1000)" },
+      },
+      required: ["aliasId"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        activities: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              action: { type: "string", enum: ["forward", "block", "reply", "bounced"] },
+              from: { type: "string" },
+              to: { type: "string" },
+              timestamp: { type: "number" },
+              reverse_alias: { type: "string" },
+            },
+          },
+        },
+      },
+    },
+  },
+];
+
+export const handlers: Record<string, ToolHandler> = {
+  alias_list: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    const pageSize = typeof args.pageSize === "number"
+      ? Math.min(Math.max(1, args.pageSize), 1000)
+      : 200;
+    const aliases = await simpleloginService.listAliases(pageSize);
+    return ok({ aliases });
+  },
+
+  alias_create_random: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    const mode = args.mode === "word" ? "word" as const : "uuid" as const;
+    const note = typeof args.note === "string" ? args.note : undefined;
+    const hostname = typeof args.hostname === "string" ? args.hostname : undefined;
+    const alias = await simpleloginService.createRandomAlias({ mode, note, hostname });
+    return ok({ id: alias.id, email: alias.email, enabled: alias.enabled, note: alias.note ?? "" });
+  },
+
+  alias_create_custom: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.aliasPrefix !== "string" || typeof args.signedSuffix !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "aliasPrefix and signedSuffix are required.");
+    }
+    const alias = await simpleloginService.createCustomAlias({
+      aliasPrefix: args.aliasPrefix,
+      signedSuffix: args.signedSuffix,
+      mailboxIds: Array.isArray(args.mailboxIds) ? (args.mailboxIds as number[]) : undefined,
+      note: typeof args.note === "string" ? args.note : undefined,
+      name: typeof args.name === "string" ? args.name : undefined,
+      hostname: typeof args.hostname === "string" ? args.hostname : undefined,
+    });
+    return ok({ id: alias.id, email: alias.email, enabled: alias.enabled });
+  },
+
+  alias_toggle: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.aliasId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+    }
+    const result = await simpleloginService.toggleAlias(args.aliasId);
+    return ok({ enabled: result.enabled });
+  },
+
+  alias_delete: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.aliasId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+    }
+    await simpleloginService.deleteAlias(args.aliasId);
+    return ok({ success: true });
+  },
+
+  alias_get_activity: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.aliasId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+    }
+    const pageSize = typeof args.pageSize === "number"
+      ? Math.min(Math.max(1, args.pageSize), 1000)
+      : 50;
+    const activities = await simpleloginService.getAliasActivities(args.aliasId, pageSize);
+    return ok({ activities });
+  },
+};
+
+const mod: ToolModule = { defs, handlers };
+export default mod;
