@@ -128,8 +128,30 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise
   });
 }
 
-function clientIp(req: IncomingMessage): string {
-  return req.socket.remoteAddress ?? "0.0.0.0";
+/**
+ * Return the caller IP. Trusts `X-Forwarded-For` ONLY when the direct
+ * peer is loopback — matches the comment in oauth-handlers.ts and makes
+ * the `ipPins` grant condition usable behind a local reverse proxy
+ * (Caddy, nginx, Cloudflare Tunnel).
+ *
+ * XFF is comma-separated "client, proxy1, proxy2, …"; we take the
+ * left-most token (the original client). When any parse step fails or
+ * the direct peer is not loopback, fall back to the socket address —
+ * never fail open to an attacker-controlled header.
+ */
+export function clientIp(req: IncomingMessage): string {
+  const direct = req.socket.remoteAddress ?? "0.0.0.0";
+  const isLoopback =
+    direct === "127.0.0.1" ||
+    direct === "::1" ||
+    direct === "::ffff:127.0.0.1" ||
+    direct.startsWith("127.");
+  if (!isLoopback) return direct;
+  const h = req.headers["x-forwarded-for"];
+  const raw = Array.isArray(h) ? h[0] : h;
+  if (!raw) return direct;
+  const first = raw.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : direct;
 }
 
 /**
