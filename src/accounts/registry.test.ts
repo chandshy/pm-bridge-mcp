@@ -7,7 +7,18 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { homedir } from "os";
+import { join } from "path";
 import type { ServerConfig } from "../config/schema.js";
+
+// Resolve the config path the SAME way the loader does (`path.join(homedir(), ...)`),
+// not via `${process.env.HOME}/...` — that would fail on Windows twice:
+//   1. process.env.HOME is undefined there (Windows uses USERPROFILE).
+//   2. Even after switching to homedir(), template-string concat produces
+//      mixed-slash paths (`C:\Users\x/.mailpouch.json`) while `path.join`
+//      normalizes to all backslashes. The fs mock is keyed by the normalized
+//      form the loader writes, so the test must match it byte-for-byte.
+const CONFIG_PATH = join(homedir(), ".mailpouch.json");
 
 // Mock fs: one in-memory "disk" shared across the loader and the registry.
 let diskByPath = new Map<string, string>();
@@ -55,8 +66,7 @@ import { defaultConfig } from "../config/loader.js";
 function seedConfig(cfg: Partial<ServerConfig>): void {
   const base = defaultConfig();
   const merged = { ...base, ...cfg };
-  const path = `${process.env.HOME || "/home/chuck"}/.mailpouch.json`;
-  diskByPath.set(path, JSON.stringify(merged));
+  diskByPath.set(CONFIG_PATH, JSON.stringify(merged));
 }
 
 describe("accounts registry", () => {
@@ -164,8 +174,7 @@ describe("accounts registry", () => {
     });
     setActiveAccount(other.id);
     // Loading config should now show the mirrored settings.
-    const path = `${process.env.HOME || "/home/chuck"}/.mailpouch.json`;
-    const cfg = JSON.parse(diskByPath.get(path) ?? "{}") as ServerConfig;
+    const cfg = JSON.parse(diskByPath.get(CONFIG_PATH) ?? "{}") as ServerConfig;
     expect(cfg.connection.smtpHost).toBe("smtp.other");
     expect(cfg.activeAccountId).toBe(other.id);
   });
