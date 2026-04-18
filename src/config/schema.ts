@@ -185,6 +185,46 @@ export interface ConnectionSettings {
   /** Explicit path to the Proton Bridge executable. Leave blank to auto-detect. */
   bridgePath?: string;
   /**
+   * Remote (HTTP) transport mode. When true, pm-bridge-mcp listens on an
+   * HTTP port for MCP requests instead of stdio, gated by a bearer token.
+   * Default false — stdio transport, which is what Claude Desktop spawns.
+   */
+  remoteMode?: boolean;
+  /** Bind host for the HTTP transport. Default 127.0.0.1. */
+  remoteHost?: string;
+  /** Port for the HTTP transport. Default 8788. */
+  remotePort?: number;
+  /** HTTP path for the MCP endpoint. Default /mcp. */
+  remotePath?: string;
+  /** Required when remoteMode=true. Shared bearer token clients send in Authorization: Bearer ... */
+  remoteBearerToken?: string;
+  /** Optional HTTPS cert path for the HTTP transport. Required for public exposure. */
+  remoteTlsCertPath?: string;
+  /** Optional HTTPS key path for the HTTP transport. Must be paired with remoteTlsCertPath. */
+  remoteTlsKeyPath?: string;
+  /**
+   * Enable OAuth 2.1 endpoints alongside the static bearer. MCP hosts can
+   * register themselves via /oauth/register and obtain tokens via a
+   * PKCE-guarded consent flow. Recommended when exposing beyond a trusted
+   * tunnel; still works with any static-bearer callers.
+   */
+  remoteOauthEnabled?: boolean;
+  /**
+   * Admin password required to approve OAuth consent. Required when
+   * remoteOauthEnabled=true. High-value secret — keychain storage is preferred.
+   */
+  remoteOauthAdminPassword?: string;
+  /**
+   * Externally-visible issuer URL for OAuth metadata (defaults to
+   * http[s]://remoteHost:remotePort). Override when behind a reverse
+   * proxy, e.g. https://mcp.example.com.
+   */
+  remoteOauthIssuer?: string;
+  /** Sustained requests/sec per caller (default 20). */
+  remoteRateLimitPerSecond?: number;
+  /** Burst size per caller (default 40). */
+  remoteRateLimitBurst?: number;
+  /**
    * SimpleLogin API key for the alias_* tools. Generated from
    * https://app.simplelogin.io/dashboard/api_key. Leave blank to disable the
    * alias tool group entirely (tools return a configuration error if invoked).
