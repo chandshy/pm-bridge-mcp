@@ -48,6 +48,7 @@ import { SchedulerService } from "./services/scheduler.js";
 import { ReminderService } from "./services/reminder-service.js";
 import { PassService, PassCliUnavailableError } from "./services/pass-service.js";
 import { FtsIndexService, FtsUnavailableError, openFtsIndex, type FtsRecord } from "./services/fts-service.js";
+import { extractActionItems, parseIcs } from "./services/content-parser.js";
 import { AgentGrantStore } from "./agents/grant-store.js";
 import { GrantManager } from "./agents/grant-manager.js";
 import { AgentAuditLog, hashArgs } from "./agents/audit.js";
@@ -2071,6 +2072,71 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: "extract_action_items",
+        title: "Extract Action Items",
+        description:
+          "Scan a single email's body for action-item-looking lines (bullets with action verbs, TODO:/ACTION: markers, @mentions) and return a structured list with best-effort assignee and due-date fields. Heuristic — not a replacement for a real task extractor, but useful for quick triage.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            email_id: { type: "string", description: "IMAP UID from get_emails / search_emails" },
+          },
+          required: ["email_id"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            action_items: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  text: { type: "string" },
+                  assignee: { type: "string" },
+                  due: { type: "string" },
+                },
+                required: ["text"],
+              },
+            },
+          },
+          required: ["action_items"],
+        },
+      },
+      {
+        name: "extract_meeting",
+        title: "Extract Meeting from ICS",
+        description:
+          "Parse an iCalendar (ICS) attachment or inline VCALENDAR block out of an email and return structured meeting details. Returns { meeting: null } when no ICS block is found. Supports RFC 5545 line folding and the common VEVENT properties (SUMMARY, DTSTART, DTEND, LOCATION, ORGANIZER, ATTENDEE, DESCRIPTION, RRULE).",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            email_id: { type: "string", description: "IMAP UID from get_emails / search_emails" },
+          },
+          required: ["email_id"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            meeting: {
+              type: ["object", "null"],
+              properties: {
+                summary: { type: "string" },
+                start: { type: "string" },
+                end: { type: "string" },
+                location: { type: "string" },
+                organizer: { type: "string" },
+                attendees: { type: "array", items: { type: "string" } },
+                description: { type: "string" },
+                rrule: { type: "string" },
+              },
+              required: ["summary", "start"],
+            },
+          },
+        },
+      },
 
       // ── Permission Escalation (always-available meta-tools) ────────────────
       {
@@ -3414,6 +3480,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+      case "extract_action_items": {
+        const aiEmailId = requireNumericEmailId(args.email_id, "email_id");
+        const email = await imapService.getEmailById(aiEmailId);
+        if (!email) {
+          return { content: [{ type: "text" as const, text: "Email not found" }], isError: true, structuredContent: { success: false, reason: "Email not found" } };
+        }
+        const action_items = extractActionItems(email.body || "");
+        return ok({ action_items });
+      }
+
+      case "extract_meeting": {
+        const emEmailId = requireNumericEmailId(args.email_id, "email_id");
+        const email = await imapService.getEmailById(emEmailId);
+        if (!email) {
+          return { content: [{ type: "text" as const, text: "Email not found" }], isError: true, structuredContent: { success: false, reason: "Email not found" } };
+        }
+        // 1. Prefer a dedicated ICS attachment (text/calendar or .ics filename).
+        let icsText: string | null = null;
+        for (const att of email.attachments ?? []) {
+          const ct = (att.contentType ?? "").toLowerCase();
+          const fn = (att.filename ?? "").toLowerCase();
+          const looksIcs = ct.startsWith("text/calendar")
+            || ct === "application/ics"
+            || fn.endsWith(".ics");
+          if (!looksIcs) continue;
+          if (Buffer.isBuffer(att.content)) {
+            icsText = att.content.toString("utf-8");
+          } else if (typeof att.content === "string") {
+            icsText = att.content;
+          }
+          if (icsText) break;
+        }
+        // 2. Fall back to scanning the body for an inline VCALENDAR block.
+        if (!icsText && email.body && /BEGIN:VCALENDAR/i.test(email.body)) {
+          icsText = email.body;
+        }
+        const meeting = icsText ? parseIcs(icsText) : null;
+        return ok({ meeting: meeting ?? null });
+      }
+
       // ── Folder Management ─────────────────────────────────────────────────────
 
       case "get_folders": {
@@ -4269,6 +4375,17 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => ({
         { name: "emailId", description: "UID of any message in the thread", required: true },
       ],
     },
+    {
+      name: "draft_in_my_voice",
+      title: "Draft Email in My Voice",
+      description:
+        "Draft a new email to a specific recipient in the user's own voice, using a handful of their recent sent emails as tone samples. The LLM infers style (formality, greeting/sign-off habits, typical length) from the samples rather than guessing.",
+      arguments: [
+        { name: "recipient", description: "Email address to draft to", required: true },
+        { name: "intent", description: "What the email should say or accomplish", required: true },
+        { name: "sampleCount", description: "How many recent sent emails to include as tone samples (default 5, max 20)", required: false },
+      ],
+    },
   ],
 }));
 
@@ -4496,6 +4613,64 @@ Produce:
 - Key decisions or agreements made
 - Open questions or action items
 - Who needs to respond next (if applicable)`,
+            },
+          },
+        ],
+      };
+    }
+
+    case "draft_in_my_voice": {
+      // Recipient must look like an email address — sanitize then validate.
+      const rawRecipient = sanitizeText(args.recipient, 254);
+      if (!isValidEmail(rawRecipient)) {
+        throw new McpError(ErrorCode.InvalidParams, "recipient must be a valid email address.");
+      }
+      const recipient = rawRecipient;
+      // Intent flows into the prompt body verbatim — sanitize against prompt
+      // injection the same way compose_reply handles its intent arg.
+      const intent = sanitizeText(args.intent, 500);
+      if (!intent) {
+        throw new McpError(ErrorCode.InvalidParams, "intent must be a non-empty string.");
+      }
+      const rawCount = parseInt((args.sampleCount as string) || "5", 10);
+      const sampleCount = isNaN(rawCount) ? 5 : Math.min(Math.max(1, rawCount), 20);
+
+      let samples: Array<{ subject: string; bodyPreview: string }> = [];
+      try {
+        const sent = await imapService.getEmails("Sent", sampleCount);
+        samples = sent.map(e => ({
+          subject: e.subject || "(No Subject)",
+          // Use bodyPreview (~300 chars) — full bodies would blow up the prompt
+          // and would leak far more than needed to demonstrate tone.
+          bodyPreview: e.bodyPreview ?? truncateEmailBody(e.body, 400),
+        }));
+      } catch { /* Sent folder unreachable — prompt will still guide the model */ }
+
+      const samplesBlock = samples.length > 0
+        ? JSON.stringify(samples, null, 2)
+        : "[no sent emails loaded — tone will have to be inferred from context only]";
+
+      return {
+        description: "Draft an email in the user's voice",
+        messages: [
+          {
+            role: "user" as const,
+            content: {
+              type: "text" as const,
+              text: `Draft a new email to ${recipient}.
+
+Intent: ${intent}
+
+Study the following ${samples.length} recent emails the user has sent and match their voice — formality level, greeting and sign-off conventions, typical sentence length, and word choices. Do not copy phrasing wholesale; infer style and write a fresh message.
+
+Recent sent emails (tone samples):
+${samplesBlock}
+
+When drafting, produce:
+1. A suggested subject line
+2. The body of the new email
+
+Then, if the user approves, use send_email with to="${recipient}" to send it.`,
             },
           },
         ],
