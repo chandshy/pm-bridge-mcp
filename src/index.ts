@@ -48,6 +48,15 @@ import { SchedulerService } from "./services/scheduler.js";
 import { ReminderService } from "./services/reminder-service.js";
 import { PassService, PassCliUnavailableError } from "./services/pass-service.js";
 import { FtsIndexService, FtsUnavailableError, openFtsIndex, type FtsRecord } from "./services/fts-service.js";
+import { AgentGrantStore } from "./agents/grant-store.js";
+import { GrantManager } from "./agents/grant-manager.js";
+import { AgentAuditLog, hashArgs } from "./agents/audit.js";
+import { currentCaller } from "./agents/caller-context.js";
+import { registerAgentServices } from "./agents/registry.js";
+import { notifications as agentNotifications } from "./agents/notifications.js";
+import { AccountManager, registerAccountManager } from "./accounts/manager.js";
+import { DesktopNotifier } from "./notifications/desktop.js";
+import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -141,8 +150,21 @@ const config: ProtonMailConfig = {
   syncInterval: 5,
 };
 
-const smtpService = new SMTPService(config);
-const imapService = new SimpleIMAPService();
+// Multi-account: AccountManager owns one SimpleIMAPService + SMTPService per
+// configured account. The module-level `imapService`/`smtpService` symbols
+// below point at whichever account is currently "active" and get hot-swapped
+// when the user switches accounts via the settings UI — no restart needed.
+// Per-tool routing to a non-active account happens in the dispatcher via a
+// local shadow of these names.
+const accountManager = new AccountManager();
+registerAccountManager(accountManager);
+let imapService: SimpleIMAPService = accountManager.getActive().imap;
+let smtpService: SMTPService = accountManager.getActive().smtp;
+accountManager.on("active-changed", (ev: { services: { imap: SimpleIMAPService; smtp: SMTPService } }) => {
+  imapService = ev.services.imap;
+  smtpService = ev.services.smtp;
+  logger.info("Module-level imap/smtp services rebound to the new active account", "MCPServer");
+});
 // SimpleLogin client is lazy: constructed empty and reconfigured in main() once
 // the API key is loaded. Alias tools check isConfigured() before dispatching.
 let simpleloginService = new SimpleLoginService("");
@@ -183,6 +205,52 @@ function recordFromEmail(m: EmailMessage): FtsRecord {
     dateEpoch: Math.floor((m.date?.getTime?.() ?? 0) / 1000),
   };
 }
+
+// ─── Agent-grant system ───────────────────────────────────────────────────────
+// Per-agent permission gating for multi-client deployments. Always-on so the
+// gate is consistent whether the transport is stdio or HTTP — but stdio
+// callers fall through to the global preset (no caller context), which
+// preserves the single-user Claude Desktop default.
+const AGENT_GRANTS_PATH = process.env.PM_BRIDGE_MCP_AGENTS
+  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-agents.json`;
+const AGENT_AUDIT_PATH = process.env.PM_BRIDGE_MCP_AGENT_AUDIT
+  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-agent-audit.jsonl`;
+const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
+const grantManager = new GrantManager(agentGrants);
+const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
+registerAgentServices(agentGrants, agentAudit);
+
+// ─── Notification channels (B2) ──────────────────────────────────────────────
+// Subscribe an OS desktop notifier and an outbound webhook dispatcher to the
+// agent-notification bus. Both read their settings from the ServerConfig on
+// every event (no restart needed when toggling / adding endpoints).
+const desktopNotifier = new DesktopNotifier();
+const webhookDispatcher = new WebhookDispatcher();
+agentNotifications.subscribe((ev) => {
+  const cfg = loadConfig();
+  // Desktop: default ON; only skip when explicitly disabled.
+  if (cfg?.desktopNotificationsEnabled !== false) {
+    const titleByKind: Record<string, string> = {
+      "grant-created":  "pm-bridge-mcp — agent awaiting approval",
+      "grant-approved": "pm-bridge-mcp — agent approved",
+      "grant-denied":   "pm-bridge-mcp — agent denied",
+      "grant-revoked":  "pm-bridge-mcp — agent revoked",
+      "grant-expired":  "pm-bridge-mcp — agent expired",
+    };
+    const title = titleByKind[ev.kind] ?? "pm-bridge-mcp";
+    const body = `${ev.grant.clientName}`;
+    // Fire-and-forget — notifier failures never touch the caller.
+    void desktopNotifier.notify({ title, body, sound: ev.kind === "grant-created" ? "Glass" : undefined })
+      .catch(() => { /* logged inside notifier */ });
+  }
+  // Webhooks: dispatch to every enabled endpoint in parallel.
+  const endpoints = cfg?.webhooks ?? [];
+  if (endpoints.length > 0) {
+    void webhookDispatcher.deliverAll(endpoints, ev).catch(err => {
+      logger.warn("Webhook deliverAll failed", "Webhooks", err);
+    });
+  }
+});
 
 // ─── Bridge Auto-Start State ──────────────────────────────────────────────────
 /** Set to true when this process launched Proton Bridge; triggers kill on shutdown. */
@@ -2169,6 +2237,101 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
+  // ── Per-tool account routing ─────────────────────────────────────────────
+  // The dispatcher resolves an optional `account_id` argument before the
+  // gates so audit rows and permission checks both see the correct account.
+  // If an agent grant is bound to a specific account (conditions.accountId),
+  // the caller's requested account_id must match.
+  const requestedAccountId = typeof args.account_id === "string" && args.account_id.trim()
+    ? args.account_id.trim()
+    : accountManager.activeAccountId();
+  // Shadow the module-level `imapService` / `smtpService` when the caller
+  // picks a non-default account; the switch-case handlers below see these
+  // locals via lexical scope. No-op when the caller targets the active
+  // account (the module-level bindings already point there).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  let imapService = accountManager.getActive().imap;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  let smtpService = accountManager.getActive().smtp;
+  try {
+    const svcs = accountManager.getForAccount(requestedAccountId);
+    imapService = svcs.imap;
+    smtpService = svcs.smtp;
+  } catch (err) {
+    return {
+      content: [{ type: "text" as const, text: `Unknown account_id: ${requestedAccountId}` }],
+      isError: true,
+      structuredContent: { success: false, reason: "unknown_account_id", requestedAccountId },
+    };
+  }
+
+  // ── Agent-grant gate ──────────────────────────────────────────────────────
+  // Runs BEFORE the global permission gate. Only takes effect when the call
+  // carries caller context (i.e. came in through the HTTP transport with an
+  // OAuth client_id). Stdio callers — the Claude Desktop default — fall
+  // through and are gated only by the global preset, preserving single-user
+  // behavior for anyone who hasn't opted into multi-agent mode.
+  const caller = currentCaller();
+  const callStartedAt = Date.now();
+  // Flipped true in the catch so the finally success path is skipped.
+  let auditFailureRecorded = false;
+  if (caller && !caller.staticBearer) {
+    // Grant-bound account mismatch → deny before we even run the grant gate,
+    // so an agent that was approved for Account A cannot smuggle calls into
+    // Account B by passing `account_id` in args.
+    const callerGrant = agentGrants.get(caller.clientId);
+    const boundAccountId = callerGrant?.conditions?.accountId;
+    if (boundAccountId && boundAccountId !== requestedAccountId) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: `Grant is bound to account ${boundAccountId}; call targeted ${requestedAccountId}.`,
+        ip: caller.ip,
+      });
+      auditFailureRecorded = true;
+      return {
+        content: [{ type: "text" as const, text: `Blocked: this agent's grant is bound to account ${boundAccountId}.` }],
+        isError: true,
+        structuredContent: { success: false, reason: "account_mismatch", expected: boundAccountId, requested: requestedAccountId },
+      };
+    }
+
+    const globalPreset = (loadConfig() ?? defaultConfig()).permissions.preset;
+    const grantResult = grantManager.check({
+      clientId: caller.clientId,
+      tool: name,
+      args: args as Record<string, unknown>,
+      callerIp: caller.ip,
+      globalPreset,
+    });
+    if (!grantResult.allowed) {
+      logger.warn(`Agent grant denied '${name}' for ${caller.clientId}`, "AgentGate", { reason: grantResult.reason });
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: grantResult.reason,
+        ip: caller.ip,
+      });
+      // Mark so the finally doesn't write a duplicate "ok" row.
+      auditFailureRecorded = true;
+      return {
+        content: [{ type: "text" as const, text: `Blocked by agent grant: ${grantResult.reason}` }],
+        isError: true,
+        structuredContent: { success: false, reason: grantResult.reason, clientId: caller.clientId },
+      };
+    }
+  }
+
   // ── Permission gate ───────────────────────────────────────────────────────
   // Checked against ~/.protonmail-mcp.json (refreshed every 15 s).
   // If no config file exists the read-only preset is enforced — agents can
@@ -2177,6 +2340,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const permResult = permissions.check(name as ToolName);
   if (!permResult.allowed) {
     logger.warn(`Tool blocked by permission policy: ${name}`, "MCPServer", { reason: permResult.reason });
+    if (caller && !caller.staticBearer) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: `preset: ${permResult.reason}`,
+        ip: caller.ip,
+      });
+      auditFailureRecorded = true;
+    }
     return {
       content: [{ type: "text" as const, text: `Blocked: ${permResult.reason}` }],
       isError: true,
@@ -3887,11 +4064,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (error: unknown) {
     logger.error(`Tool failed: ${name}`, "MCPServer", error);
     const msg = safeErrorMessage(error);
+    auditFailureRecorded = true;
+    if (caller && !caller.staticBearer) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: msg,
+        ip: caller.ip,
+      });
+    }
     return {
       content: [{ type: "text" as const, text: `Error: ${msg}` }],
       structuredContent: { success: false, reason: msg },
       isError: true,
     };
+  } finally {
+    // Success audit: when the try block exited via a normal return (no
+    // catch ran), the call completed successfully. We can't observe the
+    // response contents from here (each case returns directly), but the
+    // agent-audit channel intentionally avoids logging response bodies —
+    // we just need the fact of the call and its duration.
+    if (!auditFailureRecorded && caller && !caller.staticBearer) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: true,
+        durMs: Date.now() - callStartedAt,
+        ip: caller.ip,
+      });
+      agentGrants.recordCall(caller.clientId);
+    }
   }
   }); // end tracer.span('mcp.tool_call')
 });
@@ -4666,11 +4876,22 @@ function _buildTrayMenu(): SysTrayMenu {
   const sep: MenuItem = { title: "<SEPARATOR>", tooltip: "", enabled: true, checked: false };
   const statusLabel   = smtpStatus.connected ? "\u25CF Connected" : "\u25CB Disconnected";
   const emailLabel    = config.smtp.username || "Not configured";
+  const pendingCount  = agentGrants.list({ status: "pending" }).length;
+  const activeCount   = agentGrants.list({ status: "active" }).length;
+  const tooltip = pendingCount > 0
+    ? `pm-bridge-mcp · ${pendingCount} agent(s) awaiting approval`
+    : "pm-bridge-mcp";
   const items: MenuItem[] = [
     { title: "pm-bridge-mcp", tooltip: "pm-bridge-mcp daemon", enabled: false, checked: false },
     sep,
     { title: statusLabel, tooltip: "", enabled: false, checked: false },
     { title: emailLabel,  tooltip: "", enabled: false, checked: false },
+    ...(pendingCount > 0
+      ? [{ title: `\u26A0 ${pendingCount} agent(s) pending`, tooltip: "Open Settings → Agents to approve", enabled: false, checked: false }]
+      : []),
+    ...(activeCount > 0
+      ? [{ title: `\u25CF ${activeCount} agent(s) active`, tooltip: "", enabled: false, checked: false }]
+      : []),
     sep,
     ...(_settingsEnabled && _settingsUrl
       ? [{ title: "Open Settings", tooltip: `Open ${_settingsUrl}`, enabled: true, checked: false }]
@@ -4685,7 +4906,7 @@ function _buildTrayMenu(): SysTrayMenu {
     sep,
     { title: "Quit", tooltip: "Stop the MCP daemon", enabled: true, checked: false },
   ];
-  return { icon: TRAY_ICON_B64, title: "", tooltip: "pm-bridge-mcp", items };
+  return { icon: TRAY_ICON_B64, title: "", tooltip, items };
 }
 
 async function _rebuildTray(): Promise<void> {
@@ -4714,6 +4935,13 @@ async function _initTray(): Promise<void> {
     await tray.ready();
     _trayInstance = tray;
     logger.info("System tray icon active", "MCPServer");
+
+    // Keep the tray menu in sync with grant changes (new pending → badge,
+    // approved/revoked → count update). Handler is fire-and-forget; if
+    // rebuild fails we swallow to avoid crashing the daemon.
+    agentNotifications.subscribe(() => {
+      void _rebuildTray().catch(() => { /* swallow */ });
+    });
 
     await tray.onClick((action: { item: MenuItem }) => {
       switch (action.item.title) {
@@ -4942,6 +5170,7 @@ async function main() {
         oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
         rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
         rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,
+        agentGrants,
       });
       logger.info(`pm-bridge-mcp started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
       (globalThis as unknown as { __pmBridgeHttpHandle?: { close(): Promise<void> } }).__pmBridgeHttpHandle = handle;

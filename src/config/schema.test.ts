@@ -82,8 +82,8 @@ describe("TOOL_CATEGORIES", () => {
 });
 
 describe("CONFIG_VERSION", () => {
-  it("is 2", () => {
-    expect(CONFIG_VERSION).toBe(2);
+  it("is 3", () => {
+    expect(CONFIG_VERSION).toBe(3);
   });
 });
 

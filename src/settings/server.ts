@@ -64,7 +64,18 @@ import {
   type EscalationRecord,
   type AuditEntry,
 } from "../permissions/escalation.js";
-import { getLogFilePath } from "../utils/logger.js";
+import { getLogFilePath, logger } from "../utils/logger.js";
+import { getAgentGrantStore, getAgentAuditLog } from "../agents/registry.js";
+import { notifications as agentNotifications } from "../agents/notifications.js";
+import {
+  readRegistry,
+  createAccount,
+  updateAccount,
+  deleteAccount,
+  setActiveAccount,
+} from "../accounts/registry.js";
+import { getAccountManager } from "../accounts/manager.js";
+import type { AccountSpecShape } from "../config/schema.js";
 
 // ─── TCP connectivity test ─────────────────────────────────────────────────────
 
@@ -851,7 +862,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 <!-- ══ POST-SETUP NAV (hidden until config saved) ══ -->
 <nav id="main-nav" style="display:none">
   <button class="active" onclick="showTab('setup',this)">Setup</button>
+  <button onclick="showTab('accounts',this)">Accounts</button>
   <button onclick="showTab('permissions',this)">Permissions</button>
+  <button onclick="showTab('agents',this)">
+    Agents
+    <span id="agents-pending-badge" style="display:none;background:#ef4444;color:#fff;border-radius:10px;padding:2px 7px;margin-left:6px;font-size:11px;font-weight:700">0</span>
+  </button>
   <button onclick="showTab('status',this)">Status</button>
   <button id="logs-tab-btn" style="display:none" onclick="showTab('logs',this)">Logs</button>
 </nav>
@@ -1515,6 +1531,110 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   </div>
 </section>
 
+<!-- ══ ACCOUNTS TAB ══ -->
+<section id="accounts">
+  <div class="section-heading">Mail accounts</div>
+  <div class="section-subheading">
+    Manage the mail providers this server talks to. The active account
+    drives the singleton IMAP/SMTP services — switching accounts requires
+    a server restart. Concurrent per-tool account routing is future work.
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <div id="accounts-list" style="display:flex;flex-direction:column;gap:10px">
+      <div class="hint" style="text-align:center;padding:30px">Loading…</div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="openAccountForm('proton-bridge', null)">+ Add Proton Bridge account</button>
+      <button class="btn btn-primary" onclick="openAccountForm('imap', null)">+ Add IMAP account</button>
+    </div>
+  </div>
+
+  <div id="account-form-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100">
+    <div style="max-width:560px;margin:6vh auto;background:#1b1b1e;border-radius:12px;padding:22px;color:#eee;font-family:system-ui,sans-serif;max-height:86vh;overflow:auto">
+      <div style="font-size:16px;font-weight:700;margin-bottom:6px" id="af-title">Add account</div>
+      <div style="font-size:12px;color:#888;margin-bottom:16px" id="af-subtitle"></div>
+
+      <div class="field" style="margin-bottom:10px">
+        <label style="font-size:12px;color:#aaa">Display name</label>
+        <input type="text" id="af-name" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
+          <label style="font-size:12px;color:#aaa">IMAP host</label>
+          <input type="text" id="af-imap-host" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#aaa">IMAP port</label>
+          <input type="number" id="af-imap-port" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
+          <label style="font-size:12px;color:#aaa">SMTP host</label>
+          <input type="text" id="af-smtp-host" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#aaa">SMTP port</label>
+          <input type="number" id="af-smtp-port" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label style="font-size:12px;color:#aaa">Username / email</label>
+        <input type="text" id="af-username" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label style="font-size:12px;color:#aaa">Password</label>
+        <input type="password" id="af-password" placeholder="Leave blank to keep existing" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:10px" id="af-cert-row">
+        <label style="font-size:12px;color:#aaa">Bridge TLS cert path (Bridge accounts only)</label>
+        <input type="text" id="af-cert" placeholder="~/.config/protonmail/bridge-v3/cert.pem" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <input type="hidden" id="af-id">
+      <input type="hidden" id="af-provider">
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-ghost" onclick="closeAccountForm()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveAccountForm()" id="af-save-btn">Save account</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ AGENTS TAB ══ -->
+<section id="agents">
+  <div class="section-heading">Connected agents</div>
+  <div class="section-subheading">
+    Each MCP client that registers via OAuth gets its own grant. Approve,
+    deny, or revoke access independently. Stdio callers (the local Claude
+    Desktop default) bypass this system and use the global preset above.
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <button class="btn btn-ghost" id="ag-filter-pending"  onclick="switchAgentFilter('pending')"  style="font-weight:600">🔴 Pending <span id="ag-count-pending">0</span></button>
+      <button class="btn btn-ghost" id="ag-filter-active"   onclick="switchAgentFilter('active')">🟢 Active <span id="ag-count-active">0</span></button>
+      <button class="btn btn-ghost" id="ag-filter-revoked"  onclick="switchAgentFilter('revoked')">⚪ Revoked <span id="ag-count-revoked">0</span></button>
+      <button class="btn btn-ghost" id="ag-filter-audit"    onclick="switchAgentFilter('audit')">📋 Audit log</button>
+    </div>
+    <div id="agents-list" style="display:flex;flex-direction:column;gap:10px">
+      <div class="hint" style="text-align:center;padding:30px">Loading…</div>
+    </div>
+    <div id="agents-audit" style="display:none">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Time (ET)</th>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Agent</th>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Tool</th>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Outcome</th>
+          <th style="text-align:right;padding:6px;border-bottom:1px solid #333">ms</th>
+        </tr></thead>
+        <tbody id="agents-audit-body"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
 <!-- ══ STATUS TAB ══ -->
 <section id="status">
   <div class="section-heading">Status</div>
@@ -1747,10 +1867,304 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.querySelectorAll('#main-nav button').forEach(b => b.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     btn.classList.add('active');
-    if (id === 'status') { populateStatus(cfg); loadAuditLog(); }
-    if (id === 'logs')   { logInit(); }
-    else                 { logStopFollow(); }
+    if (id === 'status')   { populateStatus(cfg); loadAuditLog(); }
+    if (id === 'agents')   { refreshAgents(); }
+    if (id === 'accounts') { refreshAccounts(); }
+    if (id === 'logs')     { logInit(); }
+    else                   { logStopFollow(); }
   };
+
+  // ══ ACCOUNTS TAB LOGIC ═══════════════════════════════════════════════════
+  async function refreshAccounts() {
+    const r = await fetch('/api/accounts');
+    const body = await r.json();
+    const list = document.getElementById('accounts-list');
+    const rows = body.accounts || [];
+    const activeId = body.activeAccountId;
+    if (!rows.length) {
+      list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No accounts configured.</div>';
+      return;
+    }
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    list.innerHTML = rows.map(a => {
+      const active = a.id === activeId;
+      const buttons =
+        (active ? '' : '<button class="btn btn-primary" onclick="activateAccount(\'' + esc(a.id) + '\')">Activate</button>') +
+        '<button class="btn btn-ghost" onclick="editAccount(\'' + esc(a.id) + '\')">Edit</button>' +
+        (!active ? '<button class="btn btn-ghost" onclick="deleteAccountConfirm(\'' + esc(a.id) + '\')">Delete</button>' : '');
+      const last = a.lastCheckedAt ? ' · last check ' + new Date(a.lastCheckedAt).toLocaleString() + ' · ' + esc(a.lastCheckResult || '') : '';
+      return (
+        '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px;' + (active ? 'border-color:#6D4AFF' : '') + '">' +
+          '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
+            '<div>' +
+              '<div style="font-weight:600">' + (active ? '🟣 ' : '') + esc(a.name) + ' <span style="color:#888;font-size:12px">(' + esc(a.providerType) + ')</span></div>' +
+              '<div style="font-size:12px;color:#888;margin-top:4px">' +
+                'IMAP ' + esc(a.imapHost) + ':' + esc(a.imapPort) + ' · SMTP ' + esc(a.smtpHost) + ':' + esc(a.smtpPort) +
+                ' · ' + esc(a.username) + last +
+              '</div>' +
+            '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+    window._accountsById = {};
+    for (const a of rows) window._accountsById[a.id] = a;
+  }
+
+  window.openAccountForm = function(providerType, id) {
+    const isEdit = !!id;
+    document.getElementById('af-title').textContent = isEdit ? 'Edit account' : 'Add account';
+    document.getElementById('af-id').value = id || '';
+    document.getElementById('af-provider').value = providerType;
+    document.getElementById('af-cert-row').style.display = providerType === 'proton-bridge' ? '' : 'none';
+
+    if (isEdit && window._accountsById && window._accountsById[id]) {
+      const a = window._accountsById[id];
+      document.getElementById('af-name').value = a.name || '';
+      document.getElementById('af-imap-host').value = a.imapHost || '';
+      document.getElementById('af-imap-port').value = a.imapPort || '';
+      document.getElementById('af-smtp-host').value = a.smtpHost || '';
+      document.getElementById('af-smtp-port').value = a.smtpPort || '';
+      document.getElementById('af-username').value = a.username || '';
+      document.getElementById('af-password').value = '';
+      document.getElementById('af-cert').value = a.bridgeCertPath || '';
+    } else {
+      // Pre-fill sensible defaults for the chosen provider.
+      document.getElementById('af-name').value = '';
+      document.getElementById('af-username').value = '';
+      document.getElementById('af-password').value = '';
+      document.getElementById('af-cert').value = '';
+      if (providerType === 'proton-bridge') {
+        document.getElementById('af-imap-host').value = '127.0.0.1';
+        document.getElementById('af-imap-port').value = '1143';
+        document.getElementById('af-smtp-host').value = '127.0.0.1';
+        document.getElementById('af-smtp-port').value = '1025';
+      } else {
+        document.getElementById('af-imap-host').value = '';
+        document.getElementById('af-imap-port').value = '993';
+        document.getElementById('af-smtp-host').value = '';
+        document.getElementById('af-smtp-port').value = '587';
+      }
+    }
+    document.getElementById('account-form-backdrop').style.display = 'block';
+  };
+
+  window.editAccount = function(id) {
+    const a = (window._accountsById || {})[id];
+    if (!a) return;
+    openAccountForm(a.providerType, id);
+  };
+
+  window.closeAccountForm = function() {
+    document.getElementById('account-form-backdrop').style.display = 'none';
+  };
+
+  window.saveAccountForm = async function() {
+    const id = document.getElementById('af-id').value;
+    const isEdit = !!id;
+    const body = {
+      name: document.getElementById('af-name').value.trim(),
+      providerType: document.getElementById('af-provider').value,
+      imapHost: document.getElementById('af-imap-host').value.trim(),
+      imapPort: parseInt(document.getElementById('af-imap-port').value, 10) || 0,
+      smtpHost: document.getElementById('af-smtp-host').value.trim(),
+      smtpPort: parseInt(document.getElementById('af-smtp-port').value, 10) || 0,
+      username: document.getElementById('af-username').value.trim(),
+      password: document.getElementById('af-password').value,
+      bridgeCertPath: document.getElementById('af-cert').value.trim() || undefined,
+    };
+    if (!body.name) { alert('Name is required.'); return; }
+    const url = isEdit ? '/api/accounts/' + encodeURIComponent(id) : '/api/accounts';
+    const method = isEdit ? 'PATCH' : 'POST';
+    const r = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CSRF || '' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { alert('Save failed: ' + (await r.text())); return; }
+    closeAccountForm();
+    refreshAccounts();
+  };
+
+  window.activateAccount = async function(id) {
+    if (!confirm('Switching the active account requires a server restart. Continue?')) return;
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id) + '/activate', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': window.CSRF || '' },
+    });
+    if (!r.ok) { alert('Activate failed: ' + (await r.text())); return; }
+    alert('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).');
+    refreshAccounts();
+  };
+
+  window.deleteAccountConfirm = async function(id) {
+    if (!confirm('Delete this account? This removes the server\u2019s ability to connect to it. Active account cannot be deleted.')) return;
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': window.CSRF || '' },
+    });
+    if (!r.ok) { alert('Delete failed: ' + (await r.text())); return; }
+    refreshAccounts();
+  };
+
+  // ══ AGENTS TAB LOGIC ══════════════════════════════════════════════════════
+  let agentFilter = 'pending';
+  let agentEventSource = null;
+
+  window.switchAgentFilter = function(which) {
+    agentFilter = which;
+    ['pending','active','revoked','audit'].forEach(f => {
+      const b = document.getElementById('ag-filter-' + f);
+      if (b) b.style.fontWeight = (f === which ? '700' : '500');
+    });
+    document.getElementById('agents-list').style.display = (which === 'audit') ? 'none' : '';
+    document.getElementById('agents-audit').style.display = (which === 'audit') ? '' : 'none';
+    refreshAgents();
+  };
+
+  async function refreshAgents() {
+    if (agentFilter === 'audit') { await loadAgentAudit(); return; }
+    const r = await fetch('/api/agents?status=' + encodeURIComponent(agentFilter));
+    const body = await r.json();
+    renderAgents(body.grants || []);
+    // Also update the counts on the filter buttons.
+    for (const s of ['pending','active','revoked']) {
+      const rr = await fetch('/api/agents?status=' + s);
+      const bb = await rr.json();
+      const el = document.getElementById('ag-count-' + s);
+      if (el) el.textContent = '(' + (bb.grants ? bb.grants.length : 0) + ')';
+    }
+    updatePendingBadge();
+  }
+
+  async function updatePendingBadge() {
+    const r = await fetch('/api/agents?status=pending');
+    const b = await r.json();
+    const n = (b.grants || []).length;
+    const badge = document.getElementById('agents-pending-badge');
+    if (!badge) return;
+    if (n > 0) {
+      badge.textContent = String(n);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function renderAgents(grants) {
+    const list = document.getElementById('agents-list');
+    if (!grants.length) {
+      list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No grants in this view.</div>';
+      return;
+    }
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    list.innerHTML = grants.map(g => {
+      const badge = g.status === 'pending' ? '🔴 pending'
+                  : g.status === 'active'  ? '🟢 active'
+                  : g.status === 'revoked' ? '⚪ revoked'
+                  : g.status === 'expired' ? '🟡 expired' : g.status;
+      const lastCall = g.lastCallAt ? new Date(g.lastCallAt).toLocaleString() : 'never';
+      const expiry = g.conditions && g.conditions.expiresAt
+        ? 'expires ' + new Date(g.conditions.expiresAt).toLocaleString() : 'no expiry';
+      const cidEsc = esc(g.clientId);
+      const nameEsc = esc(g.clientName);
+      const condArg = g.conditions ? JSON.stringify(g.conditions).replace(/'/g, "\\'") : 'null';
+      const buttons = g.status === 'pending'
+        ? '<button class="btn btn-primary" onclick="approveGrant(\'' + cidEsc + '\',\'read_only\')">Approve read-only</button>' +
+          '<button class="btn btn-primary" onclick="approveGrant(\'' + cidEsc + '\',\'supervised\')">Approve supervised</button>' +
+          '<button class="btn btn-ghost"   onclick="openGrantModal(\'' + cidEsc + '\',\'' + nameEsc + '\',null)">Customize\u2026</button>' +
+          '<button class="btn btn-ghost"   onclick="denyGrant(\''    + cidEsc + '\')">Deny</button>'
+        : g.status === 'active'
+        ? '<button class="btn btn-ghost"   onclick="openGrantModal(\'' + cidEsc + '\',\'' + nameEsc + '\',' + condArg + ')">Extend / modify\u2026</button>' +
+          '<button class="btn btn-ghost"   onclick="revokeGrant(\''  + cidEsc + '\')">Revoke</button>'
+        : '';
+      return (
+        '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
+            '<div>' +
+              '<div style="font-weight:600">' + esc(g.clientName) + ' <span style="color:#888;font-size:12px">(' + esc(g.clientId) + ')</span></div>' +
+              '<div style="font-size:12px;color:#888;margin-top:4px">' +
+                badge + ' · preset ' + esc(g.preset) + ' · ' + esc(expiry) + ' · ' + g.totalCalls + ' calls · last ' + esc(lastCall) +
+              '</div>' +
+              (g.note ? '<div style="font-size:12px;color:#aaa;margin-top:4px;font-style:italic">' + esc(g.note) + '</div>' : '') +
+            '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  async function loadAgentAudit() {
+    const r = await fetch('/api/agents/audit?limit=200');
+    const body = await r.json();
+    const rows = body.rows || [];
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    const tbody = document.getElementById('agents-audit-body');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:30px;color:#888">No calls logged yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.slice().reverse().map(r => {
+      const d = new Date(r.ts);
+      const when = d.toLocaleString('en-US', { timeZone: 'America/New_York' });
+      const ok = r.ok ? '<span style="color:#10b981">ok</span>' : '<span style="color:#ef4444">blocked: ' + esc(r.blockedReason || '?') + '</span>';
+      return '<tr>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + esc(when) + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + esc(r.clientName || r.clientId) + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222"><code>' + esc(r.tool) + '</code></td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + ok + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222;text-align:right">' + esc(r.durMs) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  window.approveGrant = async function(clientId, preset) {
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify({ preset })
+    });
+    if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  window.denyGrant = async function(clientId) {
+    if (!confirm('Deny this agent? It will be unable to call any tools.')) return;
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/deny', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: '{}'
+    });
+    if (!r.ok) { alert('Deny failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  window.revokeGrant = async function(clientId) {
+    if (!confirm('Revoke this agent\u2019s access? Currently running tool calls finish; the next one will be denied.')) return;
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
+    });
+    if (!r.ok) { alert('Revoke failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  // SSE subscription — live-update the Agents tab and the nav badge.
+  function subscribeAgentEvents() {
+    if (agentEventSource) return;
+    try {
+      agentEventSource = new EventSource('/api/notifications');
+      agentEventSource.onerror = () => { /* swallow — browser auto-reconnects */ };
+      const refresh = () => { updatePendingBadge(); if (document.getElementById('agents').classList.contains('active')) refreshAgents(); };
+      for (const kind of ['grant-created','grant-approved','grant-denied','grant-revoked','grant-expired']) {
+        agentEventSource.addEventListener(kind, refresh);
+      }
+    } catch (e) { /* SSE unavailable — poll-on-tab-show still works */ }
+  }
+  subscribeAgentEvents();
+  updatePendingBadge();
 
   // ── Header status ─────────────────────────────────────────────────────────
   function updateHeaderStatus(ok) {
@@ -2928,6 +3342,133 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
 })();
 </script>
+
+<!-- ══ APPROVE-WITH-CONDITIONS MODAL (Agents tab) ═════════════════════════ -->
+<div id="grant-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100">
+  <div id="grant-modal" style="max-width:520px;margin:8vh auto;background:#1b1b1e;border-radius:12px;padding:22px;color:#eee;font-family:system-ui,sans-serif">
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px">Approve with conditions</div>
+    <div style="font-size:12px;color:#888;margin-bottom:16px" id="gm-subtitle"></div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Preset</label>
+      <select id="gm-preset" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px">
+        <option value="read_only">read_only</option>
+        <option value="send_only">send_only</option>
+        <option value="supervised" selected>supervised</option>
+        <option value="full">full</option>
+      </select>
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Duration</label>
+      <div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">
+        <label><input type="radio" name="gm-dur" value="never"> never expires</label>
+        <label><input type="radio" name="gm-dur" value="1h" checked> 1 hour</label>
+        <label><input type="radio" name="gm-dur" value="24h"> 24 hours</label>
+        <label><input type="radio" name="gm-dur" value="7d"> 7 days</label>
+        <label><input type="radio" name="gm-dur" value="custom"> custom…</label>
+      </div>
+      <input type="datetime-local" id="gm-custom-expiry" style="display:none;margin-top:6px;padding:6px;background:#222;color:#eee;border:1px solid #444;border-radius:6px">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Folder allowlist (optional, comma-separated)</label>
+      <input type="text" id="gm-folders" placeholder="INBOX, Sent" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">IP pin (optional)</label>
+      <input type="text" id="gm-ip" placeholder="e.g. 10.0.0.23" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Advanced</label>
+      <div style="margin-top:4px;display:flex;flex-direction:column;gap:4px">
+        <label><input type="checkbox" id="gm-deny-delete"> Disable deletion tools (delete_email / bulk_delete*)</label>
+        <label><input type="checkbox" id="gm-deny-send"> Disable sending (send_email / reply_to_email / forward_email)</label>
+      </div>
+    </div>
+    <div class="field" style="margin-bottom:16px">
+      <label style="font-size:12px;color:#aaa">Note (optional)</label>
+      <input type="text" id="gm-note" maxlength="240" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost" onclick="closeGrantModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitGrantModal()">Save and approve</button>
+    </div>
+  </div>
+</div>
+<script>
+(function() {
+  let currentClientId = null;
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t && t.name === 'gm-dur') {
+      document.getElementById('gm-custom-expiry').style.display = (t.value === 'custom') ? '' : 'none';
+    }
+  });
+  window.openGrantModal = function(clientId, clientName, currentConditions) {
+    currentClientId = clientId;
+    document.getElementById('gm-subtitle').textContent = clientName + ' (' + clientId + ')';
+    document.getElementById('gm-preset').value = 'supervised';
+    document.getElementById('gm-folders').value = '';
+    document.getElementById('gm-ip').value = '';
+    document.getElementById('gm-note').value = '';
+    document.getElementById('gm-deny-delete').checked = false;
+    document.getElementById('gm-deny-send').checked = false;
+    (document.querySelector('input[name="gm-dur"][value="1h"]') || {}).checked = true;
+    if (currentConditions && currentConditions.folderAllowlist) {
+      document.getElementById('gm-folders').value = (currentConditions.folderAllowlist || []).join(', ');
+    }
+    if (currentConditions && currentConditions.ipPins) {
+      document.getElementById('gm-ip').value = (currentConditions.ipPins || []).join(', ');
+    }
+    document.getElementById('grant-modal-backdrop').style.display = 'block';
+  };
+  window.closeGrantModal = function() {
+    document.getElementById('grant-modal-backdrop').style.display = 'none';
+    currentClientId = null;
+  };
+  window.submitGrantModal = async function() {
+    if (!currentClientId) return;
+    const preset = document.getElementById('gm-preset').value;
+    const dur = (document.querySelector('input[name="gm-dur"]:checked') || {}).value || 'never';
+    let expiresAt;
+    if (dur === '1h')   expiresAt = new Date(Date.now() + 60*60*1000).toISOString();
+    else if (dur === '24h') expiresAt = new Date(Date.now() + 24*60*60*1000).toISOString();
+    else if (dur === '7d')  expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+    else if (dur === 'custom') {
+      const v = document.getElementById('gm-custom-expiry').value;
+      if (v) expiresAt = new Date(v).toISOString();
+    }
+    const foldersRaw = document.getElementById('gm-folders').value.trim();
+    const folderAllowlist = foldersRaw ? foldersRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const ipRaw = document.getElementById('gm-ip').value.trim();
+    const ipPins = ipRaw ? ipRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const toolOverrides = {};
+    if (document.getElementById('gm-deny-delete').checked) {
+      toolOverrides.delete_email = false;
+      toolOverrides.bulk_delete = false;
+      toolOverrides.bulk_delete_emails = false;
+    }
+    if (document.getElementById('gm-deny-send').checked) {
+      toolOverrides.send_email = false;
+      toolOverrides.reply_to_email = false;
+      toolOverrides.forward_email = false;
+    }
+    const note = document.getElementById('gm-note').value.trim() || undefined;
+    const body = {
+      preset,
+      conditions: (expiresAt || folderAllowlist || ipPins) ? { expiresAt, folderAllowlist, ipPins } : undefined,
+      toolOverrides: Object.keys(toolOverrides).length > 0 ? toolOverrides : undefined,
+      note,
+    };
+    const r = await fetch('/api/agents/' + encodeURIComponent(currentClientId) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CSRF || '' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
+    closeGrantModal();
+    if (typeof refreshAgents === 'function') refreshAgents();
+  };
+})();
+</script>
 </body>
 </html>`;
 }
@@ -3564,6 +4105,207 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         } catch (e: unknown) {
           json(res, 500, { error: e instanceof Error ? e.message : String(e) });
         }
+        return;
+      }
+
+      // ══ AGENT NOTIFICATIONS — SSE stream for the Agents tab ═══════════════
+      if (method === "GET" && path === "/api/notifications") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no"); // disable proxy buffering
+        res.write(`: connected\n\n`);
+        const unsub = agentNotifications.subscribe((ev) => {
+          try {
+            res.write(`event: ${ev.kind}\n`);
+            res.write(`id: ${ev.seq}\n`);
+            res.write(`data: ${JSON.stringify(ev.grant)}\n\n`);
+          } catch { /* client disconnected mid-write */ }
+        });
+        // Keep-alive comments every 25 s so proxies don't tear the stream down.
+        const heartbeat = setInterval(() => {
+          try { res.write(`: heartbeat\n\n`); } catch { /* ignore */ }
+        }, 25_000);
+        req.on("close", () => {
+          clearInterval(heartbeat);
+          unsub();
+          try { res.end(); } catch { /* ignore */ }
+        });
+        return; // don't fall through to response cleanup
+      }
+
+      // ══ AGENT GRANTS (REST API — consumed by the Agents tab UI) ═══════════
+      if (path === "/api/agents" || path.startsWith("/api/agents/")) {
+        const grants = getAgentGrantStore();
+        const audit = getAgentAuditLog();
+        if (!grants || !audit) {
+          json(res, 503, { error: "Agent services not initialized." });
+          return;
+        }
+
+        // GET /api/agents?status=... — list all (or filter by status)
+        if (method === "GET" && path === "/api/agents") {
+          const statusFilter = url.searchParams.get("status") as
+            | "pending" | "active" | "revoked" | "expired" | null;
+          const list = statusFilter
+            ? grants.list({ status: statusFilter })
+            : grants.list();
+          json(res, 200, { grants: list });
+          return;
+        }
+
+        // GET /api/agents/audit?limit=200 — recent audit rows
+        if (method === "GET" && path === "/api/agents/audit") {
+          const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") ?? "200", 10)), 1000);
+          json(res, 200, { rows: audit.readTail(limit) });
+          return;
+        }
+
+        // POST /api/agents/:id/approve — body: { preset, toolOverrides?, conditions?, note? }
+        const approveMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/approve$/.exec(path);
+        if (method === "POST" && approveMatch) {
+          if (!requireCsrf(req, res)) return;
+          const clientId = approveMatch[1];
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
+          catch { json(res, 400, { error: "Request body must be valid JSON." }); return; }
+
+          const presets = new Set(["full", "read_only", "supervised", "send_only", "custom"]);
+          const preset = String(body.preset ?? "read_only");
+          if (!presets.has(preset)) {
+            json(res, 400, { error: `Invalid preset '${preset}'. Must be one of: ${[...presets].join(", ")}.` });
+            return;
+          }
+          const grant = grants.approve({
+            clientId,
+            preset: preset as "full" | "read_only" | "supervised" | "send_only" | "custom",
+            toolOverrides: body.toolOverrides as Record<string, boolean> | undefined,
+            conditions: body.conditions as Record<string, unknown> | undefined,
+            note: typeof body.note === "string" ? body.note : undefined,
+          });
+          if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
+          json(res, 200, { grant });
+          return;
+        }
+
+        // POST /api/agents/:id/deny
+        const denyMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/deny$/.exec(path);
+        if (method === "POST" && denyMatch) {
+          if (!requireCsrf(req, res)) return;
+          const clientId = denyMatch[1];
+          let body: Record<string, unknown> = {};
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; } catch { /* allow empty body */ }
+          const grant = grants.deny(clientId, typeof body.note === "string" ? body.note : undefined);
+          if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
+          json(res, 200, { grant });
+          return;
+        }
+
+        // POST /api/agents/:id/revoke
+        const revokeMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/revoke$/.exec(path);
+        if (method === "POST" && revokeMatch) {
+          if (!requireCsrf(req, res)) return;
+          const clientId = revokeMatch[1];
+          const grant = grants.revoke(clientId);
+          if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
+          json(res, 200, { grant });
+          return;
+        }
+
+        json(res, 404, { error: "Unknown agent endpoint." });
+        return;
+      }
+
+      // ══ ACCOUNTS (A4 — CRUD + active-account switch) ══════════════════════
+      if (path === "/api/accounts" || path.startsWith("/api/accounts/")) {
+        // GET /api/accounts — list (sanitized, no passwords)
+        if (method === "GET" && path === "/api/accounts") {
+          const reg = readRegistry();
+          const sanitized = reg.accounts.map(a => ({ ...a, password: a.password ? "••••••••" : "" }));
+          json(res, 200, { accounts: sanitized, activeAccountId: reg.activeAccountId });
+          return;
+        }
+
+        // POST /api/accounts — create
+        if (method === "POST" && path === "/api/accounts") {
+          if (!requireCsrf(req, res)) return;
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
+          catch { json(res, 400, { error: "Body must be JSON." }); return; }
+          if (typeof body.name !== "string" || !body.name) { json(res, 400, { error: "name is required" }); return; }
+          if (body.providerType !== "proton-bridge" && body.providerType !== "imap") {
+            json(res, 400, { error: "providerType must be 'proton-bridge' or 'imap'" }); return;
+          }
+          const created = createAccount({
+            name: body.name,
+            providerType: body.providerType,
+            smtpHost: String(body.smtpHost ?? ""),
+            smtpPort: Number(body.smtpPort ?? 0),
+            imapHost: String(body.imapHost ?? ""),
+            imapPort: Number(body.imapPort ?? 0),
+            username: String(body.username ?? ""),
+            password: String(body.password ?? ""),
+            smtpToken: typeof body.smtpToken === "string" ? body.smtpToken : undefined,
+            bridgeCertPath: typeof body.bridgeCertPath === "string" ? body.bridgeCertPath : undefined,
+            allowInsecureBridge: typeof body.allowInsecureBridge === "boolean" ? body.allowInsecureBridge : undefined,
+            tlsMode: body.tlsMode === "ssl" || body.tlsMode === "starttls" ? body.tlsMode : undefined,
+            autoStartBridge: typeof body.autoStartBridge === "boolean" ? body.autoStartBridge : undefined,
+            bridgePath: typeof body.bridgePath === "string" ? body.bridgePath : undefined,
+          });
+          json(res, 201, { account: { ...created, password: created.password ? "••••••••" : "" } });
+          return;
+        }
+
+        // PATCH /api/accounts/:id
+        const patchMatch = /^\/api\/accounts\/([A-Za-z0-9_\-]+)$/.exec(path);
+        if (method === "PATCH" && patchMatch) {
+          if (!requireCsrf(req, res)) return;
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
+          catch { json(res, 400, { error: "Body must be JSON." }); return; }
+          // Strip placeholder passwords — only overwrite when a real value arrives.
+          if (body.password === "" || body.password === "••••••••") delete body.password;
+          const updated = updateAccount(patchMatch[1], body as Partial<AccountSpecShape>);
+          if (!updated) { json(res, 404, { error: "Account not found." }); return; }
+          json(res, 200, { account: { ...updated, password: updated.password ? "••••••••" : "" } });
+          return;
+        }
+
+        // DELETE /api/accounts/:id
+        if (method === "DELETE" && patchMatch) {
+          if (!requireCsrf(req, res)) return;
+          const ok = deleteAccount(patchMatch[1]);
+          if (!ok) { json(res, 400, { error: "Cannot delete — unknown account id or last remaining account." }); return; }
+          json(res, 200, { ok: true });
+          return;
+        }
+
+        // POST /api/accounts/:id/activate
+        const activateMatch = /^\/api\/accounts\/([A-Za-z0-9_\-]+)\/activate$/.exec(path);
+        if (method === "POST" && activateMatch) {
+          if (!requireCsrf(req, res)) return;
+          const set = setActiveAccount(activateMatch[1]);
+          if (!set) { json(res, 404, { error: "Account not found." }); return; }
+          // Hot-swap: ask the AccountManager to rebuild from the persisted
+          // registry and flip its active pointer. Emits "active-changed"
+          // which rewires the module-level imap/smtp references in index.ts.
+          const mgr = getAccountManager();
+          let restartRequired = true;
+          if (mgr) {
+            try {
+              mgr.rebuildFromRegistry();
+              await mgr.setActive(set.id);
+              restartRequired = false;
+            } catch (err) {
+              logger.warn("Hot-swap failed, falling back to restart-required", "Accounts", err);
+            }
+          }
+          json(res, 200, { account: { ...set, password: set.password ? "••••••••" : "" }, restartRequired });
+          return;
+        }
+
+        json(res, 404, { error: "Unknown account endpoint." });
         return;
       }
 
