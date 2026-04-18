@@ -128,6 +128,59 @@ export class ReminderService {
   }
 
   /**
+   * Auto-cancel reminders whose tracked Message-ID appears in the
+   * In-Reply-To / References headers of any of the given inbox messages.
+   * Returns the IDs of the reminders that were cancelled.
+   *
+   * Case-insensitive match on the angle-bracket form of the Message-ID.
+   * The caller typically passes a recent inbox slice (the autosync loop
+   * already fetches one), so this is cheap and doesn't hit IMAP itself.
+   */
+  detectRepliesAndCancel(inbox: Array<{ headers?: Record<string, string | string[]> }>): string[] {
+    const pending = this.reminders.filter(r => r.status === "pending");
+    if (pending.length === 0) return [];
+
+    // Build a lowercased set of the Message-IDs we're watching for,
+    // tolerating both <id@host> and bare id@host forms.
+    const watched = new Set<string>();
+    for (const r of pending) {
+      const mid = r.messageId.toLowerCase().trim();
+      if (!mid) continue;
+      watched.add(mid);
+      watched.add(mid.replace(/^<|>$/g, ""));
+    }
+
+    const cancelled: string[] = [];
+    for (const msg of inbox) {
+      const headers = msg.headers ?? {};
+      const candidates: string[] = [];
+      for (const key of ["in-reply-to", "In-Reply-To", "references", "References"]) {
+        const v = headers[key];
+        if (Array.isArray(v)) candidates.push(...v);
+        else if (typeof v === "string") candidates.push(v);
+      }
+      for (const raw of candidates) {
+        const tokens = raw.toLowerCase().match(/<[^<>\s]+>/g) ?? [raw.toLowerCase().trim()];
+        for (const t of tokens) {
+          const bare = t.replace(/^<|>$/g, "");
+          if (watched.has(t) || watched.has(bare)) {
+            for (const r of pending) {
+              if (r.status !== "pending") continue;
+              const m = r.messageId.toLowerCase();
+              if (m === t || m === bare || m.replace(/^<|>$/g, "") === bare) {
+                r.status = "cancelled";
+                cancelled.push(r.id);
+              }
+            }
+          }
+        }
+      }
+    }
+    if (cancelled.length > 0) this.persist();
+    return cancelled;
+  }
+
+  /**
    * Advance each due pending reminder to "fired" and return them. Caller is
    * responsible for surfacing the list to the user (MCP log, tool response,
    * etc.) — this method does not push anywhere.

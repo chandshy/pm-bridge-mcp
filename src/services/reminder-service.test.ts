@@ -124,4 +124,71 @@ describe("ReminderService", () => {
     const svc2 = new ReminderService(path);
     expect(svc2.listAll()).toEqual([]);
   });
+
+  describe("detectRepliesAndCancel", () => {
+    it("cancels a reminder when an inbox message's In-Reply-To matches its Message-ID", () => {
+      const svc = new ReminderService(path);
+      const r = svc.add({
+        messageId: "<outbound-42@pm-bridge>",
+        recipient: "alice@x",
+        subject: "Proposal",
+        sentAt: new Date(),
+        afterDays: 3,
+      });
+      const cancelled = svc.detectRepliesAndCancel([
+        { headers: { "in-reply-to": "<outbound-42@pm-bridge>" } },
+      ]);
+      expect(cancelled).toEqual([r.id]);
+      expect(svc.listPending()).toHaveLength(0);
+    });
+
+    it("matches against References header and multi-valued tokens", () => {
+      const svc = new ReminderService(path);
+      svc.add({
+        messageId: "<chain-1@pm-bridge>",
+        recipient: "bob@x", subject: "chain", sentAt: new Date(), afterDays: 1,
+      });
+      const cancelled = svc.detectRepliesAndCancel([
+        { headers: { "References": "<other@x> <chain-1@pm-bridge> <another@x>" } },
+      ]);
+      expect(cancelled).toHaveLength(1);
+    });
+
+    it("is case-insensitive and tolerates bracket-less Message-IDs", () => {
+      const svc = new ReminderService(path);
+      svc.add({
+        messageId: "bare-id@pm",
+        recipient: "z@x", subject: "bare", sentAt: new Date(), afterDays: 1,
+      });
+      const cancelled = svc.detectRepliesAndCancel([
+        { headers: { "in-reply-to": "<Bare-ID@PM>" } },
+      ]);
+      expect(cancelled).toHaveLength(1);
+    });
+
+    it("does nothing when no message references a tracked Message-ID", () => {
+      const svc = new ReminderService(path);
+      svc.add({
+        messageId: "<watched@pm>",
+        recipient: "z@x", subject: "s", sentAt: new Date(), afterDays: 1,
+      });
+      const cancelled = svc.detectRepliesAndCancel([
+        { headers: { "in-reply-to": "<unrelated@pm>" } },
+      ]);
+      expect(cancelled).toEqual([]);
+      expect(svc.listPending()).toHaveLength(1);
+    });
+
+    it("ignores messages with no reply-headers", () => {
+      const svc = new ReminderService(path);
+      svc.add({ messageId: "<x@pm>", recipient: "z@x", subject: "s", sentAt: new Date(), afterDays: 1 });
+      expect(svc.detectRepliesAndCancel([{}])).toEqual([]);
+      expect(svc.listPending()).toHaveLength(1);
+    });
+
+    it("is a no-op when there are no pending reminders", () => {
+      const svc = new ReminderService(path);
+      expect(svc.detectRepliesAndCancel([{ headers: { "in-reply-to": "<anything@x>" } }])).toEqual([]);
+    });
+  });
 });

@@ -5142,6 +5142,33 @@ async function main() {
             const sent  = await imapService.getEmails('Sent',  50);
             analyticsService.updateEmails(trimForAnalytics(inbox), trimForAnalytics(sent));
             logger.debug(`Background sync: ${inbox.length} inbox, ${sent.length} sent`, 'Scheduler');
+
+            // FTS incremental upsert — ride the same sync to keep the local
+            // search index fresh without a manual fts_rebuild call. Cheap:
+            // upsert is idempotent on id and we cap body size at 200 KB.
+            // Silently no-ops if better-sqlite3 isn't installed.
+            try {
+              const fts = getFts();
+              fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
+            } catch (err: unknown) {
+              if (!(err instanceof FtsUnavailableError)) {
+                logger.debug('FTS incremental upsert failed', 'Scheduler', err);
+              }
+            }
+
+            // Auto reply-detection — scan inbox for messages whose
+            // In-Reply-To points at a Message-ID we are waiting on, and
+            // cancel those reminders. Also drops reminders past their
+            // deadline with no match (the user can still see them via
+            // list_pending_reminders).
+            try {
+              const cancelled = reminderService.detectRepliesAndCancel(inbox);
+              if (cancelled.length > 0) {
+                logger.info(`Auto-cancelled ${cancelled.length} reminder(s) after replies arrived`, 'Scheduler');
+              }
+            } catch (err: unknown) {
+              logger.debug('Reminder reply-detection failed', 'Scheduler', err);
+            }
           }
         } catch (e: unknown) {
           logger.debug('Background sync failed', 'Scheduler', e);
