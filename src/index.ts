@@ -5106,19 +5106,20 @@ async function main() {
         logger.warn("SMTP connection failed — sending features limited", "MCPServer", e);
         logger.info("Use your Proton Bridge password (not your Proton Mail account password)", "MCPServer");
       }),
-      imapService.connect(
-        config.imap.host,
-        config.imap.port,
-        config.imap.username,
-        config.imap.password,
-        config.imap.bridgeCertPath,
-        config.imap.secure,
-        config.imap.allowInsecureBridge ?? false
-      ).then(() => {
-        logger.info("IMAP connection established", "MCPServer");
-      }).catch((e: unknown) => {
-        logger.warn("IMAP connection failed — reading features limited", "MCPServer", e);
-        logger.info("Ensure Proton Bridge is running on localhost:1143", "MCPServer");
+      // Connect IMAP for EVERY configured account so IDLE runs against each
+      // mailbox, not just the active one. Per-account failures are logged
+      // but do not fail the boot — a single broken account shouldn't stop
+      // the others from coming online.
+      accountManager.connectAll().then((results) => {
+        const ok = results.filter(r => r.ok).length;
+        const failed = results.length - ok;
+        logger.info(
+          `IMAP connections established: ${ok}/${results.length} account(s)${failed > 0 ? ` — ${failed} failed` : ""}`,
+          "MCPServer",
+        );
+        if (failed > 0) {
+          logger.info("Ensure Proton Bridge is running and each account's credentials are correct", "MCPServer");
+        }
       }),
     ]);
 
@@ -5141,6 +5142,33 @@ async function main() {
             const sent  = await imapService.getEmails('Sent',  50);
             analyticsService.updateEmails(trimForAnalytics(inbox), trimForAnalytics(sent));
             logger.debug(`Background sync: ${inbox.length} inbox, ${sent.length} sent`, 'Scheduler');
+
+            // FTS incremental upsert — ride the same sync to keep the local
+            // search index fresh without a manual fts_rebuild call. Cheap:
+            // upsert is idempotent on id and we cap body size at 200 KB.
+            // Silently no-ops if better-sqlite3 isn't installed.
+            try {
+              const fts = getFts();
+              fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
+            } catch (err: unknown) {
+              if (!(err instanceof FtsUnavailableError)) {
+                logger.debug('FTS incremental upsert failed', 'Scheduler', err);
+              }
+            }
+
+            // Auto reply-detection — scan inbox for messages whose
+            // In-Reply-To points at a Message-ID we are waiting on, and
+            // cancel those reminders. Also drops reminders past their
+            // deadline with no match (the user can still see them via
+            // list_pending_reminders).
+            try {
+              const cancelled = reminderService.detectRepliesAndCancel(inbox);
+              if (cancelled.length > 0) {
+                logger.info(`Auto-cancelled ${cancelled.length} reminder(s) after replies arrived`, 'Scheduler');
+              }
+            } catch (err: unknown) {
+              logger.debug('Reminder reply-detection failed', 'Scheduler', err);
+            }
           }
         } catch (e: unknown) {
           logger.debug('Background sync failed', 'Scheduler', e);
