@@ -12,7 +12,7 @@
  *           start fresh. Keep KEEP_GENERATIONS compressed generations.
  */
 
-import { appendFileSync, existsSync, statSync, renameSync, writeFileSync, readFileSync } from "fs";
+import { appendFileSync, existsSync, statSync, renameSync, writeFileSync, readFileSync, unlinkSync } from "fs";
 import { createHash } from "crypto";
 import { gzipSync } from "zlib";
 import type { AuditRow } from "./types.js";
@@ -73,7 +73,7 @@ export class AgentAuditLog {
     for (let i = KEEP_GENERATIONS + 1; i < KEEP_GENERATIONS + 5; i++) {
       const p = `${this.path}.${i}.gz`;
       if (existsSync(p)) {
-        try { require("fs").unlinkSync(p); } catch { /* ignore */ }
+        try { unlinkSync(p); } catch { /* ignore */ }
       }
     }
   }
