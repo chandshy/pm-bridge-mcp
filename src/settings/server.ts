@@ -264,6 +264,14 @@ header {
 .btn-shutdown:hover:not(:disabled) { background: var(--danger); color: #fff; }
 .btn-shutdown:disabled { opacity: .5; cursor: not-allowed; }
 
+.btn-agent-ref {
+  padding: 5px 13px; border-radius: 20px; border: 1px solid var(--primary);
+  background: var(--primary-bg); color: var(--primary);
+  font-size: 12px; font-weight: 500; cursor: pointer; transition: all .15s;
+  white-space: nowrap; text-decoration: none;
+}
+.btn-agent-ref:hover { background: var(--primary); color: #fff; }
+
 /* Settings tab nav (post-setup view) */
 nav {
   background: rgba(26,24,48,.85);
@@ -856,6 +864,13 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     <div class="dot" id="config-dot"></div>
     <span id="config-status-text">Loading…</span>
   </div>
+  <a href="/agent-setup"
+     target="_blank"
+     rel="noopener"
+     class="btn-agent-ref"
+     title="Integration reference for AI agents — share this URL with your agent so it has a copy-paste-ready guide to connect">
+    For your Agent ↗
+  </a>
   <button class="btn-shutdown" id="shutdown-btn" onclick="shutdownServer()" title="Stop the settings server">⏹ Shutdown</button>
 </header>
 
@@ -3490,6 +3505,140 @@ export interface ServerSecurityOptions {
   scheme:      "http" | "https";
 }
 
+// ── /agent-setup — integration reference for AI clients ─────────────────
+// Rendered both as HTML (browser-readable) and JSON (machine-readable at
+// /agent-setup.json or via Accept: application/json). The content is a
+// minimal, copy-paste-ready summary: what this server is, how to launch
+// it, and the exact client-config JSON an agent needs.
+
+function buildAgentSetupJson() {
+  return {
+    product: "mailpouch",
+    version: "2.2.0",
+    summary:
+      "An MCP server that exposes a user's Proton Mail inbox (via Proton Bridge) to AI agents as typed, permission-gated, audit-logged tools.",
+    protocol: {
+      name: "Model Context Protocol",
+      transports: ["stdio", "http"],
+      docs: "https://modelcontextprotocol.io",
+    },
+    binary: {
+      command: "mailpouch",
+      installNote:
+        "Install the npm package with `npm install -g mailpouch` (or a GitHub install) so the `mailpouch` command is on PATH.",
+    },
+    clientConfig: {
+      claudeDesktop: {
+        mcpServers: {
+          mailpouch: { command: "mailpouch" },
+        },
+      },
+      generic: {
+        transport: "stdio",
+        command: "mailpouch",
+        args: [] as string[],
+      },
+    },
+    capabilities: {
+      toolCount: ALL_TOOLS.length,
+      categories: Object.keys(TOOL_CATEGORIES),
+      tiers: ["core", "extended", "complete"],
+      defaultTier: "complete",
+      destructiveConfirmation:
+        "Destructive tools (delete_email, bulk_delete, move_to_trash, move_to_spam, alias_delete, pass_get) require an MCP elicitation round-trip OR an explicit { confirmed: true } argument on the call.",
+    },
+    firstCallAdvice:
+      "Before invoking tools, call tools/list to discover the currently-exposed surface — the operator may have restricted the server to the `core` or `extended` tier. If a tool you expected to see is missing, ask the user to raise the tier or grant you an override via the settings UI.",
+    humanControls: {
+      settingsUi: "http://localhost:8766",
+      description:
+        "The operator uses this UI to approve your agent, set conditions (expiry, folder allowlist, IP pins, per-tool rate limits, account scope), and revoke access. Your audit trail is visible to them.",
+    },
+  };
+}
+
+function buildAgentSetupHtml(): string {
+  const data = buildAgentSetupJson();
+  const jsonPretty = JSON.stringify(data, null, 2);
+  const claudeSnippet = JSON.stringify(data.clientConfig.claudeDesktop, null, 2);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<meta name="audience" content="ai-agent,llm,mcp-client">
+<title>mailpouch — Agent Integration Reference</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #0f0e1a; color: #e8e6f8; padding: 32px 24px; max-width: 820px; margin: 0 auto;
+}
+h1 { font-size: 20px; color: #c4c0e0; margin-bottom: 6px; font-family: system-ui, sans-serif; }
+h2 { font-size: 14px; color: #6d4aff; margin: 24px 0 8px; font-family: system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; }
+p  { color: #c4c0e0; margin-bottom: 12px; font-family: system-ui, sans-serif; font-size: 14px; }
+.lede { color: #e8e6f8; font-size: 15px; margin-bottom: 4px; }
+pre {
+  background: #1a1830; border: 1px solid #302e50; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; font-size: 13px; color: #e8e6f8;
+}
+a { color: #6d4aff; }
+.pill {
+  display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: #22203a; border: 1px solid #403d68; color: #c4c0e0; font-family: system-ui, sans-serif;
+}
+footer { color: #7c78a8; margin-top: 32px; font-size: 12px; font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+
+<h1>mailpouch — Agent Integration Reference</h1>
+<p class="lede">A concise, machine-readable integration brief. Humans share this URL with their agent so it has a single-page, copy-paste-ready reference for connecting.</p>
+<p><span class="pill">For AI agents</span> <span class="pill">noindex</span> <span class="pill">HTML + JSON</span></p>
+
+<h2>What this is</h2>
+<p>${data.summary}</p>
+<p>Protocol: ${data.protocol.name} — <a href="${data.protocol.docs}">${data.protocol.docs}</a>. Transports supported: <code>${data.protocol.transports.join(", ")}</code>.</p>
+
+<h2>How to connect (Claude Desktop)</h2>
+<p>Add this block to your Claude Desktop <code>mcpServers</code> config. The <code>mailpouch</code> binary must be on PATH (install with <code>${data.binary.installNote.replace(/`/g, "")}</code>).</p>
+<pre>${escapeHtml(claudeSnippet)}</pre>
+
+<h2>First call</h2>
+<p>${data.firstCallAdvice}</p>
+
+<h2>Destructive operations</h2>
+<p>${data.capabilities.destructiveConfirmation}</p>
+
+<h2>Capabilities</h2>
+<pre>toolCount: ${data.capabilities.toolCount}
+categories: ${data.capabilities.categories.join(", ")}
+tiers: ${data.capabilities.tiers.join(" &lt; ")} (default: ${data.capabilities.defaultTier})</pre>
+
+<h2>Operator control surface</h2>
+<p>The human running this server sees you in their <a href="${data.humanControls.settingsUi}">settings UI</a>. ${data.humanControls.description}</p>
+
+<h2>Full machine-readable payload</h2>
+<p>This same data is available as JSON at <a href="/agent-setup.json"><code>/agent-setup.json</code></a> (or send <code>Accept: application/json</code> to this URL).</p>
+<pre>${escapeHtml(jsonPretty)}</pre>
+
+<footer>
+mailpouch v${data.version} · served from the local settings server · not internet-indexed
+</footer>
+
+</body>
+</html>`;
+}
+
+function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export function createSettingsServer(secOpts: ServerSecurityOptions): http.Server {
   const { port, lan, accessToken, scheme } = secOpts;
   const configPath = getConfigPath();
@@ -3588,6 +3737,35 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           "Cache-Control":            "no-store, no-cache, must-revalidate",
         });
         res.end(html);
+        return;
+      }
+
+      // ── GET /agent-setup ──────────────────────────────────────────────────
+      // Structured integration reference intended for AI agents. Humans can
+      // share this URL with their agent as a single-page, copy-paste-ready
+      // "how to connect to this MCP" brief. Also served as JSON at
+      // /agent-setup.json for programmatic consumers.
+      if (method === "GET" && (path === "/agent-setup" || path === "/agent-setup.json")) {
+        const wantsJson = path === "/agent-setup.json"
+          || String(req.headers["accept"] ?? "").includes("application/json");
+        if (wantsJson) {
+          res.writeHead(200, {
+            "Content-Type":           "application/json; charset=utf-8",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control":          "no-store, no-cache",
+          });
+          res.end(JSON.stringify(buildAgentSetupJson(), null, 2));
+        } else {
+          res.writeHead(200, {
+            "Content-Type":             "text/html; charset=utf-8",
+            "Content-Security-Policy":  "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+            "X-Content-Type-Options":   "nosniff",
+            "X-Frame-Options":          "DENY",
+            "Referrer-Policy":          "no-referrer",
+            "Cache-Control":            "no-store, no-cache, must-revalidate",
+          });
+          res.end(buildAgentSetupHtml());
+        }
         return;
       }
 
