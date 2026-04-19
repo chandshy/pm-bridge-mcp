@@ -223,6 +223,31 @@ export function loadConfig(): ServerConfig | null {
       mergedConnection.allowInsecureBridge = true;
     }
 
+    // Preserve settingsPort when it's a sane port number — without this, the
+    // field round-trips to disk via saveConfig but is stripped on the way
+    // back out, so GET /api/config returns no settingsPort → the UI defaults
+    // the field to 8765 → the port-mismatch warning banner fires on every
+    // reload even though the user already saved the correct value.
+    //
+    // Validation mirrors the POST /api/config merge path
+    // (settings/server.ts): Math.round + range check [1, 65535]. Keeping
+    // the two paths symmetric means a hand-edited `8765.5` on disk is
+    // accepted with the same semantics a browser-sent 8765.5 would be,
+    // rather than being silently dropped here and accepted on the next save.
+    const parsedSettingsPort = parsed.settingsPort;
+    let preservedSettingsPort: number | undefined = undefined;
+    if (typeof parsedSettingsPort === "number" && Number.isFinite(parsedSettingsPort)) {
+      const sp = Math.round(parsedSettingsPort);
+      if (sp >= 1 && sp <= 65535) preservedSettingsPort = sp;
+    }
+    // credentialStorage drives the settings UI's "where are my secrets
+    // kept?" badge — preserve it across load/save round-trips too; it was
+    // dropped by the same bug that hit settingsPort.
+    const preservedCredentialStorage =
+      parsed.credentialStorage === "keychain" || parsed.credentialStorage === "config"
+        ? parsed.credentialStorage
+        : undefined;
+
     const result: ServerConfig = {
       configVersion: CONFIG_VERSION,
       connection: mergedConnection,
@@ -238,6 +263,8 @@ export function loadConfig(): ServerConfig | null {
       // set the field.
       requireDestructiveConfirm: parsed.requireDestructiveConfirm !== false,
       tosAcknowledged: parsed.tosAcknowledged,
+      settingsPort: preservedSettingsPort,
+      credentialStorage: preservedCredentialStorage,
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : undefined,
       activeAccountId: typeof parsed.activeAccountId === "string" ? parsed.activeAccountId : undefined,
       desktopNotificationsEnabled: typeof parsed.desktopNotificationsEnabled === "boolean"

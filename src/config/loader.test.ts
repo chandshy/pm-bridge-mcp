@@ -421,6 +421,66 @@ describe("loadConfig", () => {
     const cfg = loadConfig();
     expect(cfg!.tosAcknowledged).toEqual({ accepted: true, timestamp: "2026-04-17T00:00:00Z" });
   });
+
+  it("preserves settingsPort across load so the UI doesn't revert to 8765", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const cfgjson = JSON.stringify({
+      configVersion: 2,
+      connection: {},
+      permissions: { preset: "full", tools: {} },
+      settingsPort: 8766,
+    });
+    mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.settingsPort).toBe(8766);
+  });
+
+  it("drops invalid settingsPort (string / out-of-range / null / NaN)", () => {
+    mockedExistsSync.mockReturnValue(true);
+    for (const badValue of ["8766", 0, 65536, null, Number.NaN]) {
+      const cfgjson = JSON.stringify({
+        configVersion: 2,
+        connection: {},
+        permissions: { preset: "full", tools: {} },
+        settingsPort: badValue,
+      });
+      mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+      const cfg = loadConfig();
+      expect(cfg!.settingsPort).toBeUndefined();
+    }
+  });
+
+  it("rounds non-integer settingsPort (matches POST /api/config behavior)", () => {
+    mockedExistsSync.mockReturnValue(true);
+    // 8766.5 → Math.round → 8767; 8765.4 → 8765. Symmetric with the write path.
+    const cases: [number, number][] = [[8766.5, 8767], [8765.4, 8765], [3.9, 4]];
+    for (const [input, expected] of cases) {
+      const cfgjson = JSON.stringify({
+        configVersion: 2,
+        connection: {},
+        permissions: { preset: "full", tools: {} },
+        settingsPort: input,
+      });
+      mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+      const cfg = loadConfig();
+      expect(cfg!.settingsPort).toBe(expected);
+    }
+  });
+
+  it("preserves credentialStorage across load so the UI badge stays accurate", () => {
+    mockedExistsSync.mockReturnValue(true);
+    for (const value of ["keychain", "config"] as const) {
+      const cfgjson = JSON.stringify({
+        configVersion: 2,
+        connection: {},
+        permissions: { preset: "full", tools: {} },
+        credentialStorage: value,
+      });
+      mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+      const cfg = loadConfig();
+      expect(cfg!.credentialStorage).toBe(value);
+    }
+  });
 });
 
 // ─── saveConfig ────────────────────────────────────────────────────────────────
