@@ -4186,7 +4186,17 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         }
         try {
           if (bridgeExe) {
-            spawn(bridgeExe, [], { stdio: "ignore", detached: true, shell: false }).unref();
+            // Async 'error' would crash the server without a listener, even
+            // after .unref() — existsSync above doesn't guarantee spawn.
+            const bridgeProc = spawn(bridgeExe, [], {
+              stdio: "ignore", detached: true, shell: false,
+            });
+            bridgeProc.on("error", (err) => {
+              // Best-effort log; the tcp poll below will surface the failure
+              // to the caller as `reachable: false`.
+              void err;
+            });
+            bridgeProc.unref();
           }
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -4738,6 +4748,43 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         try {
           const platform = process.platform;
 
+          // Detect Claude Desktop install BEFORE killing anything. There is no
+          // official Linux build, and on macOS/Windows it may just not be
+          // installed — better to bail cleanly than leave the user with a
+          // killed instance and no relaunch path.
+          let claudeLaunchCmd: string | null = null;
+          let claudeLaunchArgs: string[] = [];
+          if (platform === "darwin") {
+            const macApp = "/Applications/Claude.app";
+            if (existsSync(macApp)) {
+              claudeLaunchCmd = "open";
+              claudeLaunchArgs = ["-a", "Claude"];
+            }
+          } else if (platform === "win32") {
+            const winCandidates = [
+              nodePath.join(process.env.LOCALAPPDATA ?? "", "AnthropicClaude", "Claude.exe"),
+              nodePath.join(process.env.LOCALAPPDATA ?? "", "Programs", "Claude", "Claude.exe"),
+              nodePath.join(process.env.PROGRAMFILES ?? "", "Claude", "Claude.exe"),
+            ];
+            const found = winCandidates.find((p) => p && existsSync(p));
+            if (found) {
+              claudeLaunchCmd = "cmd";
+              claudeLaunchArgs = ["/c", "start", "", found];
+            }
+          }
+          // Linux (and any platform where detection failed) falls through with
+          // claudeLaunchCmd === null.
+
+          if (!claudeLaunchCmd) {
+            json(res, 200, {
+              ok: false,
+              error: platform === "linux"
+                ? "Claude Desktop is not distributed for Linux. Restart it manually from wherever you launched it."
+                : "Claude Desktop was not found at the standard install locations. Launch it manually.",
+            });
+            return;
+          }
+
           // Kill Claude Desktop (ignore errors — may not be running)
           await new Promise<void>((resolve) => {
             let killCmd: string;
@@ -4745,12 +4792,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             if (platform === "win32") {
               killCmd = "taskkill";
               killArgs = ["/IM", "Claude.exe", "/F"];
-            } else if (platform === "darwin") {
+            } else {
               killCmd = "killall";
               killArgs = ["Claude"];
-            } else {
-              killCmd = "pkill";
-              killArgs = ["-f", "Claude"];
             }
             const killProc = spawn(killCmd, killArgs, { stdio: "ignore" });
             killProc.on("close", () => resolve());
@@ -4760,14 +4804,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           // Wait ~500ms before relaunching
           await new Promise<void>((resolve) => setTimeout(resolve, 500));
 
-          // Relaunch Claude Desktop (fire-and-forget)
-          if (platform === "win32") {
-            spawn("cmd", ["/c", "start", "Claude"], { stdio: "ignore", detached: true }).unref();
-          } else if (platform === "darwin") {
-            spawn("open", ["-a", "Claude"], { stdio: "ignore", detached: true }).unref();
-          } else {
-            spawn("Claude", [], { stdio: "ignore", detached: true }).unref();
-          }
+          // Relaunch Claude Desktop (fire-and-forget). Attach an async error
+          // handler: without it, an ENOENT becomes an unhandled 'error' event
+          // and crashes the settings server — we still reply 200 here because
+          // we pre-verified the binary exists.
+          const launchProc = spawn(claudeLaunchCmd, claudeLaunchArgs, {
+            stdio: "ignore", detached: true,
+          });
+          launchProc.on("error", () => { /* already verified presence; swallow */ });
+          launchProc.unref();
 
           json(res, 200, { ok: true });
         } catch (e: unknown) {
