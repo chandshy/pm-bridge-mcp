@@ -535,7 +535,7 @@ npm run settings       # start standalone settings UI (after build)
 
 ```
 src/
-  index.ts                    # Unified daemon: MCP server (67 tools, resources, prompts) + settings + tray
+  index.ts                    # Unified daemon: MCP server (69 tools, resources, prompts) + settings + tray
   settings-main.ts            # Standalone settings UI CLI (for headless/SSH environments)
   tray.ts                     # System tray icon (systray2)
   config/
