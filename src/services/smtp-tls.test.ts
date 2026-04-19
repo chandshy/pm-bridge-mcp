@@ -98,7 +98,7 @@ describe("SMTPService TLS strict mode (no allowInsecureBridge)", () => {
     cfg.smtp.bridgeCertPath = "/good/cert.pem";
     svc.reinitialize();
     expect(svc.initError).toBeNull();
-    expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(false);
+    expect(svc.insecureTls).toBe(false);
   });
 
   it("pre-config constructor (no username yet) does not throw even without cert", () => {
@@ -113,7 +113,7 @@ describe("SMTPService TLS strict mode (no allowInsecureBridge)", () => {
     (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(Buffer.from("CERT"));
 
     const svc = new SMTPService(baseConfig({ bridgeCertPath: "/ok/cert.pem" }));
-    expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(false);
+    expect(svc.insecureTls).toBe(false);
   });
 
   it("resolves cert.pem inside a directory when bridgeCertPath points to a folder", async () => {
@@ -122,7 +122,7 @@ describe("SMTPService TLS strict mode (no allowInsecureBridge)", () => {
     (fs.readFileSync as ReturnType<typeof vi.fn>).mockReturnValue(Buffer.from("CERT"));
 
     const svc = new SMTPService(baseConfig({ bridgeCertPath: "/bridge/data" }));
-    expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(false);
+    expect(svc.insecureTls).toBe(false);
     expect((fs.readFileSync as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
       expect.stringContaining("cert.pem")
     );
@@ -131,14 +131,14 @@ describe("SMTPService TLS strict mode (no allowInsecureBridge)", () => {
   it("uses full TLS validation (no cert wrangling) for non-localhost SMTP hosts", () => {
     const svc = new SMTPService(baseConfig({ host: "smtp.protonmail.ch", port: 587, smtpToken: "tok" }));
     // Non-localhost never enters the bridge-cert branch; insecureTls must stay false.
-    expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(false);
+    expect(svc.insecureTls).toBe(false);
   });
 });
 
 describe("SMTPService TLS insecure opt-in", () => {
   it("runs in insecure mode when allowInsecureBridge is set in config", () => {
     const svc = new SMTPService(baseConfig({ allowInsecureBridge: true }));
-    expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(true);
+    expect(svc.insecureTls).toBe(true);
   });
 
   it("runs in insecure mode when MAILPOUCH_INSECURE_BRIDGE=1 is set in env", () => {
@@ -146,7 +146,7 @@ describe("SMTPService TLS insecure opt-in", () => {
     process.env.MAILPOUCH_INSECURE_BRIDGE = "1";
     try {
       const svc = new SMTPService(baseConfig());
-      expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(true);
+      expect(svc.insecureTls).toBe(true);
     } finally {
       if (prev !== undefined) process.env.MAILPOUCH_INSECURE_BRIDGE = prev;
       else delete process.env.MAILPOUCH_INSECURE_BRIDGE;
@@ -161,6 +161,6 @@ describe("SMTPService TLS insecure opt-in", () => {
     });
 
     const svc = new SMTPService(baseConfig({ bridgeCertPath: "/bad/cert.pem", allowInsecureBridge: true }));
-    expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(true);
+    expect(svc.insecureTls).toBe(true);
   });
 });

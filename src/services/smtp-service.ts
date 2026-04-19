@@ -68,6 +68,15 @@ export class SMTPService {
 
   private initializeTransporter(): void {
     logger.debug("Initializing SMTP transporter", "SMTPService");
+    // Close any existing transporter before replacing it — reinitialize()
+    // runs on every config update (AccountManager.rebuildFromRegistry, the
+    // settings UI save path, etc.) and nodemailer holds a connection pool
+    // internally. Skipping close() here would leak sockets + file
+    // descriptors on every save. Best-effort: swallow close errors so a
+    // dead transporter can't block re-init.
+    if (this.transporter) {
+      try { this.transporter.close(); } catch { /* already dead — ignore */ }
+    }
     // Reset degraded state so reinitialize() after the user fixes config
     // clears any prior deferred failure.
     this.initError = null;
@@ -111,6 +120,10 @@ export class SMTPService {
           };
           logger.info(`SMTP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, "SMTPService");
         } catch (err: unknown) {
+          // Robust message extraction: if a non-Error is thrown (string,
+          // object, etc.), (err as Error).message yields undefined and the
+          // diagnostic reads "Underlying error: undefined".
+          const errMsg = err instanceof Error ? err.message : String(err);
           if (!allowInsecure) {
             // Deferred failure: stash an actionable message, log a loud
             // warning, return without building a transporter. sendEmail()
@@ -119,7 +132,7 @@ export class SMTPService {
               `SMTP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
               `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
               `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
-              `Underlying error: ${(err as Error).message}`;
+              `Underlying error: ${errMsg}`;
             logger.warn(
               `SMTP init deferred: ${this.initError} ` +
               "Send attempts will fail with this message until the user fixes the config and reinitialize() runs.",
