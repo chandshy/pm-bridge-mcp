@@ -45,6 +45,7 @@ export const defs: ToolDef[] = [
                 remainingMs: { type: "number", description: "Milliseconds remaining on the current backoff window" },
               },
             },
+            initError: { type: "string", description: "Deferred SMTP initialization error (e.g. unreadable bridgeCertPath). When present, sends will fail with this message until config is fixed and reinitialize() runs." },
             error: { type: "string", description: "Last SMTP error message, if any" },
           },
         },
@@ -149,6 +150,7 @@ export const handlers: Record<string, ToolHandler> = {
           failureCount: smtpService.backoff.failureCount,
           remainingMs: smtpBackoffMs,
         },
+        ...(smtpService.initError ? { initError: smtpService.initError } : {}),
         ...(state.smtpStatus.error ? { error: state.smtpStatus.error } : {}),
       },
       imap: {
@@ -167,7 +169,10 @@ export const handlers: Record<string, ToolHandler> = {
     const backoffWarning = smtpService.backoff.isBlocked()
       ? `\n\u26a0 SMTP is in abuse-signal backoff (${smtpService.backoff.failureCount} consecutive throttle responses, ${smtpBackoffMs} ms remaining). Wait or have the user trigger a manual retry.`
       : "";
-    return ok(status, JSON.stringify(status) + insecureTlsWarning + backoffWarning);
+    const initErrorWarning = smtpService.initError
+      ? `\n\u26a0 SMTP is not ready: ${smtpService.initError}`
+      : "";
+    return ok(status, JSON.stringify(status) + insecureTlsWarning + backoffWarning + initErrorWarning);
   },
 
   sync_emails: async (ctx) => {

@@ -43,6 +43,17 @@ export class SMTPService {
   /** True when TLS certificate validation is disabled (no Bridge cert configured). */
   insecureTls = false;
   /**
+   * Actionable initialization error, or null on successful init. Populated
+   * when the configured Bridge cert path cannot be loaded AND the user has
+   * not opted into insecure mode. Construction itself NEVER throws — a
+   * synchronous throw here would kill the MCP server at module load (stdio
+   * servers have no chance to report structured errors to the client
+   * before the transport comes up), so we defer the failure to the first
+   * sendEmail() / verifyConnection() call where the error can propagate
+   * back through the MCP response. reinitialize() clears this.
+   */
+  initError: string | null = null;
+  /**
    * Tracks consecutive abuse-signal failures (SMTP 421/450/454 etc.) and
    * holds back sends during the exponential-backoff window. Surfaced via
    * getBackoffState() so get_connection_status can report throttling to
@@ -57,6 +68,20 @@ export class SMTPService {
 
   private initializeTransporter(): void {
     logger.debug("Initializing SMTP transporter", "SMTPService");
+    // Close any existing transporter before replacing it — reinitialize()
+    // runs on every config update (AccountManager.rebuildFromRegistry, the
+    // settings UI save path, etc.) and nodemailer holds a connection pool
+    // internally. Skipping close() here would leak sockets + file
+    // descriptors on every save. Best-effort: swallow close errors so a
+    // dead transporter can't block re-init.
+    if (this.transporter) {
+      try { this.transporter.close(); } catch { /* already dead — ignore */ }
+    }
+    // Reset degraded state so reinitialize() after the user fixes config
+    // clears any prior deferred failure.
+    this.initError = null;
+    this.transporter = null;
+    this.insecureTls = false;
 
     // Check if using localhost (Proton Bridge)
     const isLocalhost =
@@ -95,13 +120,25 @@ export class SMTPService {
           };
           logger.info(`SMTP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, "SMTPService");
         } catch (err: unknown) {
+          // Robust message extraction: if a non-Error is thrown (string,
+          // object, etc.), (err as Error).message yields undefined and the
+          // diagnostic reads "Underlying error: undefined".
+          const errMsg = err instanceof Error ? err.message : String(err);
           if (!allowInsecure) {
-            throw new Error(
+            // Deferred failure: stash an actionable message, log a loud
+            // warning, return without building a transporter. sendEmail()
+            // surfaces this to the caller; the MCP server stays up.
+            this.initError =
               `SMTP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
               `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
               `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
-              `Underlying error: ${(err as Error).message}`
+              `Underlying error: ${errMsg}`;
+            logger.warn(
+              `SMTP init deferred: ${this.initError} ` +
+              "Send attempts will fail with this message until the user fixes the config and reinitialize() runs.",
+              "SMTPService",
             );
+            return;
           }
           logger.warn(
             `SMTP: Failed to load Bridge cert at "${resolvedCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set). ` +
@@ -115,11 +152,17 @@ export class SMTPService {
       } else if (this.config.smtp.username) {
         // Credentials are loaded — this is a real connection attempt.
         if (!allowInsecure) {
-          throw new Error(
+          // Deferred failure — same rationale as the cert-load branch above.
+          this.initError =
             "SMTP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate " +
             "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
-            "disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1."
+            "disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1.";
+          logger.warn(
+            `SMTP init deferred: ${this.initError} ` +
+            "Send attempts will fail with this message until the user fixes the config and reinitialize() runs.",
+            "SMTPService",
           );
+          return;
         }
         logger.warn(
           "SMTP: No Bridge certificate configured and allowInsecureBridge is set — " +
@@ -170,6 +213,11 @@ export class SMTPService {
     return tracer.span('smtp.verifyConnection', {}, async () => {
     logger.debug("Verifying SMTP connection", "SMTPService");
 
+    // Surface deferred-init errors first — more actionable than the generic
+    // "transporter not initialized".
+    if (this.initError) {
+      throw new Error(this.initError);
+    }
     if (!this.transporter) {
       throw new Error("SMTP transporter not initialized");
     }
@@ -206,6 +254,11 @@ export class SMTPService {
       subject: options.subject,
     });
 
+    // Surface deferred-init errors first (cert missing, unreadable, etc.)
+    // — far more actionable than the generic "transporter not initialized".
+    if (this.initError) {
+      throw new Error(this.initError);
+    }
     if (!this.transporter) {
       throw new Error("SMTP transporter not initialized");
     }
