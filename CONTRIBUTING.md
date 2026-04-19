@@ -102,7 +102,7 @@ feat: add email filtering by date range
 
 ```
 src/
-├── index.ts                    # Unified daemon: MCP server (51 tools, Resources, Prompts) + settings HTTP server + system tray
+├── index.ts                    # Unified daemon: MCP server (69 tools, Resources, Prompts) + settings HTTP server + system tray
 ├── settings-main.ts            # Standalone settings UI CLI entry point
 ├── tray.ts                     # System tray icon (systray2)
 ├── config/
@@ -131,8 +131,6 @@ src/
     └── tracer.ts               # Lightweight request tracing
 
 docs/
-├── agentic-mcp-design-review.md
-├── proton-bridge-gaps.md
 ├── proton-bridge-imap.md
 ├── proton-bridge-overview.md
 ├── proton-bridge-security-model.md
