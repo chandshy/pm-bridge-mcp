@@ -1837,6 +1837,31 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   // ── CSRF ──────────────────────────────────────────────────────────────────
   const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
 
+  // Auto-recover from stale CSRF tokens. The server's CSRF token is minted
+  // per-process — when the daemon restarts (e.g. after install-update or a
+  // crash), any open settings tab holds a token the new process rejects with
+  // 403 { code: "session_expired" }. Without this wrapper the user sees a
+  // raw "Missing or invalid CSRF token" alert and has no idea what to do;
+  // with it, the page silently reloads and picks up the fresh token. Guarded
+  // by __mpReloading so concurrent mutations only trigger one reload.
+  (function installCsrfAutoReload() {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async function(...args) {
+      const response = await originalFetch(...args);
+      if (response.status === 403 && !window.__mpReloading) {
+        try {
+          const clone = response.clone();
+          const body = await clone.json();
+          if (body && body.code === 'session_expired') {
+            window.__mpReloading = true;
+            try { window.location.reload(); } catch (_) { /* ignore */ }
+          }
+        } catch (_) { /* not JSON — not ours */ }
+      }
+      return response;
+    };
+  })();
+
   // ── Boot ──────────────────────────────────────────────────────────────────
   window.addEventListener('DOMContentLoaded', async () => {
     buildCategoryUI();
@@ -3838,7 +3863,16 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       provided.length === csrfToken.length &&
       timingSafeEqual(Buffer.from(provided, "utf8"), Buffer.from(csrfToken, "utf8"));
     if (valid) return true;
-    json(res, 403, { error: "Missing or invalid CSRF token. Load the settings page in a browser first." });
+    // Human-legible message. Stable `code` field drives the client-side
+    // auto-reload interceptor (see CSRF_SESSION_EXPIRED_CODE / fetch wrapper
+    // in the inline page JS) — when the server restarts, the browser's cached
+    // token goes stale and every mutation 403's; we catch that and silently
+    // reload so the user sees "page refreshed" rather than
+    // "Missing or invalid CSRF token".
+    json(res, 403, {
+      error: "Your settings session expired. Reload the page to continue.",
+      code: "session_expired",
+    });
     return false;
   }
 
