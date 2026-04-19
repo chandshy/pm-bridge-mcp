@@ -435,9 +435,9 @@ describe("loadConfig", () => {
     expect(cfg!.settingsPort).toBe(8766);
   });
 
-  it("drops invalid settingsPort (string / out-of-range / non-integer)", () => {
+  it("drops invalid settingsPort (string / out-of-range / null / NaN)", () => {
     mockedExistsSync.mockReturnValue(true);
-    for (const badValue of ["8766", 0, 65536, 3.14, null]) {
+    for (const badValue of ["8766", 0, 65536, null, Number.NaN]) {
       const cfgjson = JSON.stringify({
         configVersion: 2,
         connection: {},
@@ -447,6 +447,23 @@ describe("loadConfig", () => {
       mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
       const cfg = loadConfig();
       expect(cfg!.settingsPort).toBeUndefined();
+    }
+  });
+
+  it("rounds non-integer settingsPort (matches POST /api/config behavior)", () => {
+    mockedExistsSync.mockReturnValue(true);
+    // 8766.5 → Math.round → 8767; 8765.4 → 8765. Symmetric with the write path.
+    const cases: [number, number][] = [[8766.5, 8767], [8765.4, 8765], [3.9, 4]];
+    for (const [input, expected] of cases) {
+      const cfgjson = JSON.stringify({
+        configVersion: 2,
+        connection: {},
+        permissions: { preset: "full", tools: {} },
+        settingsPort: input,
+      });
+      mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+      const cfg = loadConfig();
+      expect(cfg!.settingsPort).toBe(expected);
     }
   });
 
