@@ -78,11 +78,18 @@ export const handlers: Record<string, ToolHandler> = {
     await killProtonBridge();
     state.bridgeAutoStarted = false;
     try {
-      spawn(process.execPath, process.argv.slice(1), {
+      // Attach an async 'error' handler before .unref() — otherwise an
+      // ENOENT / EACCES from the child can propagate as an unhandled event
+      // and take the current process down before gracefulShutdown runs.
+      const child = spawn(process.execPath, process.argv.slice(1), {
         stdio: "ignore",
         detached: true,
         env: { ...process.env, MAILPOUCH_RESPAWN: "1" },
-      }).unref();
+      });
+      child.on("error", (err) => {
+        logger.error("Replacement process emitted error after spawn", "MCPServer", err);
+      });
+      child.unref();
     } catch (spawnErr: unknown) {
       logger.error("Failed to spawn replacement process during restart", "MCPServer", spawnErr);
       throw new McpError(ErrorCode.InternalError, "Restart failed: could not spawn replacement process.");

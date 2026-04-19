@@ -1285,7 +1285,18 @@ async function launchProtonBridge(): Promise<void> {
   // User-configured path takes top priority
   if (config.bridgePath && existsSync(config.bridgePath)) {
     try {
-      spawn(config.bridgePath, [], { stdio: "ignore", detached: true, shell: false }).unref();
+      // Detach + unref lets Bridge outlive us, but an ENOENT (stale path
+      // across platforms, missing perms) arrives as an async 'error' event.
+      // Without a listener Node converts it to an unhandled throw that
+      // crashes the whole MCP server — attach a no-op handler and let the
+      // reachability poll below surface the failure naturally.
+      const bridgeProc = spawn(config.bridgePath, [], {
+        stdio: "ignore", detached: true, shell: false,
+      });
+      bridgeProc.on("error", (err) => {
+        logger.warn("Proton Bridge launch process emitted error", "MCPServer", err);
+      });
+      bridgeProc.unref();
       logger.info("Proton Bridge launch command sent — waiting up to 15 s for ports to open…", "MCPServer");
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
@@ -1365,7 +1376,13 @@ async function launchProtonBridge(): Promise<void> {
     }
   }
   try {
-    spawn(cmd, args, { stdio: "ignore", detached: true, shell: false }).unref();
+    // Same async-error concern as the user-configured path above: attach a
+    // listener before .unref() so a spawn failure can't crash the MCP server.
+    const bridgeProc = spawn(cmd, args, { stdio: "ignore", detached: true, shell: false });
+    bridgeProc.on("error", (err) => {
+      logger.warn("Proton Bridge launch process emitted error", "MCPServer", err);
+    });
+    bridgeProc.unref();
     logger.info("Proton Bridge launch command sent — waiting up to 15 s for ports to open…", "MCPServer");
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
@@ -1754,6 +1771,30 @@ async function main() {
       config.imap.bridgeCertPath = cn.bridgeCertPath || undefined;
       config.smtp.allowInsecureBridge = cn.allowInsecureBridge ?? false;
       config.imap.allowInsecureBridge = cn.allowInsecureBridge ?? false;
+
+      // Surface a clear startup warning when bridgeCertPath is configured
+      // but unreachable on disk — common after moving config across machines
+      // (e.g. a Windows path copied to a Linux install). Connection-time
+      // errors arrive buried inside tool responses; the startup warning gets
+      // the fix in front of the operator before they hit the first failure.
+      if (cn.bridgeCertPath) {
+        const cpath = cn.bridgeCertPath;
+        if (!existsSync(cpath)) {
+          const looksWindowsOnUnix = process.platform !== "win32" && /^[A-Za-z]:[\\/]/.test(cpath);
+          const looksUnixOnWindows = process.platform === "win32" && cpath.startsWith("/");
+          const platformHint = looksWindowsOnUnix
+            ? ` — the path looks Windows-style but this host is ${process.platform}.`
+            : looksUnixOnWindows
+              ? " — the path looks POSIX-style but this host is Windows."
+              : "";
+          logger.warn(
+            `bridgeCertPath '${cpath}' does not exist on disk${platformHint} ` +
+            `Open the settings UI → Bridge TLS Certificate to re-export the cert, ` +
+            `or enable 'Allow insecure Bridge' for a loopback-only install.`,
+            "MCPServer",
+          );
+        }
+      }
       config.debug              = !!cn.debug;
       config.autoStartBridge    = !!cn.autoStartBridge;
       config.bridgePath         = cn.bridgePath || undefined;

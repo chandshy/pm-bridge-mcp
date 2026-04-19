@@ -1837,6 +1837,31 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   // ── CSRF ──────────────────────────────────────────────────────────────────
   const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
 
+  // Auto-recover from stale CSRF tokens. The server's CSRF token is minted
+  // per-process — when the daemon restarts (e.g. after install-update or a
+  // crash), any open settings tab holds a token the new process rejects with
+  // 403 { code: "session_expired" }. Without this wrapper the user sees a
+  // raw "Missing or invalid CSRF token" alert and has no idea what to do;
+  // with it, the page silently reloads and picks up the fresh token. Guarded
+  // by __mpReloading so concurrent mutations only trigger one reload.
+  (function installCsrfAutoReload() {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async function(...args) {
+      const response = await originalFetch(...args);
+      if (response.status === 403 && !window.__mpReloading) {
+        try {
+          const clone = response.clone();
+          const body = await clone.json();
+          if (body && body.code === 'session_expired') {
+            window.__mpReloading = true;
+            try { window.location.reload(); } catch (_) { /* ignore */ }
+          }
+        } catch (_) { /* not JSON — not ours */ }
+      }
+      return response;
+    };
+  })();
+
   // ── Boot ──────────────────────────────────────────────────────────────────
   window.addEventListener('DOMContentLoaded', async () => {
     buildCategoryUI();
@@ -3838,7 +3863,16 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       provided.length === csrfToken.length &&
       timingSafeEqual(Buffer.from(provided, "utf8"), Buffer.from(csrfToken, "utf8"));
     if (valid) return true;
-    json(res, 403, { error: "Missing or invalid CSRF token. Load the settings page in a browser first." });
+    // Human-legible message. Stable `code` field drives the client-side
+    // auto-reload interceptor (see CSRF_SESSION_EXPIRED_CODE / fetch wrapper
+    // in the inline page JS) — when the server restarts, the browser's cached
+    // token goes stale and every mutation 403's; we catch that and silently
+    // reload so the user sees "page refreshed" rather than
+    // "Missing or invalid CSRF token".
+    json(res, 403, {
+      error: "Your settings session expired. Reload the page to continue.",
+      code: "session_expired",
+    });
     return false;
   }
 
@@ -4186,7 +4220,21 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         }
         try {
           if (bridgeExe) {
-            spawn(bridgeExe, [], { stdio: "ignore", detached: true, shell: false }).unref();
+            // Async 'error' would crash the server without a listener, even
+            // after .unref() — existsSync above doesn't guarantee spawn.
+            const bridgeProc = spawn(bridgeExe, [], {
+              stdio: "ignore", detached: true, shell: false,
+            });
+            bridgeProc.on("error", (err) => {
+              // Log at warn level so operators can diagnose launch failures
+              // from `tail ~/.mailpouch.log`. The tcp poll below will also
+              // surface this to the HTTP caller as `reachable: false`, but
+              // the specific error (ENOENT vs EACCES vs EPERM) only shows
+              // up here.
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.warn(`Failed to launch Proton Bridge (${bridgeExe}): ${msg}`, "SettingsServer");
+            });
+            bridgeProc.unref();
           }
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -4738,6 +4786,52 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         try {
           const platform = process.platform;
 
+          // Detect Claude Desktop install BEFORE killing anything. There is no
+          // official Linux build, and on macOS/Windows it may just not be
+          // installed — better to bail cleanly than leave the user with a
+          // killed instance and no relaunch path.
+          let claudeLaunchCmd: string | null = null;
+          let claudeLaunchArgs: string[] = [];
+          if (platform === "darwin") {
+            const macApp = "/Applications/Claude.app";
+            if (existsSync(macApp)) {
+              claudeLaunchCmd = "open";
+              claudeLaunchArgs = ["-a", "Claude"];
+            }
+          } else if (platform === "win32") {
+            // Only build absolute candidates — falling back to `?? ""` would
+            // produce `AnthropicClaude\Claude.exe` (relative to cwd) if the
+            // env var is unset, which existsSync could match by accident and
+            // lead to killing Claude and then failing to relaunch.
+            const winCandidates: string[] = [];
+            const localAppData = process.env.LOCALAPPDATA;
+            const programFiles = process.env.PROGRAMFILES;
+            if (localAppData) {
+              winCandidates.push(nodePath.join(localAppData, "AnthropicClaude", "Claude.exe"));
+              winCandidates.push(nodePath.join(localAppData, "Programs", "Claude", "Claude.exe"));
+            }
+            if (programFiles) {
+              winCandidates.push(nodePath.join(programFiles, "Claude", "Claude.exe"));
+            }
+            const found = winCandidates.find((p) => existsSync(p));
+            if (found) {
+              claudeLaunchCmd = "cmd";
+              claudeLaunchArgs = ["/c", "start", "", found];
+            }
+          }
+          // Linux (and any platform where detection failed) falls through with
+          // claudeLaunchCmd === null.
+
+          if (!claudeLaunchCmd) {
+            json(res, 200, {
+              ok: false,
+              error: platform === "linux"
+                ? "Claude Desktop is not distributed for Linux. Restart it manually from wherever you launched it."
+                : "Claude Desktop was not found at the standard install locations. Launch it manually.",
+            });
+            return;
+          }
+
           // Kill Claude Desktop (ignore errors — may not be running)
           await new Promise<void>((resolve) => {
             let killCmd: string;
@@ -4745,12 +4839,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             if (platform === "win32") {
               killCmd = "taskkill";
               killArgs = ["/IM", "Claude.exe", "/F"];
-            } else if (platform === "darwin") {
+            } else {
               killCmd = "killall";
               killArgs = ["Claude"];
-            } else {
-              killCmd = "pkill";
-              killArgs = ["-f", "Claude"];
             }
             const killProc = spawn(killCmd, killArgs, { stdio: "ignore" });
             killProc.on("close", () => resolve());
@@ -4760,14 +4851,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           // Wait ~500ms before relaunching
           await new Promise<void>((resolve) => setTimeout(resolve, 500));
 
-          // Relaunch Claude Desktop (fire-and-forget)
-          if (platform === "win32") {
-            spawn("cmd", ["/c", "start", "Claude"], { stdio: "ignore", detached: true }).unref();
-          } else if (platform === "darwin") {
-            spawn("open", ["-a", "Claude"], { stdio: "ignore", detached: true }).unref();
-          } else {
-            spawn("Claude", [], { stdio: "ignore", detached: true }).unref();
-          }
+          // Relaunch Claude Desktop (fire-and-forget). Attach an async error
+          // handler: without it, an ENOENT becomes an unhandled 'error' event
+          // and crashes the settings server — we still reply 200 here because
+          // we pre-verified the binary exists.
+          const launchProc = spawn(claudeLaunchCmd, claudeLaunchArgs, {
+            stdio: "ignore", detached: true,
+          });
+          launchProc.on("error", () => { /* already verified presence; swallow */ });
+          launchProc.unref();
 
           json(res, 200, { ok: true });
         } catch (e: unknown) {
