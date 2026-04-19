@@ -11,7 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MAILPOUCH_*` is read now. Callers still setting the old names must update.
 - Legacy file-path fallbacks (`~/.pm-bridge-mcp-*`, `~/.protonmail-mcp-*`)
   — the server now only reads/writes `~/.mailpouch*`. Installs that never
-  ran v2.2.0 must rename their config/scheduler/reminders files manually.
+  ran v2.2.0 must rename any `~/.pm-bridge-mcp*` / `~/.protonmail-mcp*`
+  files to the matching `~/.mailpouch*` name. This covers config,
+  scheduler store, reminders, log file, audit log, pending escalations,
+  pass audit, FTS database, and agent grants/audit files.
 - One-shot keychain migration from `protonmail-mcp-server` / `pm-bridge-mcp`
   service entries to `mailpouch`. Users on those legacy entries must
   re-enter their Bridge password via the settings UI.
@@ -171,7 +174,7 @@ SimpleLogin and Proton Pass. The product is renamed from
 - **Coverage thresholds** — Vitest enforces statements ≥ 95%, branches ≥ 95%, functions ≥ 94%, lines ≥ 96%
 - New test patterns: async-generator UID scan mocks, per-test `simpleParser` overrides, module-level `fs`/`os`/`imapflow`/`mailparser` mocks in isolated files
 
-## [Unreleased] — Autonomous Improvement Cycles #1–#48 (2026-03-18)
+## Autonomous Improvement Cycles #1–#48 (2026-03-18)
 
 ### Security
 

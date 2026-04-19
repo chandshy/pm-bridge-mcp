@@ -170,8 +170,7 @@ const analyticsService = new AnalyticsService();
 function _homeFile(envName: string, basename: string): string {
   const envPath = process.env[envName];
   if (envPath) return envPath;
-  const home = process.env.HOME || process.env.USERPROFILE || ".";
-  return `${home}/${basename}`;
+  return nodePath.join(homedir(), basename);
 }
 
 const SCHEDULER_STORE = _homeFile("MAILPOUCH_SCHEDULER_STORE", ".mailpouch-scheduled.json");
