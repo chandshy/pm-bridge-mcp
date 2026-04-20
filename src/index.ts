@@ -17,13 +17,10 @@ const _pkgVersion = (() => {
   } catch { return "unknown"; }
 })();
 import { homedir } from "os";
-import { createRequire as _createRequire } from "module";
 import { createConnection } from "net";
 import { spawn } from "child_process";
 import { startSettingsServer } from "./settings/server.js";
 import { openBrowser } from "./settings/tui.js";
-import type SysTrayClass from "systray2";
-import type { MenuItem, SysTrayMenu } from "systray2";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -1513,8 +1510,8 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
 // rounded-square gradient envelope (64×64 base, multi-resolution ICO on
 // Windows). Lazy-computed at module load so tests that import index.ts for
 // non-tray reasons don't pay the raster cost when they never touch it.
-import { makeTrayIconBase64 } from "./utils/icon.js";
-const TRAY_ICON_B64 = makeTrayIconBase64();
+import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
+import { createTray, preflightTrayBinary, trayPreconditionSkip, inheritDisplayFromParent, type TrayHandle, type TrayItem } from "./utils/tray.js";
 
 // ─── Daemon: Settings Server + Tray State ────────────────────────────────────
 
@@ -1529,8 +1526,8 @@ let _settingsUrl:     string  = "";
  * just detaches our own references.
  */
 let _settingsExternal: boolean = false;
-let _trayInstance:    InstanceType<typeof SysTrayClass> | null = null;
-const _trayRequire = _createRequire(import.meta.url);
+let _trayInstance:    TrayHandle | null = null;
+let _trayTooltip:     string = "mailpouch";
 
 /**
  * Probe whether a mailpouch settings UI is already serving on `port`.
@@ -1667,8 +1664,7 @@ async function _stopSettingsServerDaemon(): Promise<void> {
   }
 }
 
-function _buildTrayMenu(): SysTrayMenu {
-  const sep: MenuItem = { title: "<SEPARATOR>", tooltip: "", enabled: true, checked: false };
+function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
   const statusLabel   = sharedState.smtpStatus.connected ? "\u25CF Connected" : "\u25CB Disconnected";
   const emailLabel    = config.smtp.username || "Not configured";
   const pendingCount  = agentGrants.list({ status: "pending" }).length;
@@ -1676,100 +1672,96 @@ function _buildTrayMenu(): SysTrayMenu {
   const tooltip = pendingCount > 0
     ? `mailpouch · ${pendingCount} agent(s) awaiting approval`
     : "mailpouch";
-  const items: MenuItem[] = [
-    { title: "mailpouch", tooltip: "mailpouch daemon", enabled: false, checked: false },
-    sep,
-    { title: statusLabel, tooltip: "", enabled: false, checked: false },
-    { title: emailLabel,  tooltip: "", enabled: false, checked: false },
+  const items: TrayItem[] = [
+    { id: "header",  label: "mailpouch", enabled: false },
+    { id: "sep1",    label: "",          separator: true },
+    { id: "status",  label: statusLabel, enabled: false },
+    { id: "account", label: emailLabel,  enabled: false },
     ...(pendingCount > 0
-      ? [{ title: `\u26A0 ${pendingCount} agent(s) pending`, tooltip: "Open Settings → Agents to approve", enabled: false, checked: false }]
+      ? [{ id: "pending", label: `\u26A0 ${pendingCount} agent(s) pending`, enabled: false }]
       : []),
     ...(activeCount > 0
-      ? [{ title: `\u25CF ${activeCount} agent(s) active`, tooltip: "", enabled: false, checked: false }]
+      ? [{ id: "active",  label: `\u25CF ${activeCount} agent(s) active`,   enabled: false }]
       : []),
-    sep,
+    { id: "sep2",    label: "", separator: true },
     ...(_settingsEnabled && _settingsUrl
-      ? [{ title: "Open Settings", tooltip: `Open ${_settingsUrl}`, enabled: true, checked: false }]
+      ? [{ id: "open", label: "Open Settings" }]
       : []),
-    sep,
+    { id: "sep3",    label: "", separator: true },
     {
-      title:   _settingsEnabled ? "Disable Settings UI" : "Enable Settings UI",
-      tooltip: _settingsEnabled ? "Stop the settings HTTP server" : "Start the settings HTTP server",
-      enabled: true,
-      checked: false,
+      id:    _settingsEnabled ? "disable" : "enable",
+      label: _settingsEnabled ? "Disable Settings UI" : "Enable Settings UI",
     },
-    sep,
-    { title: "Quit", tooltip: "Stop the MCP daemon", enabled: true, checked: false },
+    { id: "sep4",    label: "", separator: true },
+    { id: "quit",    label: "Quit" },
   ];
-  return { icon: TRAY_ICON_B64, title: "", tooltip, items };
+  return { items, tooltip };
 }
 
-async function _rebuildTray(): Promise<void> {
+function _rebuildTray(): void {
   if (!_trayInstance) return;
   try {
-    await _trayInstance.sendAction({ type: "update-menu", menu: _buildTrayMenu() });
+    const { items, tooltip } = _buildTrayItems();
+    _trayInstance.setMenu(items);
+    if (tooltip !== _trayTooltip) {
+      _trayInstance.setTooltip(tooltip);
+      _trayTooltip = tooltip;
+    }
   } catch (err: unknown) {
     logger.debug("Tray menu update failed", "MCPServer", err);
   }
 }
 
 async function _initTray(): Promise<void> {
-  // Preflight + precondition checks live in src/utils/tray.ts so the
-  // standalone settings daemon (src/settings-main.ts) shares the exact
-  // same boot hygiene — the systray2 chmod bug and headless/arm64 skip
-  // logic are properties of the platform, not of any specific entry point.
-  const { preflightTrayBinary, trayPreconditionSkip } = await import("./utils/tray.js");
+  // Claude Desktop / VS Code strip DISPLAY from stdio-spawned children
+  // even on graphical hosts — copy it from the parent's environ before
+  // the precondition check so GTK can connect.
+  inheritDisplayFromParent();
+
   const skipReason = trayPreconditionSkip();
   if (skipReason) {
     logger.debug(`Tray: ${skipReason}`, "MCPServer");
     return;
   }
-  // Fix the mode-0644 shipping bug before systray2's native spawn.
+  // Fix the mode-0644 shipping bug before the systray2 fallback's spawn.
   preflightTrayBinary();
 
-  type SysTrayConstructor = typeof SysTrayClass;
-  let ST: SysTrayConstructor | undefined;
   try {
-    ST = (_trayRequire("systray2") as { default: SysTrayConstructor }).default;
-  } catch {
-    logger.debug("systray2 not installed — tray icon disabled", "MCPServer");
-    return;
-  }
-
-  try {
-    const tray = new ST({ menu: _buildTrayMenu(), debug: false, copyDir: true });
-
-    // Wait for the native tray binary to signal ready
-    await tray.ready();
+    const { items, tooltip } = _buildTrayItems();
+    _trayTooltip = tooltip;
+    const tray = createTray({
+      iconPng: makeIconPng(64),
+      iconLegacyOverride: process.platform === "win32" ? makeTrayIconBytes("win32") : undefined,
+      tooltip,
+      items,
+      onClick: (id) => {
+        switch (id) {
+          case "open":
+            openBrowser(_settingsUrl);
+            break;
+          case "disable":
+            _stopSettingsServerDaemon()
+              .then(() => _rebuildTray())
+              .catch((err: unknown) => logger.warn("Settings disable failed", "MCPServer", err));
+            break;
+          case "enable":
+            _startSettingsServerDaemon()
+              .then(() => _rebuildTray())
+              .catch((err: unknown) => logger.warn("Settings enable failed", "MCPServer", err));
+            break;
+          case "quit":
+            gracefulShutdown("tray-quit").catch(() => process.exit(1));
+            break;
+        }
+      },
+    });
     _trayInstance = tray;
-    logger.info("System tray icon active", "MCPServer");
+    logger.info(`System tray icon active (${tray.backend} backend)`, "MCPServer");
 
     // Keep the tray menu in sync with grant changes (new pending → badge,
-    // approved/revoked → count update). Handler is fire-and-forget; if
-    // rebuild fails we swallow to avoid crashing the daemon.
+    // approved/revoked → count update).
     agentNotifications.subscribe(() => {
-      void _rebuildTray().catch(() => { /* swallow */ });
-    });
-
-    await tray.onClick((action: { item: MenuItem }) => {
-      switch (action.item.title) {
-        case "Open Settings":
-          openBrowser(_settingsUrl);
-          break;
-        case "Disable Settings UI":
-          _stopSettingsServerDaemon()
-            .then(() => _rebuildTray())
-            .catch((err: unknown) => logger.warn("Settings disable failed", "MCPServer", err));
-          break;
-        case "Enable Settings UI":
-          _startSettingsServerDaemon()
-            .then(() => _rebuildTray())
-            .catch((err: unknown) => logger.warn("Settings enable failed", "MCPServer", err));
-          break;
-        case "Quit":
-          gracefulShutdown("tray-quit").catch(() => process.exit(1));
-          break;
-      }
+      try { _rebuildTray(); } catch { /* swallow */ }
     });
   } catch (err: unknown) {
     logger.warn("Tray icon failed to start", "MCPServer", err);
@@ -2084,7 +2076,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // 0. Stop settings server + tray
     await _stopSettingsServerDaemon();
     if (_trayInstance) {
-      try { _trayInstance.kill(false); } catch { /* ignore */ }
+      try { _trayInstance.destroy(); } catch { /* ignore */ }
       _trayInstance = null;
     }
 

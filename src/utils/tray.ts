@@ -20,7 +20,7 @@
  * helpers are still exported for direct callers that want to gate
  * tray init themselves.
  */
-import { existsSync, chmodSync } from "fs";
+import { existsSync, chmodSync, readFileSync } from "fs";
 import { homedir } from "os";
 import nodePath from "path";
 import { createRequire } from "module";
@@ -184,6 +184,54 @@ export function preflightTrayBinary(platform: NodeJS.Platform = process.platform
     } catch { /* non-fatal */ }
   }
   return resolvedSource;
+}
+
+/**
+ * MCPs are commonly spawned by GUI clients (Claude Desktop, VS Code)
+ * that strip `DISPLAY` / `WAYLAND_DISPLAY` from the child env, even
+ * when the user running the client is on a graphical session. Without
+ * those variables GTK can't connect to the display server and the
+ * tray precondition check bails.
+ *
+ * This reads the parent's `/proc/<ppid>/environ` on Linux and copies
+ * any missing display-related vars into `process.env` so downstream
+ * tray initialization can see them. No-op on non-Linux platforms and
+ * when the current process already has them.
+ *
+ * Mutates `process.env` on purpose — GTK reads the vars via getenv()
+ * at window-creation time, not via a copy we control. Returns true
+ * if anything was inherited.
+ */
+export function inheritDisplayFromParent(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== "linux") return false;
+  if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) return false;
+  const ppid = process.ppid;
+  if (!ppid || ppid === 1) return false;
+  try {
+    const raw = readFileSync(`/proc/${ppid}/environ`, "utf8");
+    const pairs = raw.split("\0");
+    let inherited = false;
+    for (const line of pairs) {
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq);
+      const val = line.slice(eq + 1);
+      if (
+        (key === "DISPLAY" || key === "WAYLAND_DISPLAY" ||
+         key === "XDG_RUNTIME_DIR" || key === "XAUTHORITY" ||
+         key === "XDG_SESSION_TYPE" || key === "DBUS_SESSION_BUS_ADDRESS") &&
+        !process.env[key]
+      ) {
+        process.env[key] = val;
+        inherited = true;
+      }
+    }
+    return inherited;
+  } catch {
+    return false;
+  }
 }
 
 /**

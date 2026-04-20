@@ -3626,10 +3626,17 @@ export interface ServerSecurityOptions {
 // minimal, copy-paste-ready summary: what this server is, how to launch
 // it, and the exact client-config JSON an agent needs.
 
+const _agentSetupPkgVersion = (() => {
+  try {
+    const dir = nodePath.dirname(fileURLToPath(import.meta.url));
+    return (JSON.parse(readFileSync(nodePath.resolve(dir, "../../package.json"), "utf-8")) as { version: string }).version;
+  } catch { return "unknown"; }
+})();
+
 function buildAgentSetupJson() {
   return {
     product: "mailpouch",
-    version: "2.2.0",
+    version: _agentSetupPkgVersion,
     summary:
       "An MCP server that exposes a user's Proton Mail inbox (via Proton Bridge) to AI agents as typed, permission-gated, audit-logged tools.",
     protocol: {

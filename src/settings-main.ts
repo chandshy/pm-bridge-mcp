@@ -33,7 +33,7 @@ import {
 } from "./settings/tui.js";
 import { startSettingsServer } from "./settings/server.js";
 import { loadConfig } from "./config/loader.js";
-import { createTray, trayPreconditionSkip, type TrayHandle } from "./utils/tray.js";
+import { createTray, trayPreconditionSkip, inheritDisplayFromParent, type TrayHandle } from "./utils/tray.js";
 import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
 
 // ─── Parse CLI flags ──────────────────────────────────────────────────────────
@@ -141,6 +141,10 @@ function startServer(p: number): void {
 let _activeTray: TrayHandle | null = null;
 function _startTrayIcon(url: string): void {
   if (noTray) return;
+  // GUI MCP clients (Claude Desktop, VS Code) strip DISPLAY from
+  // stdio-spawned children; copy it from the parent's environ on Linux
+  // before the precondition check so GTK can connect.
+  inheritDisplayFromParent();
   const skip = trayPreconditionSkip();
   if (skip) {
     process.stderr.write(`Tray skipped: ${skip}\n`);
