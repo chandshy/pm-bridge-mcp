@@ -284,11 +284,14 @@ export class AnalyticsService {
   private calculateVolumeTrends(days: number): EmailAnalytics['volumeTrends'] {
     const trends = new Map<string, { received: number; sent: number }>();
 
+    // Use pure UTC arithmetic so DST transitions don't cause two local days
+    // to collapse onto the same ISO date string, which would produce fewer
+    // than `days` buckets.
     const now = new Date();
+    const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const msPerDay = 86_400_000;
     for (let i = 0; i < days; i++) {
-      const date = new Date(now);
-      date.setDate(date.getDate() - i);
-      const dateStr = date.toISOString().split('T')[0];
+      const dateStr = new Date(todayUtc - i * msPerDay).toISOString().split('T')[0];
       trends.set(dateStr, { received: 0, sent: 0 });
     }
 
