@@ -95,7 +95,10 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "package.json"
+    "package.json",
+    "native/tray/index.js",
+    "native/tray/index.d.ts",
+    "native/tray/*.node"
   ],
   "overrides": {
     "fast-xml-parser": ">=5.5.6",

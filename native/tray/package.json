@@ -1,0 +1,36 @@
+{
+  "name": "@mailpouch/tray-native",
+  "version": "0.1.0",
+  "description": "Native cross-platform system tray for mailpouch — wraps tauri-apps/tray-icon via napi-rs.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "napi": {
+    "binaryName": "mailpouch-tray",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm",
+    "version": "napi version"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  }
+}

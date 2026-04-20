@@ -24,8 +24,6 @@
  */
 
 import { createRequire } from "module";
-import type SysTrayClass from "systray2";
-import type { MenuItem } from "systray2";
 import {
   detectEnvironment,
   openBrowser,
@@ -35,10 +33,8 @@ import {
 } from "./settings/tui.js";
 import { startSettingsServer } from "./settings/server.js";
 import { loadConfig } from "./config/loader.js";
-import { preflightTrayBinary, trayPreconditionSkip } from "./utils/tray.js";
-import { makeTrayIconBase64 } from "./utils/icon.js";
-
-const _require = createRequire(import.meta.url);
+import { createTray, trayPreconditionSkip, type TrayHandle } from "./utils/tray.js";
+import { makeIconPng } from "./utils/icon.js";
 
 // ─── Parse CLI flags ──────────────────────────────────────────────────────────
 
@@ -138,64 +134,44 @@ function startServer(p: number): void {
 //   Open Settings            — re-opens the browser at the live URL
 //   Quit                     — stops the HTTP server and exits cleanly
 //
-// Skips silently on headless/arm64 hosts (same skip logic the MCP's tray
-// uses); the HTTP server still runs so browser access keeps working.
-async function _startTrayIcon(url: string): Promise<void> {
+// Backend selection (native tray-icon vs systray2 fallback) lives in
+// utils/tray.ts; we just call createTray() and let it pick. Skips
+// silently on headless/arm64 hosts; the HTTP server still runs so
+// browser access keeps working from a different machine on the LAN.
+let _activeTray: TrayHandle | null = null;
+function _startTrayIcon(url: string): void {
   if (noTray) return;
   const skip = trayPreconditionSkip();
   if (skip) {
     process.stderr.write(`Tray skipped: ${skip}\n`);
     return;
   }
-  preflightTrayBinary();
-
-  let SysTray: typeof SysTrayClass | undefined;
-  try {
-    SysTray = (_require("systray2") as { default: typeof SysTrayClass }).default;
-  } catch {
-    // systray2 not installed — that's fine, the HTTP server carries on.
-    return;
-  }
-  const ST = SysTray;
-  const sep: MenuItem = ST.separator;
-  const mkItem = (title: string, tooltip = "", enabled = true): MenuItem => (
-    { title, tooltip, checked: false, enabled }
-  );
 
   try {
-    const tray = new ST({
-      menu: {
-        icon:    makeTrayIconBase64(),
-        title:   "",
-        tooltip: "mailpouch — Proton Mail via Bridge",
-        items: [
-          mkItem("mailpouch", "Proton Mail via Proton Bridge", false),
-          sep,
-          mkItem("Open Settings", `Open ${url} in your browser`),
-          sep,
-          mkItem("Quit", "Stop the settings server and exit"),
-        ],
+    _activeTray = createTray({
+      iconPng: makeIconPng(64),
+      tooltip: "mailpouch — Proton Mail via Bridge",
+      items: [
+        { id: "header",   label: "mailpouch", enabled: false },
+        { id: "sep1",     label: "",          separator: true },
+        { id: "open",     label: "Open Settings" },
+        { id: "sep2",     label: "",          separator: true },
+        { id: "quit",     label: "Quit" },
+      ],
+      onClick: (id) => {
+        switch (id) {
+          case "open":
+            openBrowser(url);
+            break;
+          case "quit":
+            try { _activeTray?.destroy(); } catch { /* already gone */ }
+            // Let the tray teardown flush, then exit cleanly.
+            setTimeout(() => process.exit(0), 150);
+            break;
+        }
       },
-      debug:   false,
-      copyDir: true,
     });
-    await tray.ready();
-    await tray.onClick((action: { item: MenuItem }) => {
-      switch (action.item.title) {
-        case "Open Settings":
-          openBrowser(url);
-          break;
-        case "Quit":
-          tray.kill(false);
-          // Let the tray teardown flush, then exit cleanly. node process exits
-          // immediately because nothing else is keeping the event loop alive
-          // after the HTTP server is closed — but the server close is async
-          // and we don't have a handle here, so a short timeout gives both
-          // paths a chance to drain before forcing.
-          setTimeout(() => process.exit(0), 150);
-          break;
-      }
-    });
+    process.stdout.write(`  Tray icon active (${_activeTray.backend} backend).\n`);
   } catch (err: unknown) {
     process.stderr.write(`Tray icon failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
   }

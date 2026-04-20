@@ -1,0 +1,57 @@
+[package]
+name        = "mailpouch-tray"
+version     = "0.1.0"
+edition     = "2021"
+description = "Native tray-icon binding for mailpouch — wraps tauri-apps/tray-icon via napi-rs"
+license     = "MIT"
+publish     = false  # this Cargo crate is consumed only via the napi-rs build pipeline
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# napi-rs — N-API bindings + derive macro for ergonomic JS exports.
+# Pin minor versions; both crates rev together and a major bump usually
+# means a JS-side API shift we want to opt into intentionally.
+napi        = { version = "2", default-features = false, features = ["napi6", "tokio_rt"] }
+napi-derive = "2"
+
+# tauri-apps/tray-icon — the actual cross-platform tray implementation.
+# Same crate Tauri itself uses in production, so GNOME / Cocoa / Win32
+# all have battle-tested code paths. We intentionally don't pull in the
+# rest of Tauri (no webview, no menu builder UI, no IPC) — just the
+# tray-icon crate plus its menu helpers.
+tray-icon = "0.20"
+muda      = "0.16"  # menu primitives, same upstream family as tray-icon
+
+# image — decode the PNG bytes the JS layer hands us into the RGBA buffer
+# tray-icon's Icon::from_rgba expects. Stripping transitive PNG deps is
+# fine; we only ever decode small icons (<256 KB).
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# crossbeam-channel — lock-free MPSC for ferrying commands from JS to
+# the tray thread. Could use std::sync::mpsc, but crossbeam's try_recv
+# semantics are more predictable across platforms and the Send markers
+# play nicer with the napi-rs ThreadsafeFunction below.
+crossbeam-channel = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tray-icon needs a GTK main loop running for events to dispatch on
+# Linux. gtk crate's `init()` initializes GLib/GTK from any thread we
+# decide to host the loop on. Bring the matching glib version so we
+# have access to MainContext::default().iteration() from the loop.
+gtk  = "0.18"
+glib = "0.18"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# Smaller .node files keep the npm install footprint reasonable. Strip
+# debug symbols, optimize for size — a tray icon library doesn't need
+# the last 5 % of perf at the cost of 50 % size growth.
+lto         = true
+codegen-units = 1
+strip       = true
+opt-level   = "z"
+panic       = "abort"
