@@ -5,7 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 3.0.0
+## [3.0.1] — 2026-04-20
+
+### Fixed
+- **Tray icon now appears when launched by GUI MCP clients** (#95). Claude
+  Desktop and VS Code strip `DISPLAY` / `WAYLAND_DISPLAY` when spawning
+  stdio subprocesses; the tray precondition check bailed with "no display
+  environment" even on graphical hosts. Added `inheritDisplayFromParent()`
+  which reads `/proc/<ppid>/environ` on Linux and copies the display vars
+  into `process.env` before tray init. Also migrated the MCP's `_initTray()`
+  from direct `systray2` usage to the shared `createTray()` facade so it
+  picks the native tauri `tray-icon` backend on GNOME instead of the
+  broken systray2 path (same facade the standalone `mailpouch-settings`
+  daemon already used).
+- Stale hardcoded `"2.2.0"` version literal in the `/agent-setup` JSON
+  output — now derived from `package.json` like the MCP `serverInfo.version`,
+  so agents always see the actual running version.
+
+## [3.0.0] — 2026-04-20
 
 ### Security
 - **Per-account Bridge passwords now route through the OS keychain on every
