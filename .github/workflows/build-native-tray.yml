@@ -1,0 +1,150 @@
+name: Build native tray prebuilts
+
+# Build the @mailpouch/tray-native .node prebuilts for every platform
+# we support. Triggers manually (workflow_dispatch) and on every push
+# that touches native/tray/ — typical workflow:
+#
+#   1. Edit something under native/tray/.
+#   2. Push to a branch.
+#   3. CI builds all 6 prebuilts in parallel, uploads them as
+#      workflow artifacts.
+#   4. Download the artifacts, drop them into native/tray/, commit
+#      the new .node files, open a PR.
+#
+# The Linux x64 prebuilt is committed alongside source so a fresh
+# `git clone` works for development without needing CI. Other
+# platforms follow this CI-build-then-commit pattern until we have
+# a separate npm-publishing job (see TODO at the end of this file).
+
+on:
+  push:
+    paths:
+      - 'native/tray/**'
+      - '.github/workflows/build-native-tray.yml'
+  pull_request:
+    paths:
+      - 'native/tray/**'
+      - '.github/workflows/build-native-tray.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # fail-fast: false — let every platform finish even if one
+      # breaks; we want to know whether the breakage is target-specific
+      # (toolchain quirk) or universal (Rust source bug).
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch_label: linux-x64-gnu
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch_label: linux-arm64-gnu
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13   # last Intel runner GitHub provides
+            arch_label: darwin-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            arch_label: darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch_label: win32-x64-msvc
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            arch_label: win32-arm64-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux: dev headers required by tray-icon's C deps. Only
+      # affects the build; end users don't need -dev packages,
+      # just the runtime libs (which Ubuntu/Fedora ship by default).
+      - name: Install Linux build deps (x86_64)
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+
+      # arm64 Linux: cross-compile via the standard
+      # `aarch64-linux-gnu-gcc` toolchain. Ubuntu's default APT mirror
+      # only carries amd64 binaries — for foreign-arch packages we
+      # have to point apt at ports.ubuntu.com (where Canonical mirrors
+      # arm64 / armhf / ppc64el / s390x). Without this the apt-get
+      # update step 404s on every arm64 Packages file.
+      - name: Install Linux build deps (arm64 cross)
+        if: matrix.cross
+        run: |
+          set -e
+          # Restrict the existing default sources to amd64-only so apt
+          # doesn't try to fetch arm64 from archive.ubuntu.com (which
+          # doesn't host them).
+          sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources || true
+          # Add ports.ubuntu.com as the arm64 source.
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main universe restricted multiverse
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            libgtk-3-dev:arm64 libayatana-appindicator3-dev:arm64 libxdo-dev:arm64
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+
+      - name: Install napi-rs CLI
+        working-directory: native/tray
+        run: npm install --no-save @napi-rs/cli@^2.18.4
+
+      - name: Build native addon
+        working-directory: native/tray
+        run: npx napi build --release --platform --target ${{ matrix.target }}
+
+      - name: Verify .node was produced
+        working-directory: native/tray
+        shell: bash
+        run: |
+          set -e
+          file=$(ls index.${{ matrix.arch_label }}.node 2>/dev/null || ls *.node | head -1)
+          if [ -z "$file" ]; then
+            echo "::error ::No .node artifact produced"
+            exit 1
+          fi
+          echo "Built: $file ($(stat --printf='%s' "$file" 2>/dev/null || stat -f%z "$file") bytes)"
+
+      - name: Upload prebuilt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tray-${{ matrix.arch_label }}
+          path: native/tray/index.${{ matrix.arch_label }}.node
+          retention-days: 30
+
+# TODO: separate publish job that triggers on a v* tag, downloads all
+# artifacts, splits each into a @mailpouch/tray-native-<arch> package,
+# and `npm publish`es them with `optionalDependencies` linkage from
+# the main package. Pattern is napi-rs standard; needs an NPM_TOKEN
+# secret on the repo before it can run.

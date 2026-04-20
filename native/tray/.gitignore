@@ -1,0 +1,17 @@
+# Cargo build output — large + platform-specific. Cargo.lock is kept
+# (one-binary tree, lockfile reproducibility wins over crate flexibility).
+target/
+
+# napi-rs's per-platform .node files. Tracked SELECTIVELY: we commit
+# index.linux-x64-gnu.node so the main mailpouch package works
+# out-of-the-box on the dev host (Linux x64). Other targets (macOS
+# arm64, Windows x64, etc.) are produced by GitHub Actions and
+# either bundled into the main npm tarball or published as
+# @mailpouch/tray-native-* subpackages — see the CI workflow.
+*.node
+!index.linux-x64-gnu.node
+!index.linux-arm64-gnu.node
+!index.darwin-x64.node
+!index.darwin-arm64.node
+!index.win32-x64-msvc.node
+!index.win32-arm64-msvc.node
