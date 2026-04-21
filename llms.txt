@@ -1,0 +1,34 @@
+# mailpouch
+
+> MCP server that gives AI agents permission-gated, audit-logged access to Proton Mail and generic IMAP accounts — running entirely on the user's machine, nothing routed through third-party servers.
+
+mailpouch connects to Proton Bridge over a local TLS socket. Email is decrypted by Bridge on the user's device; the MCP server never persists email to disk and wipes the in-memory cache on shutdown. It works with Claude Desktop, Cline, and any MCP-compatible host over stdio or HTTP.
+
+## Documentation
+
+- [README.md](README.md): Full human-facing documentation — installation, configuration, permission presets, security model, all 71 tools listed by category.
+- [README_FIRST_AI.md](README_FIRST_AI.md): AI agent guide — read this before calling any tools. Covers tool reference, parameter specs, limits, error handling, operating guidelines, and the escalation flow.
+- [SECURITY.md](SECURITY.md): Security model, responsible disclosure policy.
+- [CONTRIBUTING.md](CONTRIBUTING.md): Development setup and contribution guidelines.
+- [docs/smtp-imap-config-reference.md](docs/smtp-imap-config-reference.md): SMTP/IMAP configuration reference.
+- [docs/proton-bridge-overview.md](docs/proton-bridge-overview.md): Proton Bridge architecture overview.
+
+## Key facts for agents
+
+- **71 tools** across reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, SimpleLogin aliases, Proton Pass, Bridge/server lifecycle. Full list in `src/config/schema.ts` (`ALL_TOOLS`).
+- **Tool tiering**: `core` (~26 tools), `extended` (adds drafts/folders/actions/aliases/Pass), `complete` (default, all tools). The `ListTools` response reflects the active tier — agents cannot call tools not in the list.
+- **Permission presets**: `read_only` (default), `send_only`, `supervised`, `full`, `custom`. Enforced server-side. Agents cannot bypass them.
+- **Human-gated escalation**: use `request_permission_escalation` + `check_escalation_status` to request temporary elevated access. A human must approve via browser UI or terminal.
+- **Destructive tools** (`delete_email`, `bulk_delete_emails`, `alias_delete`, `pass_get`, `move_to_trash`, `move_to_spam`) require MCP elicitation confirmation or `{ confirmed: true }`.
+- **Multi-account**: most tools accept an optional `account_id` argument to route to a specific configured account.
+- **Settings UI**: `http://localhost:8765` — shows current preset, escalation requests, connection status. Auto-starts with the daemon.
+- **Local FTS5 search**: `fts_search` queries a SQLite index on-device. Requires `better-sqlite3` and `fts_rebuild` to populate. Search terms never leave the machine.
+- **Reminder system**: `remind_if_no_reply` queues a follow-up that fires if no reply arrives within N days. Persists across restarts.
+- **Credentials** live in the OS keychain or config file at `~/.mailpouch.json` (mode 0600). Never ask the user for their Bridge password — the server injects it.
+
+## Repository
+
+- GitHub: https://github.com/chandshy/mailpouch
+- npm: https://www.npmjs.com/package/mailpouch
+- Install: `npm install -g mailpouch`
+- MCP SDK: 1.29+, Node.js ≥ 20

@@ -143,6 +143,71 @@ or `null` if the email or attachment is not found.
 
 **Note:** Email must be in the cache; call `get_email_by_id` first if needed.
 
+#### `get_thread`
+Fetch all messages in an email thread, sorted chronologically.
+
+```
+emailId  string  UID of any message in the thread.
+```
+
+Returns `{ emails: [...], count }`. Use this instead of manually chaining
+`get_email_by_id` calls when you need a full conversation view.
+
+#### `get_correspondence_profile`
+Build a profile of your email relationship with a specific contact.
+
+```
+email  string  The contact's email address.
+```
+
+Returns sent/received counts, first and last interaction dates, average
+response time, and recent subject lines. Useful for "how well do I know
+this person" context before composing a reply.
+
+#### `fts_search`
+Full-text search over a local SQLite FTS5 index. Much faster than IMAP
+search for repeat queries; search terms never leave your machine.
+
+```
+query   string   Required. Supports phrase ("exact phrase"), boolean (AND/OR/NOT),
+                 prefix (word*), and column filters (subject:invoice from:alice).
+limit   number   1–200, default 20.
+```
+
+Returns `{ results: [...], count }`. Requires `better-sqlite3` installed
+and the index populated via `fts_rebuild`.
+
+#### `fts_rebuild`
+Rebuild the local FTS5 index from the current email cache. Run once after
+initial setup, then periodically to keep the index fresh.
+
+Returns `{ success, indexed, duration }`.
+
+#### `fts_status`
+Check whether the FTS index is available and how many documents it contains.
+
+Returns `{ available, documentCount, lastBuilt? }`.
+
+#### `extract_action_items`
+Extract action items, to-dos, and deadlines from an email.
+
+```
+emailId  string  UID of the email to analyse.
+```
+
+Returns a structured list of action items with optional due dates and
+assignees inferred from the email content.
+
+#### `extract_meeting`
+Extract meeting details (time, location, participants, agenda) from an email.
+
+```
+emailId  string  UID of the email to analyse.
+```
+
+Returns structured meeting metadata. Useful for "add this to my calendar"
+workflows.
+
 ---
 
 ### Analytics — always available
@@ -305,6 +370,34 @@ id  string  The UUID returned by schedule_email.
 Returns `{ success: true }` or `{ success: false, error: "..." }` (e.g. if
 the email was already sent or the ID is not found).
 
+#### `remind_if_no_reply`
+Queue a follow-up reminder that fires if no reply arrives within N days.
+
+```
+emailId      string  UID of the sent email to watch.
+withinDays   number  Days to wait for a reply before triggering. Min 1, max 30.
+reminderNote string  Optional note to surface in the reminder notification.
+```
+
+Returns `{ success: true, reminderId: "<uuid>" }`. Reminders persist
+across server restarts (JSONL store). Only fires if no reply is detected
+in the inbox.
+
+#### `list_pending_reminders`
+List all active (not yet fired or cancelled) follow-up reminders.
+Returns `{ reminders: [...], count }`.
+
+#### `cancel_reminder`
+Cancel a pending follow-up reminder before it fires.
+
+```
+reminderId  string  UUID from remind_if_no_reply.
+```
+
+#### `check_reminders`
+Manually trigger the reminder check cycle (normally runs automatically
+every 60 s). Returns `{ checked, fired, count }`.
+
 ---
 
 ### Actions — requires `supervised` or `full`
@@ -461,6 +554,83 @@ Alias for `bulk_delete_emails`. Same input/output.
 
 ---
 
+### SimpleLogin Aliases — optional, requires API key
+
+These tools only appear when a SimpleLogin API key is configured in the
+settings UI. They are absent from `ListTools` if the key is not set.
+
+#### `alias_list`
+List all SimpleLogin aliases for the account.
+```
+limit   number  Default 20, max 100.
+page    number  Zero-based page for pagination.
+```
+Returns `{ aliases: [...], count }`.
+
+#### `alias_create_random`
+Create a new random alias.
+```
+note  string  Optional internal note.
+```
+Returns `{ alias, email }`.
+
+#### `alias_create_custom`
+Create a custom alias with a chosen prefix.
+```
+prefix  string  Local part before the @. Must be unique.
+note    string  Optional internal note.
+```
+Returns `{ alias, email }`.
+
+#### `alias_toggle`
+Enable or disable an alias (paused aliases silently drop incoming mail).
+```
+aliasId  number  Numeric alias ID from alias_list.
+enabled  boolean
+```
+
+#### `alias_delete`
+Permanently delete an alias. **Irreversible.** Requires destructive confirmation.
+```
+aliasId  number
+```
+
+#### `alias_get_activity`
+Fetch recent activity (forwards, replies, blocks) for an alias.
+```
+aliasId  number
+limit    number  Default 20.
+```
+
+---
+
+### Proton Pass — optional, requires pass-cli and a PAT
+
+These tools only appear when `pass-cli` is installed and a Proton Pass
+Personal Access Token is configured. `pass_get` requires destructive
+confirmation before returning a credential.
+
+#### `pass_list`
+List all vaults and item names. Does **not** return passwords.
+Returns `{ vaults: [...] }`.
+
+#### `pass_search`
+Search Pass items by name or URL. Does **not** return passwords.
+```
+query  string  Search term.
+```
+Returns `{ items: [...], count }`.
+
+#### `pass_get`
+Retrieve a specific credential (username + password). Requires explicit
+user confirmation via MCP elicitation or `{ confirmed: true }`.
+```
+itemId  string  ID from pass_list or pass_search.
+```
+Returns `{ username, password, url?, notes? }`.
+
+---
+
 ### Bridge & Server Control
 
 #### `start_bridge`
@@ -535,6 +705,15 @@ Returns the current status: `"pending"`, `"approved"`, `"denied"`, or
 4. When status == "approved": proceed with the originally requested action
 5. When status == "denied" or "expired": inform the user and stop
 ```
+
+---
+
+## Multi-account
+
+If more than one mail account is configured, most tools accept an optional
+`account_id` argument. When omitted, the call runs against the active account.
+Use `get_connection_status` to see which account is currently active and what
+account IDs are available.
 
 ---
 
