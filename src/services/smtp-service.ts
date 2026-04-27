@@ -116,6 +116,11 @@ export class SMTPService {
           tlsOptions = {
             ca: [bridgeCert],
             minVersion: "TLSv1.2",
+            // Node 25 rejects an IP literal as TLS servername before
+            // checkServerIdentity can run. Bridge listens on 127.0.0.1,
+            // but using localhost here keeps SNI legal while the pinned
+            // Bridge cert remains the trust anchor for this local socket.
+            servername: "localhost",
             checkServerIdentity: () => undefined,
           };
           logger.info(`SMTP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, "SMTPService");
