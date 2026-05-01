@@ -11,9 +11,10 @@ jobs:
     # OS × Node matrix covering every platform Proton Bridge ships on:
     #   - ubuntu-latest  (linux x64 — the primary Bridge target on Linux)
     #   - macos-latest   (darwin arm64 — Apple Silicon; current default runner)
-    #   - macos-13       (darwin x64 — Intel Mac coverage for prebuilt-binary
-    #                     regressions in better-sqlite3 / @napi-rs/keyring)
     #   - windows-latest (win32 x64 — Bridge's Windows target)
+    #
+    # macos-13 (Intel) was removed: GitHub's Intel runner pool is retired and
+    # jobs consistently time out at the 6h limit without starting.
     #
     # fail-fast: false — let each OS complete independently so one missing
     # prebuilt doesn't mask issues on the others.
@@ -22,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node-version: [20.x, 22.x]
 
     name: ${{ matrix.os }} / node ${{ matrix.node-version }}
