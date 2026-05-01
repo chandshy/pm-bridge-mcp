@@ -8,6 +8,7 @@ import { readFileSync, statSync } from "fs";
 import { join as pathJoin } from "path";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
+import { buildBridgeTlsOptions } from "./bridge-tls.js";
 import { parseEmails, isValidEmail } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
@@ -113,11 +114,7 @@ export class SMTPService {
         // Load the exported Bridge certificate — proper trust without disabling validation
         try {
           const bridgeCert = readFileSync(resolvedCertPath);
-          tlsOptions = {
-            ca: [bridgeCert],
-            minVersion: "TLSv1.2",
-            checkServerIdentity: () => undefined,
-          };
+          tlsOptions = buildBridgeTlsOptions(bridgeCert);
           logger.info(`SMTP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, "SMTPService");
         } catch (err: unknown) {
           // Robust message extraction: if a non-Error is thrown (string,

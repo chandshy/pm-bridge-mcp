@@ -10,6 +10,7 @@ import { simpleParser } from 'mailparser';
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { buildBridgeTlsOptions } from './bridge-tls.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
 
@@ -342,13 +343,7 @@ export class SimpleIMAPService {
           } catch { /* stat failed — let readFileSync produce the real error below */ }
           try {
             const bridgeCert = readFileSync(resolvedCertPath);
-            // Bridge certs use CN=127.0.0.1 but we may connect via "localhost",
-            // so skip hostname verification when the CA is explicitly trusted.
-            tlsOptions = {
-              ca: [bridgeCert],
-              minVersion: 'TLSv1.2',
-              checkServerIdentity: () => undefined,
-            };
+            tlsOptions = buildBridgeTlsOptions(bridgeCert);
             logger.info(`IMAP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, 'IMAPService');
           } catch (err) {
             if (!allowInsecure) {
@@ -1904,11 +1899,7 @@ export class SimpleIMAPService {
           let certPath = cfg.bridgeCertPath;
           try { if (statSync(certPath).isDirectory()) certPath = pathJoin(certPath, 'cert.pem'); } catch {}
           const cert = readFileSync(certPath);
-          tlsOptions = {
-            ca: [cert],
-            minVersion: 'TLSv1.2',
-            checkServerIdentity: () => undefined,
-          };
+          tlsOptions = buildBridgeTlsOptions(cert);
         } catch {
           tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
         }
