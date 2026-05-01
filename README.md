@@ -1,6 +1,6 @@
 # mailpouch
 
-`mailpouch` is an MCP server that gives AI agents a typed, permission-gated, audit-logged tool surface over private-mail providers — Proton Mail (via Proton Bridge) and plain IMAP today, with Tuta and Mailfence on the roadmap.
+`mailpouch` is an MCP server that gives AI agents a typed, permission-gated, audit-logged tool surface over private-mail providers — Proton Mail (via Proton Bridge) and plain IMAP.
 
 The pitch in one line: if you picked Proton Mail because you didn't want a third party reading your inbox, you don't suddenly want to hand a chatbot OAuth access to that same inbox so it can triage on your behalf. The usual "connect your email" integrations route everything through someone else's servers and ask for blanket scopes. Hand-rolled IMAP inside the agent is worse — no permission boundary, no audit trail, and the model holds your credentials in its context window. Neither option respects why you chose the provider in the first place.
 
