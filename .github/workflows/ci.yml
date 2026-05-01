@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     # OS × Node matrix covering every platform Proton Bridge ships on:

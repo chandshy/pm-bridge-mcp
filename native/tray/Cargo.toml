@@ -38,10 +38,9 @@ crossbeam-channel = "0.5"
 [target.'cfg(target_os = "linux")'.dependencies]
 # tray-icon needs a GTK main loop running for events to dispatch on
 # Linux. gtk crate's `init()` initializes GLib/GTK from any thread we
-# decide to host the loop on. Bring the matching glib version so we
-# have access to MainContext::default().iteration() from the loop.
-gtk  = "0.18"
-glib = "0.18"
+# decide to host the loop on. gtk 0.18 is the latest gtk3 release
+# (gtk3 is unmaintained upstream; gtk4 migration is a separate effort).
+gtk = "0.18"
 
 [build-dependencies]
 napi-build = "2"

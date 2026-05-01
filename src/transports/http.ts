@@ -89,7 +89,7 @@ const tokenMatches = constantTimeEqual;
 function extractBearer(req: IncomingMessage): string | null {
   const raw = req.headers["authorization"];
   if (!raw || typeof raw !== "string") return null;
-  const m = /^Bearer\s+(.+)\s*$/i.exec(raw);
+  const m = /^Bearer\s+(\S+)$/i.exec(raw.trimEnd());
   return m ? m[1] : null;
 }
 
