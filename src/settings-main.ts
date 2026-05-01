@@ -24,6 +24,7 @@
  */
 
 import { createRequire } from "module";
+import { spawn } from "child_process";
 import {
   detectEnvironment,
   openBrowser,
@@ -117,10 +118,24 @@ function startServer(p: number): void {
   serverStarted = true;
   // Return value ({ scheme }) is only needed for browser auto-open; TUI handles
   // the URL itself after the server is running, so we can safely discard it.
-  startSettingsServer(p, lan).catch((err: Error) => {
+  startSettingsServer(p, lan, false, { onRestartRequested: _onRestartRequested }).catch((err: Error) => {
     process.stderr.write(`Settings server error: ${err?.message ?? err}\n`);
     process.exit(1);
   });
+}
+
+// ─── Helper: restart after a successful npm update install ────────────────────
+// Tears down the tray, spawns a fresh copy of this process, then exits so the
+// new binary is in use and the old one is gone cleanly.
+function _onRestartRequested(): void {
+  try { _activeTray?.destroy(); } catch { /* already gone */ }
+  const child = spawn(process.execPath, process.argv.slice(1), {
+    stdio: "ignore",
+    detached: true,
+  });
+  child.on("error", () => { /* ignore — new process may still start */ });
+  child.unref();
+  setTimeout(() => process.exit(0), 200);
 }
 
 // ─── Helper: persistent tray icon ────────────────────────────────────────────
@@ -193,7 +208,7 @@ switch (mode) {
     // Start server first (async), then open browser once it's listening.
     // startSettingsServer returns the actual scheme (http/https) so we open
     // the correct URL regardless of whether openssl was available.
-    startSettingsServer(port, lan).then(({ scheme }) => {
+    startSettingsServer(port, lan, false, { onRestartRequested: _onRestartRequested }).then(({ scheme }) => {
       const url = `${scheme}://localhost:${port}`;
       serverStarted = true;
 

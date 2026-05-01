@@ -3122,11 +3122,30 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       output.textContent  = d.output || d.error || '';
       output.style.display = '';
       if (d.ok) {
-        actionStatus.textContent = '✅ Update installed. Restart the MCP server to use the new version.';
-        actionStatus.style.color = 'var(--success, #22c55e)';
         installBtn.style.display = 'none';
-        // Re-check to show updated version
-        await checkForUpdates();
+        if (d.restarting) {
+          actionStatus.textContent = '✅ Update installed — server is restarting…';
+          actionStatus.style.color = 'var(--success, #22c55e)';
+          // Poll until the new process is serving, then reload the page
+          var _pollAttempts = 0;
+          var _poll = setInterval(function() {
+            _pollAttempts++;
+            fetch('/api/status').then(function() {
+              clearInterval(_poll);
+              window.location.reload();
+            }).catch(function() {
+              if (_pollAttempts >= 15) {
+                clearInterval(_poll);
+                actionStatus.textContent = '✅ Update installed — reload this page once the server restarts.';
+              }
+            });
+          }, 2000);
+        } else {
+          actionStatus.textContent = '✅ Update installed. Restart the MCP server to use the new version.';
+          actionStatus.style.color = 'var(--success, #22c55e)';
+          // Re-check to show updated version
+          await checkForUpdates();
+        }
       } else {
         actionStatus.textContent = '❌ Install failed — see output below.';
         actionStatus.style.color = 'var(--danger)';
@@ -3647,6 +3666,13 @@ export interface ServerSecurityOptions {
    * Passed to isValidOrigin so browsers in TLS mode are accepted.
    */
   scheme:      "http" | "https";
+  /**
+   * Called after a successful `npm install -g` update. The caller is
+   * responsible for tearing down the tray, stopping services, and
+   * restarting the process. When omitted the browser is told to restart
+   * manually instead of auto-reloading.
+   */
+  onRestartRequested?: () => void;
 }
 
 // ── /agent-setup — integration reference for AI clients ─────────────────
@@ -4636,7 +4662,12 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             proc.on("error", reject);
           });
 
-          json(res, 200, { ok: true, output });
+          const restarting = typeof secOpts.onRestartRequested === "function";
+          json(res, 200, { ok: true, output, restarting });
+          if (restarting) {
+            // Give the HTTP response 400 ms to flush before tearing down
+            setTimeout(() => secOpts.onRestartRequested!(), 400);
+          }
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           json(res, 200, { ok: false, error: msg });
@@ -5211,6 +5242,7 @@ export async function startSettingsServer(
   port  = 8765,
   lan   = false,
   quiet = false,
+  opts: { onRestartRequested?: () => void } = {},
 ): Promise<{ scheme: "http" | "https"; stop: () => Promise<void> }> {
   const bindHost    = lan ? "0.0.0.0" : "127.0.0.1";
   const lanIP       = lan ? getPrimaryLanIP() : "";
@@ -5224,7 +5256,7 @@ export async function startSettingsServer(
   }
 
   const scheme: "http" | "https" = tls ? "https" : "http";
-  const secOpts: ServerSecurityOptions = { port, lan, accessToken, scheme };
+  const secOpts: ServerSecurityOptions = { port, lan, accessToken, scheme, ...opts };
   const appHandler = createSettingsServer(secOpts);
 
   // Wrap in HTTPS if we have a cert; otherwise use the plain HTTP server.

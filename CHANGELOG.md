@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.12] — 2026-05-01
+
+### Fixed
+- **Graceful update/restart lifecycle** — `POST /api/install-update` now triggers an automatic process restart after a successful npm install; tray icon is torn down and the settings web UI restarts cleanly in the new process. Browser polls `/api/status` and reloads when the server is back.
+- **`restart_server` MCP tool** — removed the detached-spawn-with-`MAILPOUCH_RESPAWN` pattern that was leaving a zombie process with no tray and no settings UI. Now simply calls graceful shutdown; the MCP client reconnects and spawns a clean process with tray and settings server.
+- **Standalone `mailpouch-settings` self-restart** — passing `--update` via the settings UI now tears down the tray before respawning, preventing duplicate icons.
+
 ## [3.0.11] — 2026-05-01
 
 ### Fixed

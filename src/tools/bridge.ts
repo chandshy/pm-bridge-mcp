@@ -3,7 +3,6 @@
  * restart_server.
  */
 
-import { spawn } from "child_process";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../utils/logger.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
@@ -77,25 +76,11 @@ export const handlers: Record<string, ToolHandler> = {
     logger.info("Restart requested via MCP tool.", "MCPServer");
     await killProtonBridge();
     state.bridgeAutoStarted = false;
-    try {
-      // Attach an async 'error' handler before .unref() — otherwise an
-      // ENOENT / EACCES from the child can propagate as an unhandled event
-      // and take the current process down before gracefulShutdown runs.
-      const child = spawn(process.execPath, process.argv.slice(1), {
-        stdio: "ignore",
-        detached: true,
-        env: { ...process.env, MAILPOUCH_RESPAWN: "1" },
-      });
-      child.on("error", (err) => {
-        logger.error("Replacement process emitted error after spawn", "MCPServer", err);
-      });
-      child.unref();
-    } catch (spawnErr: unknown) {
-      logger.error("Failed to spawn replacement process during restart", "MCPServer", spawnErr);
-      throw new McpError(ErrorCode.InternalError, "Restart failed: could not spawn replacement process.");
-    }
+    // Gracefully shut down — tray destroyed, settings server stopped, memory
+    // scrubbed. The MCP client reconnects automatically and spawns a fresh
+    // process with a clean tray and settings server.
     setImmediate(() => gracefulShutdown("mcp_tool_restart"));
-    return ok({ success: true }, "Restart initiated. A new MCP server process is starting.");
+    return ok({ success: true }, "Restart initiated. The server is shutting down; your client will reconnect automatically.");
   },
 };
 

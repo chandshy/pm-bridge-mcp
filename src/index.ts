@@ -1597,7 +1597,9 @@ async function _startSettingsServerDaemon(): Promise<void> {
   const retryMs     = 1000;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */);
+      const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */, {
+        onRestartRequested: () => setImmediate(() => gracefulShutdown("update_restart")),
+      });
       _settingsStop    = stop;
       _settingsUrl     = `${scheme}://localhost:${port}`;
       _settingsEnabled = true;
@@ -2037,15 +2039,12 @@ async function main() {
     // ── Daemon: start settings HTTP server + system tray ───────────────────
     // Both run alongside the MCP stdio transport. stdout is now owned by the
     // MCP protocol, so startSettingsServer is called with quiet=true.
-    // Skip when running as a respawn child (stdio:ignore, no real MCP session).
-    if (!process.env.MAILPOUCH_RESPAWN) {
-      await _startSettingsServerDaemon();
-      // Only the process that owns the settings server gets a tray.
-      // If another MCP already holds the port, _settingsExternal is true
-      // and that process already has the tray — skip to avoid duplicates.
-      if (!_settingsExternal) {
-        _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
-      }
+    await _startSettingsServerDaemon();
+    // Only the process that owns the settings server gets a tray.
+    // If another MCP already holds the port, _settingsExternal is true
+    // and that process already has the tray — skip to avoid duplicates.
+    if (!_settingsExternal) {
+      _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
     }
   } catch (error) {
     logger.error("Server startup failed", "MCPServer", error);
