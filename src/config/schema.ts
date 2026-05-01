@@ -350,7 +350,7 @@ export interface ServerConfig {
   /**
    * Progressive tool-disclosure tier. Controls how many tools appear in the
    * ListTools response — reduces context bloat when only a subset is needed.
-   *   "core"     — reading / sending / analytics / system (~20 tools)
+   *   "core"     — reading / sending / analytics / system (~26 tools, ~28 with escalation tools)
    *   "extended" — core + drafts / folders / actions
    *   "complete" — all tools (default, preserves current behavior)
    * Override per-launch with MAILPOUCH_TIER.

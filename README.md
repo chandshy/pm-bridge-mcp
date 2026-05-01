@@ -9,12 +9,12 @@ The pitch in one line: if you picked Proton Mail because you didn't want a third
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, or a static bearer token if you'd rather. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
 [![CI](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v3.0.5-blue.svg)](https://www.npmjs.com/package/mailpouch)
+[![npm version](https://img.shields.io/badge/npm-v3.0.6-blue.svg)](https://www.npmjs.com/package/mailpouch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-1%2C588%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-1%2C592%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -63,7 +63,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **1,588 tests passing** (Vitest); zero `any` type annotations in production source.
+- **1,592 tests passing** (Vitest); zero `any` type annotations in production source.
 
 ---
 
@@ -425,7 +425,7 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 | Bridge version floor | Warns when Bridge < `3.22.0` (FIDO2 + 50 MB import cap hardening) |
 | SMTP backoff | Exponential backoff on abuse-signal SMTP responses (4xx 421/450/451 throttle codes) |
 | Config file isolation | Mode `0600`; preset and tool names validated on load; config schema versioned |
-| Memory safety | Email cache capped at 500 entries / 50 MB; rate-limiter buckets capped at 10,000 keys |
+| Memory safety | Email cache capped at 500 entries / 50 MB; rate-limiter buckets evicted when idle (fully refilled) |
 | Keychain storage | OS keychain preferred for Bridge password, OAuth admin password, Pass PAT |
 
 **What agents cannot do:**
@@ -511,7 +511,7 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 
 ### Tool list looks short / missing tools
 
-- Check your **tool tier** under Permissions. `core` exposes ~24 tools; `extended` adds drafts, folders, actions, aliases, Pass; `complete` (default) exposes everything.
+- Check your **tool tier** under Permissions. `core` exposes ~28 tools; `extended` adds drafts, folders, actions, aliases, Pass; `complete` (default) exposes everything.
 - Optional companion tools (`alias_*`, `pass_*`, `fts_*`) only appear when their dependency / token is configured.
 
 ### Remote / HTTP client returns 401
@@ -543,7 +543,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 1,588 tests)
+npm run test           # run test suite (Vitest, 1,592 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)
