@@ -458,7 +458,7 @@ describe('RateLimiter — bucket cap eviction', () => {
 // ─── tryGenerateSelfSignedCert (integration) ─────────────────────────────────
 
 describe('tryGenerateSelfSignedCert', () => {
-  it('returns TlsCredentials or null (depends on openssl availability)', () => {
+  it('returns TlsCredentials or null (depends on openssl availability)', { timeout: 20000 }, () => {
     // This is an integration test: if openssl is on PATH, we get a real cert.
     // If not, the function gracefully returns null. Either outcome is valid.
     const result = tryGenerateSelfSignedCert();
