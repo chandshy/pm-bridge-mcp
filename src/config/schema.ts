@@ -156,6 +156,17 @@ export interface ServerPermissions {
   tools: Record<ToolName, ToolPermission>;
 }
 
+// ─── Encrypted credential shape (mirrored from src/crypto/credential-encryption.ts) ──
+
+/** Persistent shape of an AES-256-GCM encrypted credential stored in the config file. */
+export interface EncryptedCredentialShape {
+  algorithm: string;
+  version: number;
+  iv: string;
+  encryptedData: string;
+  authTag: string;
+}
+
 // ─── Connection Settings ───────────────────────────────────────────────────────
 
 export interface ConnectionSettings {
@@ -164,10 +175,14 @@ export interface ConnectionSettings {
   imapHost: string;
   imapPort: number;
   username: string;
-  /** Stored encrypted at rest is ideal; at minimum this file should be mode 0600 */
+  /** Runtime plaintext password (empty when credential is stored encrypted or in keychain). */
   password: string;
+  /** AES-256-GCM encrypted password blob — see src/crypto/credential-encryption.ts. */
+  passwordEncrypted?: EncryptedCredentialShape;
   /** Optional SMTP token for direct smtp.protonmail.ch submission (paid plans) */
   smtpToken: string;
+  /** AES-256-GCM encrypted SMTP token blob. */
+  smtpTokenEncrypted?: EncryptedCredentialShape;
   /** Path to exported Proton Bridge TLS certificate */
   bridgeCertPath: string;
   /**
@@ -341,8 +356,8 @@ export interface ServerConfig {
   configVersion: number;
   connection: ConnectionSettings;
   permissions: ServerPermissions;
-  /** Where credentials are stored: "keychain" (OS keychain) or "config" (JSON file). */
-  credentialStorage?: "keychain" | "config";
+  /** Where credentials are stored: "keychain" (OS keychain), "encrypted-file" (AES-256-GCM in config), or "config" (plaintext in config — legacy). */
+  credentialStorage?: "keychain" | "encrypted-file" | "config";
   /** Tuneable response-size guards — see ResponseLimits. */
   responseLimits?: ResponseLimits;
   /** Port the settings UI server listens on (default 8765). */

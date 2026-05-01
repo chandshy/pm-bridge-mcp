@@ -107,13 +107,18 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 
 /** Strip password fields before sending config to the browser */
 function safeConfig(cfg: ServerConfig): unknown {
+  const hasPassword  = !!(cfg.connection.password || cfg.connection.passwordEncrypted);
+  const hasSmtpToken = !!(cfg.connection.smtpToken || cfg.connection.smtpTokenEncrypted);
   return {
     ...cfg,
     credentialStorage: cfg.credentialStorage ?? "config",
     connection: {
       ...cfg.connection,
-      password: cfg.connection.password ? "••••••••" : "",
-      smtpToken: cfg.connection.smtpToken ? "••••••••" : "",
+      password:  hasPassword  ? "••••••••" : "",
+      smtpToken: hasSmtpToken ? "••••••••" : "",
+      // Never send encrypted blobs to the browser
+      passwordEncrypted:  undefined,
+      smtpTokenEncrypted: undefined,
     },
   };
 }
@@ -350,6 +355,15 @@ legend {
 .field .err-msg { font-size: 12px; color: var(--danger); margin-top: 5px; display: none; }
 .field.has-error .err-msg   { display: block; }
 .field.has-error input      { border-color: var(--danger); }
+/* ── Password visibility toggle ── */
+.pw-wrap { position: relative; }
+.pw-wrap input { padding-right: 38px !important; width: 100%; box-sizing: border-box; }
+.eye-btn {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; padding: 4px; cursor: pointer;
+  color: var(--muted); line-height: 0;
+}
+.eye-btn:hover { color: var(--text); }
 
 
 .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -1127,17 +1141,23 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             Bridge password
             <span style="color:var(--muted);font-weight:400">(from the Bridge app)</span>
           </label>
-          <input type="password" id="wiz-password" placeholder="Bridge password"
-            autocomplete="current-password" aria-required="true"
-            oninput="wizClearError('wiz-password')">
+          <div class="pw-wrap">
+            <input type="password" id="wiz-password" placeholder="Bridge password"
+              autocomplete="current-password" aria-required="true"
+              oninput="wizClearError('wiz-password')">
+            <button type="button" class="eye-btn" onclick="togglePw('wiz-password')" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
           <div class="hint">Bridge app → Settings → IMAP/SMTP → Password</div>
           <div class="err-msg" id="err-wiz-password">Please enter your Bridge password.</div>
         </div>
 
         <div class="field" id="smtp-token-field" style="display:none">
           <label for="wiz-smtp-token">SMTP token <span style="color:var(--muted);font-weight:400">(required for direct smtp.protonmail.ch)</span></label>
-          <input type="password" id="wiz-smtp-token" placeholder="SMTP token from Bridge settings"
-            autocomplete="off" aria-label="SMTP token">
+          <div class="pw-wrap">
+            <input type="password" id="wiz-smtp-token" placeholder="SMTP token from Bridge settings"
+              autocomplete="off" aria-label="SMTP token">
+            <button type="button" class="eye-btn" onclick="togglePw('wiz-smtp-token')" aria-label="Show token" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
           <div class="hint">Required for paid plans using direct smtp.protonmail.ch. Leave blank for Bridge.</div>
         </div>
 
@@ -1381,7 +1401,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           </div>
           <div class="field">
             <label for="password">Bridge password <span style="color:var(--muted);font-weight:400">(from Bridge app)</span></label>
-            <input type="password" id="password" placeholder="Enter new password" autocomplete="current-password">
+            <div class="pw-wrap">
+              <input type="password" id="password" placeholder="Enter new password" autocomplete="current-password">
+              <button type="button" class="eye-btn" onclick="togglePw('password')" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            </div>
             <div class="hint">Leave blank to keep the saved value.</div>
           </div>
         </div>
@@ -1412,7 +1435,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <div id="smtp-token-row">
           <div class="field" id="setup-smtp-token-field" style="display:none">
             <label for="smtp-token">SMTP token <span style="color:var(--muted);font-weight:400">(required for direct)</span></label>
-            <input type="password" id="smtp-token" placeholder="Generated in Bridge Settings → IMAP/SMTP">
+            <div class="pw-wrap">
+              <input type="password" id="smtp-token" placeholder="Generated in Bridge Settings → IMAP/SMTP">
+              <button type="button" class="eye-btn" onclick="togglePw('smtp-token')" aria-label="Show token" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            </div>
             <div class="hint">Leave blank to keep the saved value.</div>
           </div>
         </div>
@@ -1600,7 +1626,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       </div>
       <div class="field" style="margin-bottom:10px">
         <label style="font-size:12px;color:#aaa">Password</label>
-        <input type="password" id="af-password" placeholder="Leave blank to keep existing" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        <div class="pw-wrap" style="margin-top:4px">
+          <input type="password" id="af-password" placeholder="Leave blank to keep existing" style="padding:6px;background:#222;color:#eee;border:1px solid #444;border-radius:6px">
+          <button type="button" class="eye-btn" onclick="togglePw('af-password')" aria-label="Show password" tabindex="-1" style="color:#7c78a8"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </div>
       </div>
       <div class="field" style="margin-bottom:10px" id="af-cert-row">
         <label style="font-size:12px;color:#aaa">Bridge TLS cert path (Bridge accounts only)</label>
@@ -2627,9 +2656,23 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     // Credential storage row in status tab
     var credStorageEl = document.getElementById('info-credential-storage');
     if (credStorageEl) {
-      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : 'Config file';
+      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : c.credentialStorage === 'encrypted-file' ? 'Encrypted file' : 'Config file (plaintext)';
     }
   }
+
+  var EYE_OPEN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  var EYE_SLASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  window.togglePw = function(inputId) {
+    var inp = document.getElementById(inputId);
+    if (!inp) return;
+    var btn = inp.parentElement && inp.parentElement.querySelector('.eye-btn');
+    var show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    if (btn) {
+      btn.innerHTML = show ? EYE_SLASH : EYE_OPEN;
+      btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    }
+  };
 
   window.setMode = function(mode) {
     const isBridge = mode === 'bridge';
@@ -2998,7 +3041,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       limited.length ? limited.map(t => t + ' (' + tools[t].rateLimit + '/hr)').join(', ') : 'None';
     var credStorageEl = document.getElementById('info-credential-storage');
     if (credStorageEl) {
-      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : 'Config file';
+      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : c.credentialStorage === 'encrypted-file' ? 'Encrypted file' : 'Config file (plaintext)';
     }
     buildClaudeSnippet(c.connection || {});
   }

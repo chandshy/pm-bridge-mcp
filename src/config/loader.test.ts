@@ -587,13 +587,17 @@ describe("saveConfigWithCredentials", () => {
     expect(mockedRenameSync).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to config file when keychain save fails", async () => {
+  it("encrypts to config file when keychain save fails", async () => {
     mockedSave.mockResolvedValue(false);
     const cfg = defaultConfig();
     cfg.connection.password = "secret";
     const result = await saveConfigWithCredentials(cfg);
-    expect(result).toBe("config");
-    expect(cfg.credentialStorage).toBe("config");
+    expect(result).toBe("encrypted-file");
+    expect(cfg.credentialStorage).toBe("encrypted-file");
+    // Plaintext blanked; encrypted blob present
+    expect(cfg.connection.password).toBe("");
+    expect(cfg.connection.passwordEncrypted).toBeDefined();
+    expect(cfg.connection.passwordEncrypted?.algorithm).toBe("aes-256-gcm");
     expect(mockedWriteFileSync).toHaveBeenCalledTimes(1);
     expect(mockedRenameSync).toHaveBeenCalledTimes(1);
   });

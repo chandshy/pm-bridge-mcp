@@ -30,6 +30,7 @@ import {
   saveCredentials as saveKeychainCredentials,
   migrateFromConfig,
 } from "../security/keychain.js";
+import { CredentialEncryption } from "../crypto/credential-encryption.js";
 import { tracer } from "../utils/tracer.js";
 
 /** Clamp a numeric value to [min, max], falling back to min for non-finite input. */
@@ -270,7 +271,9 @@ export function loadConfig(): ServerConfig | null {
     // kept?" badge — preserve it across load/save round-trips too; it was
     // dropped by the same bug that hit settingsPort.
     const preservedCredentialStorage =
-      parsed.credentialStorage === "keychain" || parsed.credentialStorage === "config"
+      parsed.credentialStorage === "keychain" ||
+      parsed.credentialStorage === "encrypted-file" ||
+      parsed.credentialStorage === "config"
         ? parsed.credentialStorage
         : undefined;
 
@@ -332,17 +335,17 @@ export function saveConfig(config: ServerConfig): void {
 // ─── Keychain-aware credential helpers ──────────────────────────────────────
 
 /**
- * Load credentials with keychain priority: keychain > config file.
+ * Load credentials with priority: keychain > encrypted-file > plaintext config.
  * Returns the credentials and the storage method used.
  */
 export async function loadCredentialsFromKeychain(): Promise<{
   password: string;
   smtpToken: string;
-  storage: "keychain" | "config";
+  storage: "keychain" | "encrypted-file" | "config";
 } | null> {
   const tags: { hasPassword?: boolean; hasSmtpToken?: boolean; storage?: string } = {};
   return tracer.span('config.loadKeychain', tags, async () => {
-  // Try keychain first
+  // 1. Try keychain first
   const keychainCreds = await loadKeychainCredentials();
   if (keychainCreds && (keychainCreds.password || keychainCreds.smtpToken)) {
     tags.hasPassword = !!keychainCreds.password;
@@ -351,8 +354,40 @@ export async function loadCredentialsFromKeychain(): Promise<{
     return { ...keychainCreds, storage: "keychain" as const };
   }
 
-  // Fall back to config file
   const config = loadConfig();
+
+  // 2. Try encrypted-file storage
+  if (config) {
+    const hasEncryptedPassword = CredentialEncryption.isValidEncrypted(config.connection.passwordEncrypted);
+    const hasEncryptedToken    = CredentialEncryption.isValidEncrypted(config.connection.smtpTokenEncrypted);
+    if (hasEncryptedPassword || hasEncryptedToken) {
+      let password = "";
+      let smtpToken = "";
+      if (hasEncryptedPassword) {
+        try {
+          // isValidEncrypted confirmed algorithm === "aes-256-gcm"; cast is safe.
+          password = CredentialEncryption.decrypt(config.connection.passwordEncrypted as Parameters<typeof CredentialEncryption.decrypt>[0]);
+        } catch {
+          // Decryption failure — credential missing from this source
+        }
+      }
+      if (hasEncryptedToken) {
+        try {
+          smtpToken = CredentialEncryption.decrypt(config.connection.smtpTokenEncrypted as Parameters<typeof CredentialEncryption.decrypt>[0]);
+        } catch {
+          // Same as above
+        }
+      }
+      if (password || smtpToken) {
+        tags.hasPassword = !!password;
+        tags.hasSmtpToken = !!smtpToken;
+        tags.storage = "encrypted-file";
+        return { password, smtpToken, storage: "encrypted-file" as const };
+      }
+    }
+  }
+
+  // 3. Fall back to plaintext config (legacy / migration path)
   if (config && (config.connection.password || config.connection.smtpToken)) {
     tags.hasPassword = !!config.connection.password;
     tags.hasSmtpToken = !!config.connection.smtpToken;
@@ -371,33 +406,43 @@ export async function loadCredentialsFromKeychain(): Promise<{
 }
 
 /**
- * Save config with credentials routed to keychain when available.
- * If keychain is available, credentials are stored there and blanked in the JSON file.
- * If keychain is unavailable, credentials are stored in the JSON file as fallback.
+ * Save config with credentials routed to the most secure available store.
+ * Priority: keychain > encrypted-file (AES-256-GCM) > plaintext config (legacy).
+ * Mutates `config` — blanks plaintext fields when storing elsewhere.
  */
-export async function saveConfigWithCredentials(config: ServerConfig): Promise<"keychain" | "config"> {
-  const password = config.connection.password;
+export async function saveConfigWithCredentials(config: ServerConfig): Promise<"keychain" | "encrypted-file" | "config"> {
+  const password  = config.connection.password;
   const smtpToken = config.connection.smtpToken;
 
+  // 1. Try keychain
   const keychainOk = await saveKeychainCredentials(password, smtpToken);
   if (keychainOk) {
-    // Blank credentials in config file — they're now in keychain
-    config.connection.password = "";
+    config.connection.password  = "";
     config.connection.smtpToken = "";
+    delete config.connection.passwordEncrypted;
+    delete config.connection.smtpTokenEncrypted;
     config.credentialStorage = "keychain";
     saveConfig(config);
     return "keychain";
   }
 
-  // Fallback: store in config file
-  config.credentialStorage = "config";
+  // 2. Encrypt and store in config file (keychain unavailable)
+  if (password) {
+    config.connection.passwordEncrypted  = CredentialEncryption.encrypt(password);
+    config.connection.password = "";
+  }
+  if (smtpToken) {
+    config.connection.smtpTokenEncrypted = CredentialEncryption.encrypt(smtpToken);
+    config.connection.smtpToken = "";
+  }
+  config.credentialStorage = "encrypted-file";
   saveConfig(config);
-  return "config";
+  return "encrypted-file";
 }
 
 /**
- * One-time migration: move plaintext credentials from config file to keychain.
- * Idempotent — safe to call on every startup.
+ * One-time migration: move plaintext credentials to the best available store.
+ * Priority: keychain > encrypted-file. Idempotent — safe to call on every startup.
  */
 export async function migrateCredentials(): Promise<boolean> {
   const tags: { migrated?: boolean } = {};
@@ -407,8 +452,34 @@ export async function migrateCredentials(): Promise<boolean> {
     tags.migrated = false;
     return false;
   }
-  const migrated = await migrateFromConfig(config, saveConfig);
-  tags.migrated = migrated;
-  return migrated;
+
+  // Only migrate when there are plaintext credentials that haven't been migrated yet.
+  const hasPlaintext = !!(config.connection.password || config.connection.smtpToken);
+  const alreadyEncrypted = !!(config.connection.passwordEncrypted || config.connection.smtpTokenEncrypted);
+  if (!hasPlaintext || alreadyEncrypted) {
+    tags.migrated = false;
+    return false;
+  }
+
+  // Try keychain first
+  const migratedToKeychain = await migrateFromConfig(config, saveConfig);
+  if (migratedToKeychain) {
+    tags.migrated = true;
+    return true;
+  }
+
+  // Fall back to encrypted-file
+  config.connection.passwordEncrypted  = config.connection.password
+    ? CredentialEncryption.encrypt(config.connection.password)
+    : undefined;
+  config.connection.smtpTokenEncrypted = config.connection.smtpToken
+    ? CredentialEncryption.encrypt(config.connection.smtpToken)
+    : undefined;
+  config.connection.password  = "";
+  config.connection.smtpToken = "";
+  config.credentialStorage = "encrypted-file";
+  saveConfig(config);
+  tags.migrated = true;
+  return true;
   }); // end tracer.span('config.migrateCredentials')
 }

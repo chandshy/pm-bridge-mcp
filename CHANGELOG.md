@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.9] — 2026-05-01
+
+### Security
+- **AES-256-GCM encrypted credential storage** — replaces broken OS keychain
+  integration with encrypted-at-rest credentials stored directly in the config
+  file. Key derived from `SHA256(hostname|salt|platform)` using Node.js built-in
+  `crypto` only (no new dependencies). Credential priority chain on load:
+  keychain → encrypted-file → plaintext (legacy migration). Existing plaintext
+  passwords auto-migrate to encrypted-file on next startup when keychain is
+  unavailable. `credentialStorage` field gains `"encrypted-file"` value;
+  settings UI badge updated accordingly. Encrypted blobs never sent to the
+  browser — `safeConfig()` strips them before responding.
+
+### Added
+- **Password visibility toggle** — all password and SMTP-token inputs now have
+  an eye-icon button that switches between masked and visible. On page load the
+  fields are blank (no placeholder ciphertext injected); clicking the eye simply
+  reveals whatever the user has typed.
+
 ## [3.0.8] — 2026-05-01
 
 ### Security
