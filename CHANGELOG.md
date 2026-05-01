@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.7] — 2026-05-01
+
+### Fixed
+- **README accuracy audit** — corrected six stale or false claims: `any`
+  annotation count, wizard step 3 label ("Credentials" → "Account"), keychain
+  storage scope (Bridge password + SMTP token only), missing Accounts and
+  Agents tabs in settings UI description, SMTP backoff code `451` → `454`.
+- **`src/utils/tray.ts` comment** — updated committed prebuilt count from 4 to
+  5 now that `linux-arm64-gnu` is built and shipped.
+
+## [3.0.6] — 2026-05-01
+
+### Fixed
+- **Node 25 TLS SNI breakage on SMTP and IMAP** — Node 25 rejects IP literals
+  as the TLS `servername` before `checkServerIdentity` runs. Extracted a shared
+  `buildBridgeTlsOptions()` helper (`src/services/bridge-tls.ts`) that sets
+  `servername: "localhost"` on all three Bridge TLS option blocks (SMTP +
+  IMAP primary connect + IMAP idle reconnect). Four new unit tests added
+  (`bridge-tls.test.ts`). Closes / expands on #104.
+- **ReDoS in HTTP Bearer token regex** — greedy `.+` in
+  `src/transports/http.ts` replaced with `\S+` on a pre-trimmed string.
+- **`nodemailer` bumped** from `~8.0.2` → `~8.0.7` (#108) — picks up upstream
+  CVE fixes.
+- **aarch64 cross-compile CI** — Ubuntu 24 Noble split `libglib2.0-dev-bin`
+  into two `Architecture: all` packages; added both as a pre-install step so
+  the arm64 cross-dependency chain resolves cleanly.
+- **Stale `glib` direct dependency removed** from `native/tray/Cargo.toml` —
+  only `gtk` APIs are called; the explicit `glib = "0.18"` was unused and
+  triggered a Dependabot alert.
+
+### Changed
+- **CI matrix** — dropped `macos-13` (GitHub retired the Intel hosted runner
+  pool; jobs were queuing indefinitely). `macos-latest` (arm64) retained.
+- **Dependabot / vitest** bumped `vitest` and `@vitest/coverage-v8` from
+  4.1.4 → 4.1.5 (#105, #106).
+
 ## [3.0.5] — 2026-04-20
 
 ### Fixed
