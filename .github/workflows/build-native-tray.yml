@@ -27,6 +27,9 @@ on:
       - '.github/workflows/build-native-tray.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: ${{ matrix.target }}
