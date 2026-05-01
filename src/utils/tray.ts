@@ -111,11 +111,11 @@ interface NativeTrayModule { Tray: NativeTrayConstructor }
  * happens when no `.node` prebuilt for the current platform/arch is
  * present in `native/tray/`.
  *
- * Current packaging: the four committed prebuilts (linux-x64-gnu,
- * darwin-arm64, win32-x64-msvc, win32-arm64-msvc) ship inside the
- * main mailpouch npm package via `package.json`'s `files` field.
- * Targets that haven't been built yet (linux-arm64-gnu, darwin-x64)
- * fall through to the systray2 backend. A future PR may switch to
+ * Current packaging: the five committed prebuilts (linux-x64-gnu,
+ * linux-arm64-gnu, darwin-arm64, win32-x64-msvc, win32-arm64-msvc)
+ * ship inside the main mailpouch npm package via `package.json`'s
+ * `files` field. The darwin-x64 target is not yet built and falls
+ * through to the systray2 backend. A future PR may switch to
  * the napi-rs-standard pattern of one `@mailpouch/tray-native-*`
  * subpackage per target wired via `optionalDependencies` — keeping
  * the install size small for end users — but for now everything

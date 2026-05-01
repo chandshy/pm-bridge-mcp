@@ -63,7 +63,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **1,592 tests passing** (Vitest); zero `any` type annotations in production source.
+- **1,592 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
 
 ---
 
@@ -171,12 +171,12 @@ The **6-step wizard** walks you through everything automatically:
 
 1. **Welcome** — overview, ToS acknowledgement, and prerequisites checklist
 2. **Bridge health check** — live TCP test to ports 1025 and 1143; blocks progress until Bridge is reachable
-3. **Credentials** — your Proton Mail address and Bridge password (Bridge app → Settings → IMAP/SMTP → Password — this is **not** your Proton login password)
+3. **Account** — your Proton Mail address and Bridge password (Bridge app → Settings → IMAP/SMTP → Password — this is **not** your Proton login password)
 4. **Permission preset** — choose what the AI is allowed to do (see table below)
 5. **Review** — confirm your settings before saving
 6. **Done** — displays the exact JSON snippet to paste into your MCP client config; optionally writes it for you automatically
 
-Settings are saved to `~/.mailpouch.json` with mode `0600` (owner read/write only). Bridge passwords, OAuth admin passwords, and Pass PATs prefer the OS keychain when available.
+Settings are saved to `~/.mailpouch.json` with mode `0600` (owner read/write only). The Bridge password and SMTP token prefer the OS keychain when available.
 
 ---
 
@@ -397,7 +397,9 @@ npx mailpouch-settings --no-open     # start server but don't auto-open browser
 Tabs:
 
 - **Setup** — credentials, SMTP/IMAP hosts and ports, Bridge TLS certificate, remote/HTTP mode, OAuth admin password, SimpleLogin / Pass tokens, debug mode
+- **Accounts** — per-account Bridge credentials; hot-swap the active account
 - **Permissions** — preset selector, per-tool enable/rate-limit toggles, tool-tier (`core` / `extended` / `complete`), destructive-confirm toggle
+- **Agents** — per-client (OAuth `client_id`) approvable grants with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding
 - **Status** — server info, MCP config snippet, live connectivity check, escalation audit log, config reset
 
 Pending escalation requests appear as a full-page banner above the tabs. A **Logs** tab appears automatically when debug mode is enabled. Changes propagate to the running MCP server within 15 s — no restart required.
@@ -423,10 +425,10 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 | Injection prevention | CRLF stripped from all SMTP headers, subjects, filenames, custom headers |
 | TLS-strict Bridge | Refuses to connect to localhost Bridge without a pinned cert by default |
 | Bridge version floor | Warns when Bridge < `3.22.0` (FIDO2 + 50 MB import cap hardening) |
-| SMTP backoff | Exponential backoff on abuse-signal SMTP responses (4xx 421/450/451 throttle codes) |
+| SMTP backoff | Exponential backoff on abuse-signal SMTP responses (4xx 421/450/454 throttle codes) |
 | Config file isolation | Mode `0600`; preset and tool names validated on load; config schema versioned |
 | Memory safety | Email cache capped at 500 entries / 50 MB; rate-limiter buckets evicted when idle (fully refilled) |
-| Keychain storage | OS keychain preferred for Bridge password, OAuth admin password, Pass PAT |
+| Keychain storage | OS keychain preferred for Bridge password and SMTP token |
 
 **What agents cannot do:**
 - Approve their own escalation requests
