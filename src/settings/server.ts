@@ -351,16 +351,6 @@ legend {
 .field.has-error .err-msg   { display: block; }
 .field.has-error input      { border-color: var(--danger); }
 
-/* show/hide password wrapper */
-.pw-wrap { position: relative; }
-.pw-wrap input { padding-right: 42px; }
-.pw-toggle {
-  position: absolute; right: 11px; top: 50%; transform: translateY(-50%);
-  background: none; border: none; cursor: pointer; color: var(--muted);
-  padding: 3px; display: flex; align-items: center; font-size: 15px;
-  transition: color .15s;
-}
-.pw-toggle:hover { color: var(--text2); }
 
 .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .row-3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px; }
@@ -1137,25 +1127,17 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             Bridge password
             <span style="color:var(--muted);font-weight:400">(from the Bridge app)</span>
           </label>
-          <div class="pw-wrap">
-            <input type="password" id="wiz-password" placeholder="Bridge password"
-              autocomplete="current-password" aria-required="true"
-              oninput="wizClearError('wiz-password')">
-            <button class="pw-toggle" onclick="togglePw('wiz-password',this)" type="button"
-              aria-label="Show/hide password">👁</button>
-          </div>
+          <input type="password" id="wiz-password" placeholder="Bridge password"
+            autocomplete="current-password" aria-required="true"
+            oninput="wizClearError('wiz-password')">
           <div class="hint">Bridge app → Settings → IMAP/SMTP → Password</div>
           <div class="err-msg" id="err-wiz-password">Please enter your Bridge password.</div>
         </div>
 
         <div class="field" id="smtp-token-field" style="display:none">
           <label for="wiz-smtp-token">SMTP token <span style="color:var(--muted);font-weight:400">(required for direct smtp.protonmail.ch)</span></label>
-          <div class="pw-wrap">
-            <input type="password" id="wiz-smtp-token" placeholder="SMTP token from Bridge settings"
-              autocomplete="off" aria-label="SMTP token">
-            <button class="pw-toggle" onclick="togglePw('wiz-smtp-token',this)" type="button"
-              aria-label="Show/hide SMTP token">👁</button>
-          </div>
+          <input type="password" id="wiz-smtp-token" placeholder="SMTP token from Bridge settings"
+            autocomplete="off" aria-label="SMTP token">
           <div class="hint">Required for paid plans using direct smtp.protonmail.ch. Leave blank for Bridge.</div>
         </div>
 
@@ -1399,10 +1381,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           </div>
           <div class="field">
             <label for="password">Bridge password <span style="color:var(--muted);font-weight:400">(from Bridge app)</span></label>
-            <div class="pw-wrap">
-              <input type="password" id="password" placeholder="Enter new password" autocomplete="current-password">
-              <button class="pw-toggle" onclick="togglePw('password',this)" type="button" aria-label="Show/hide password">👁</button>
-            </div>
+            <input type="password" id="password" placeholder="Enter new password" autocomplete="current-password">
             <div class="hint">Leave blank to keep the saved value.</div>
           </div>
         </div>
@@ -1433,10 +1412,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <div id="smtp-token-row">
           <div class="field" id="setup-smtp-token-field" style="display:none">
             <label for="smtp-token">SMTP token <span style="color:var(--muted);font-weight:400">(required for direct)</span></label>
-            <div class="pw-wrap">
-              <input type="password" id="smtp-token" placeholder="Generated in Bridge Settings → IMAP/SMTP">
-              <button class="pw-toggle" onclick="togglePw('smtp-token',this)" type="button" aria-label="Show/hide SMTP token">👁</button>
-            </div>
+            <input type="password" id="smtp-token" placeholder="Generated in Bridge Settings → IMAP/SMTP">
             <div class="hint">Leave blank to keep the saved value.</div>
           </div>
         </div>
@@ -2048,10 +2024,15 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     const method = isEdit ? 'PATCH' : 'POST';
     const r = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CSRF || '' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
       body: JSON.stringify(body),
     });
-    if (!r.ok) { alert('Save failed: ' + (await r.text())); return; }
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Save failed: ' + (errBody?.error || r.status));
+      return;
+    }
     closeAccountForm();
     refreshAccounts();
   };
@@ -2060,9 +2041,14 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     if (!confirm('Switching the active account requires a server restart. Continue?')) return;
     const r = await fetch('/api/accounts/' + encodeURIComponent(id) + '/activate', {
       method: 'POST',
-      headers: { 'X-CSRF-Token': window.CSRF || '' },
+      headers: { 'X-CSRF-Token': CSRF },
     });
-    if (!r.ok) { alert('Activate failed: ' + (await r.text())); return; }
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Activate failed: ' + (errBody?.error || r.status));
+      return;
+    }
     alert('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).');
     refreshAccounts();
   };
@@ -2071,9 +2057,14 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     if (!confirm('Delete this account? This removes the server\u2019s ability to connect to it. Active account cannot be deleted.')) return;
     const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
       method: 'DELETE',
-      headers: { 'X-CSRF-Token': window.CSRF || '' },
+      headers: { 'X-CSRF-Token': CSRF },
     });
-    if (!r.ok) { alert('Delete failed: ' + (await r.text())); return; }
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Delete failed: ' + (errBody?.error || r.status));
+      return;
+    }
     refreshAccounts();
   };
 
@@ -2596,16 +2587,6 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     btn.textContent = '✓ Stopped';
     toast('Settings server stopped.', 'ok');
     setTimeout(() => { document.body.innerHTML = '<div style="font-family:sans-serif;color:#ccc;background:#0f0e1a;min-height:100vh;display:flex;align-items:center;justify-content:center;font-size:18px">Server stopped. Close this tab.</div>'; }, 1500);
-  };
-
-  // ── Shared: show/hide password ────────────────────────────────────────────
-  window.togglePw = function(id, btn) {
-    const inp = document.getElementById(id);
-    if (!inp) return;
-    const show = inp.type === 'password';
-    inp.type = show ? 'text' : 'password';
-    btn.textContent = show ? '🙈' : '👁';
-    btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
   };
 
   // ══ SETTINGS TAB LOGIC ════════════════════════════════════════════════════
@@ -3590,10 +3571,15 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     };
     const r = await fetch('/api/agents/' + encodeURIComponent(currentClientId) + '/approve', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CSRF || '' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
       body: JSON.stringify(body),
     });
-    if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Approve failed: ' + (errBody?.error || r.status));
+      return;
+    }
     closeGrantModal();
     if (typeof refreshAgents === 'function') refreshAgents();
   };

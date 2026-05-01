@@ -42,6 +42,7 @@ vi.mock("fs", async () => {
       diskByPath.delete(String(from));
       diskByPath.set(String(to), s);
     }),
+    statSync: vi.fn(),   // returns undefined → mtime check throws → cache bypassed
     appendFile: vi.fn((_path: string, _data: string, _enc: string, cb: () => void) => cb()),
   };
 });

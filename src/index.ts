@@ -37,7 +37,7 @@ import {
 
 import { ProtonMailConfig, EmailMessage } from "./types/index.js";
 import { SMTPService } from "./services/smtp-service.js";
-import { SimpleIMAPService } from "./services/simple-imap-service.js";
+import { SimpleIMAPService, stripHtml } from "./services/simple-imap-service.js";
 import { SimpleLoginService } from "./services/simplelogin-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
@@ -80,6 +80,8 @@ function describeDestructivePreview(tool: string, args: Record<string, unknown>)
       return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Trash.`;
     case "move_to_spam":
       return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Spam.`;
+    case "delete_folder":
+      return `Would permanently delete folder ${String(args.folderName ?? "(missing)")} and all emails inside it. This cannot be undone.`;
     case "alias_delete":
       return `Would permanently delete SimpleLogin alias ${String(args.aliasId ?? "(missing)")}. This cannot be undone.`;
     case "pass_get":
@@ -97,7 +99,6 @@ function describeDestructivePreview(tool: string, args: Record<string, unknown>)
 function confirmGateFallbackResponse(name: string, preview: string): {
   content: Array<{ type: "text"; text: string }>;
   isError: boolean;
-  structuredContent: Record<string, unknown>;
 } {
   return {
     content: [{
@@ -109,8 +110,7 @@ function confirmGateFallbackResponse(name: string, preview: string): {
         `{ "confirmed": true } — the user will see the confirmation flag in the tool call and can cancel it. ` +
         `Set requireDestructiveConfirm: false in ~/.mailpouch.json to disable this guard system-wide.`,
     }],
-    isError: false,
-    structuredContent: { success: false, confirmationRequired: true, tool: name, preview },
+    isError: true,
   };
 }
 import { sanitizeText } from "./settings/security.js";
@@ -196,7 +196,7 @@ function recordFromEmail(m: EmailMessage): FtsRecord {
     from: m.from ?? "",
     to: toAll,
     folder: m.folder ?? "",
-    body: (m.body ?? m.bodyPreview ?? "").slice(0, 200_000),
+    body: stripHtml(m.body ?? m.bodyPreview ?? "").slice(0, 200_000),
     dateEpoch: Math.floor((m.date?.getTime?.() ?? 0) / 1000),
   };
 }
@@ -495,7 +495,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return {
       content: [{ type: "text" as const, text: `Unknown account_id: ${requestedAccountId}` }],
       isError: true,
-      structuredContent: { success: false, reason: "unknown_account_id", requestedAccountId },
     };
   }
 
@@ -528,7 +527,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{ type: "text" as const, text: `Blocked: this agent's grant is bound to account ${boundAccountId}.` }],
         isError: true,
-        structuredContent: { success: false, reason: "account_mismatch", expected: boundAccountId, requested: requestedAccountId },
       };
     }
 
@@ -557,7 +555,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{ type: "text" as const, text: `Blocked by agent grant: ${grantResult.reason}` }],
         isError: true,
-        structuredContent: { success: false, reason: grantResult.reason, clientId: caller.clientId },
       };
     }
   }
@@ -587,7 +584,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return {
       content: [{ type: "text" as const, text: `Blocked: ${permResult.reason}` }],
       isError: true,
-      structuredContent: { success: false, reason: permResult.reason },
     };
   }
 
@@ -615,8 +611,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             logger.info(`Destructive tool '${name}' cancelled via elicitation (${result.action})`, "MCPServer");
             return {
               content: [{ type: "text" as const, text: `Cancelled: user ${result.action}d the confirmation prompt for '${name}'.` }],
-              isError: false,
-              structuredContent: { success: false, cancelled: true, action: result.action, tool: name },
+              isError: true,
             };
           }
           logger.info(`Destructive tool '${name}' confirmed via elicitation`, "MCPServer");
@@ -664,7 +659,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
       return {
         content: [{ type: "text" as const, text: JSON.stringify(errorStructured) }],
-        structuredContent: errorStructured,
         isError: true,
       };
     }
@@ -758,7 +752,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     return {
       content: [{ type: "text" as const, text: `Error: ${msg}` }],
-      structuredContent: { success: false, reason: msg },
       isError: true,
     };
   } finally {
@@ -1981,16 +1974,12 @@ async function main() {
             logger.debug(`Background sync: ${inbox.length} inbox, ${sent.length} sent`, 'Scheduler');
 
             // FTS incremental upsert — ride the same sync to keep the local
-            // search index fresh without a manual fts_rebuild call. Cheap:
-            // upsert is idempotent on id and we cap body size at 200 KB.
-            // Silently no-ops if better-sqlite3 isn't installed.
+            // search index fresh without a manual fts_rebuild call.
             try {
               const fts = getFts();
               fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
             } catch (err: unknown) {
-              if (!(err instanceof FtsUnavailableError)) {
-                logger.debug('FTS incremental upsert failed', 'Scheduler', err);
-              }
+              logger.debug('FTS incremental upsert failed', 'Scheduler', err);
             }
 
             // Auto reply-detection — scan inbox for messages whose

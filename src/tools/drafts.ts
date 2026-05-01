@@ -313,7 +313,7 @@ export const handlers: Record<string, ToolHandler> = {
       references: args.references as string[] | undefined,
     });
     if (!draftResult.success) {
-      return { content: [{ type: "text" as const, text: `Failed to save draft: ${draftResult.error}` }], isError: true, structuredContent: { success: false, reason: draftResult.error } };
+      return { content: [{ type: "text" as const, text: `Failed to save draft: ${draftResult.error}` }], isError: true };
     }
     return ok({ success: true, uid: draftResult.uid }, `Draft saved (UID: ${draftResult.uid ?? "unknown"})`);
   },
@@ -375,7 +375,7 @@ export const handlers: Record<string, ToolHandler> = {
         `Scheduled for ${sendAt.toISOString()} (ID: ${schedId})`);
     } catch (err: unknown) {
       const errMsg = safeErrorMessage(err);
-      return { content: [{ type: "text" as const, text: errMsg }], isError: true, structuredContent: { success: false, reason: errMsg } };
+      return { content: [{ type: "text" as const, text: errMsg }], isError: true };
     }
   },
 
@@ -441,7 +441,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const cancelled = schedulerService.cancel(rawCancelId);
     if (!cancelled) {
-      return { content: [{ type: "text" as const, text: "Not found or not pending" }], isError: true, structuredContent: { success: false, reason: "Not found or not pending" } };
+      return { content: [{ type: "text" as const, text: "Not found or not pending" }], isError: true };
     }
     return actionOk();
   },
@@ -455,7 +455,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const msg = await imapService.getEmailById(remEmailId);
     if (!msg) {
-      return { content: [{ type: "text" as const, text: "Source message not found" }], isError: true, structuredContent: { success: false, reason: "Source message not found" } };
+      return { content: [{ type: "text" as const, text: "Source message not found" }], isError: true };
     }
     const headers = msg.headers ?? {};
     const rawMsgId = Array.isArray(headers["message-id"]) ? headers["message-id"][0] : (headers["message-id"] as string | undefined);
@@ -499,7 +499,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!rid) throw new McpError(ErrorCode.InvalidParams, "reminder_id must be a non-empty string.");
     const cancelled = reminderService.cancel(rid);
     if (!cancelled) {
-      return { content: [{ type: "text" as const, text: "Reminder not found or already fired" }], isError: true, structuredContent: { success: false, reason: "Not found or already fired" } };
+      return { content: [{ type: "text" as const, text: "Reminder not found or already fired" }], isError: true };
     }
     return actionOk();
   },

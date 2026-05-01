@@ -58,6 +58,22 @@ interface ImapBodyNode {
  * @param maxLength Maximum length (default: 300 characters)
  * @returns Truncated body with ellipsis if needed
  */
+export function stripHtml(html: string): string {
+  if (!html) return '';
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function truncateBody(body: string, maxLength: number = 300): string {
   if (!body) return '';
 
@@ -685,7 +701,8 @@ export class SimpleIMAPService {
             // Decode the text preview from bodyPart '1'
             const rawPart = message.bodyParts?.get('1');
             const bodyText = rawPart ? rawPart.toString('utf-8') : '';
-            const bodyPreview = truncateBody(bodyText);
+            const looksLikeHtml = /<[a-z][\s\S]*>/i.test(bodyText);
+            const bodyPreview = truncateBody(looksLikeHtml ? stripHtml(bodyText) : bodyText);
 
             // Determine attachment count from bodyStructure without downloading content
             const attachmentCount = this.countAttachments(message.bodyStructure);
@@ -717,7 +734,7 @@ export class SimpleIMAPService {
               subject: env.subject || '(No Subject)',
               body: bodyPreview,
               bodyPreview,
-              isHtml: false,  // envelope fetch doesn't tell us; full fetch via getEmailById will
+              isHtml: looksLikeHtml,
               date: env.date ?? new Date(),
               folder,
               isRead: message.flags?.has('\\Seen') ?? false,
@@ -795,6 +812,7 @@ export class SimpleIMAPService {
             const parsed = await simpleParser(message.source);
 
             const fullBody = parsed.text || parsed.html || '';
+            const plainBody = parsed.text || stripHtml(parsed.html || '');
 
             // Extract content-type for PGP detection
             const contentType = parsed.headers?.get('content-type');
@@ -810,7 +828,7 @@ export class SimpleIMAPService {
               cc: parsed.cc?.text ? [parsed.cc.text] : [],
               subject: parsed.subject || '(No Subject)',
               body: fullBody, // Full body for individual email view
-              bodyPreview: truncateBody(fullBody),
+              bodyPreview: truncateBody(plainBody),
               isHtml: !!parsed.html,
               date: parsed.date || new Date(),
               folder: folder.path,
@@ -1136,6 +1154,7 @@ export class SimpleIMAPService {
             if (!message.source) continue;
             const parsed = await simpleParser(message.source);
             const fullBody = parsed.text || parsed.html || '';
+            const plainBody = parsed.text || stripHtml(parsed.html || '');
             return {
               id: message.uid.toString(),
               from: parsed.from?.text || '',
@@ -1143,7 +1162,7 @@ export class SimpleIMAPService {
               cc: parsed.cc?.text ? [parsed.cc.text] : [],
               subject: parsed.subject || '(No Subject)',
               body: fullBody,
-              bodyPreview: truncateBody(fullBody),
+              bodyPreview: truncateBody(plainBody),
               isHtml: !!parsed.html,
               date: parsed.date || new Date(),
               folder: folder.path,

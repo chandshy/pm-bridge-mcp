@@ -86,11 +86,22 @@ export class FtsIndexService {
     count: SqliteStatement;
   };
 
+  // Increment when the body format changes so stale HTML/raw indexes auto-clear.
+  static readonly BODY_FORMAT_VERSION = 2;
+
   constructor(db: SqliteDatabase, dbPath: string) {
     this.db = db;
     this.dbPath = dbPath;
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    const row = this.db.prepare(`SELECT value FROM _meta WHERE key = 'body_format_version'`).get() as { value: string } | undefined;
+    const storedVersion = row ? parseInt(row.value, 10) : 0;
+    if (storedVersion !== FtsIndexService.BODY_FORMAT_VERSION) {
+      logger.info(`FTS body format changed (${storedVersion} → ${FtsIndexService.BODY_FORMAT_VERSION}), clearing index`, "FtsIndexService");
+      this.db.exec(`DROP TABLE IF EXISTS messages`);
+      this.db.prepare(`INSERT OR REPLACE INTO _meta (key, value) VALUES ('body_format_version', ?)`).run(String(FtsIndexService.BODY_FORMAT_VERSION));
+    }
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS messages USING fts5(
         id UNINDEXED,
@@ -209,22 +220,11 @@ export class FtsIndexService {
 }
 
 /**
- * Build an FtsIndexService. Resolves better-sqlite3 lazily so importing this
- * module does not crash when the optional dep is missing. Throws
- * FtsUnavailableError with an install hint when the native binding cannot
- * be loaded.
+ * Build an FtsIndexService. Throws FtsUnavailableError when the database
+ * file cannot be opened (disk full, permissions, corruption).
  */
 export function openFtsIndex(dbPath: string): FtsIndexService {
-  let Database: DatabaseConstructor;
-  try {
-    Database = require("better-sqlite3") as unknown as DatabaseConstructor;
-  } catch (err) {
-    throw new FtsUnavailableError(
-      "FTS index requires 'better-sqlite3' (optional dependency). Install with " +
-      "`npm install better-sqlite3` in the mailpouch directory. " +
-      `Underlying error: ${(err as Error).message}`,
-    );
-  }
+  const Database = require("better-sqlite3") as unknown as DatabaseConstructor;
   try {
     const db = new Database(dbPath);
     return new FtsIndexService(db, dbPath);

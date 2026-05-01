@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.8] — 2026-05-01
+
+### Security
+- **`delete_folder` added to `DESTRUCTIVE_TOOLS`** — the tool had
+  `destructiveHint: true` in its annotations but was missing from the
+  confirmation-gate set, allowing a single unconfirmed call to permanently
+  delete a folder and all its emails. Now requires `{ confirmed: true }` or
+  MCP elicitation like `delete_email`.
+
+### Fixed
+- **`better-sqlite3` promoted to hard dependency** — moved from
+  `optionalDependencies` to `dependencies`. FTS is a core feature; a missing
+  native binding now surfaces immediately at the first FTS call rather than
+  producing a silent degraded state.
+- **FTS rebuild race condition** — concurrent `fts_rebuild` calls could
+  interleave `clear()` and `upsertMany()`, leaving the index empty mid-rebuild.
+  A module-level `_ftsRebuilding` flag returns `isError: true` immediately to
+  any second caller.
+- **`loadConfig()` per-call file reads eliminated** — was reading and parsing
+  `~/.mailpouch.json` from disk on every tool dispatch. Now cached with a 15 s
+  TTL; the cache is invalidated immediately on `saveConfig()` and detects
+  external edits via mtime on the next TTL boundary.
+- **Analytics `storageUsedMB` crash** (`body?.length ?? 0`) — `trimForAnalytics()`
+  sets `body: undefined`; `get_email_stats` accessed `email.body.length`
+  unconditionally. Harness test now asserts all numeric stat fields are present
+  and non-negative.
+
 ## [3.0.7] — 2026-05-01
 
 ### Fixed

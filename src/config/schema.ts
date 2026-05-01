@@ -390,6 +390,7 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "delete_email",
   "bulk_delete",
   "bulk_delete_emails",
+  "delete_folder",
   "move_to_trash",
   "move_to_spam",
   "alias_delete",

@@ -25,6 +25,8 @@ import {
 import { extractActionItems, parseIcs } from "../services/content-parser.js";
 import { FtsUnavailableError } from "../services/fts-service.js";
 import type { FtsIndexService } from "../services/fts-service.js";
+
+let _ftsRebuilding = false;
 import type { EmailMessage, EmailFolder } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
@@ -491,7 +493,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.cursor) {
       const decoded = decodeCursor(args.cursor as string);
       if (!decoded || decoded.folder !== folder) {
-        return { content: [{ type: "text" as const, text: "Invalid or expired cursor" }], isError: true, structuredContent: { success: false, reason: "Invalid cursor" } };
+        return { content: [{ type: "text" as const, text: "Invalid or expired cursor" }], isError: true };
       }
       offset = decoded.offset;
     }
@@ -512,7 +514,7 @@ export const handlers: Record<string, ToolHandler> = {
     const rawEmailId = requireNumericEmailId(args.emailId);
     const email = await imapService.getEmailById(rawEmailId);
     if (!email) {
-      return { content: [{ type: "text" as const, text: "Email not found" }], isError: true, structuredContent: { success: false, reason: "Resource not found" } };
+      return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
     if (email.body && email.body.length > limits.maxEmailBodyChars) {
       const originalLen = email.body.length;
@@ -656,7 +658,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.cursor) {
       const decoded = decodeCursor(args.cursor as string);
       if (!decoded || decoded.folder !== lblFolder) {
-        return { content: [{ type: "text" as const, text: "Invalid or expired cursor" }], isError: true, structuredContent: { success: false, reason: "Invalid cursor" } };
+        return { content: [{ type: "text" as const, text: "Invalid or expired cursor" }], isError: true };
       }
       lblOffset = decoded.offset;
     }
@@ -684,7 +686,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const attResult = await imapService.downloadAttachment(rawAttEmailId, rawAttIdx);
     if (!attResult) {
-      return { content: [{ type: "text" as const, text: "Attachment not found" }], isError: true, structuredContent: { success: false, reason: "Attachment not found" } };
+      return { content: [{ type: "text" as const, text: "Attachment not found" }], isError: true };
     }
     const encodedLen = typeof attResult.content === "string" ? attResult.content.length : 0;
     if (encodedLen > limits.maxAttachmentBytes) {
@@ -703,7 +705,6 @@ export const handlers: Record<string, ToolHandler> = {
       };
       return {
         content: [{ type: "text" as const, text: `Attachment "${attResult.filename}" is too large (${attResult.size} bytes raw, ${encodedLen} bytes encoded). Limit: ${limits.maxAttachmentBytes} bytes. Increase maxAttachmentBytes in Settings → Debug Logs → Response Limits to download larger files.` }],
-        structuredContent: attError,
         isError: true,
       };
     }
@@ -718,7 +719,7 @@ export const handlers: Record<string, ToolHandler> = {
       : 50;
     const seed = await imapService.getEmailById(threadEmailId);
     if (!seed) {
-      return { content: [{ type: "text" as const, text: "Seed message not found" }], isError: true, structuredContent: { success: false, reason: "Seed message not found" } };
+      return { content: [{ type: "text" as const, text: "Seed message not found" }], isError: true };
     }
     const normalizeSubject = (s: string) => s.replace(/^(\s*(re|fwd|fw):\s*)+/i, "").trim();
     const normalized = normalizeSubject(seed.subject || "");
@@ -774,11 +775,7 @@ export const handlers: Record<string, ToolHandler> = {
     const { args, ok, getFts } = ctx;
     const q = typeof args.query === "string" ? args.query.trim() : "";
     if (!q) throw new McpError(ErrorCode.InvalidParams, "query must be a non-empty string.");
-    let fts: FtsIndexService;
-    try { fts = getFts(); } catch (err: unknown) {
-      if (err instanceof FtsUnavailableError) throw new McpError(ErrorCode.InvalidRequest, err.message);
-      throw err;
-    }
+    const fts = getFts();
     const hits = fts.search({
       query: q,
       limit: typeof args.limit === "number" ? args.limit : undefined,
@@ -799,16 +796,20 @@ export const handlers: Record<string, ToolHandler> = {
 
   fts_rebuild: async (ctx) => {
     const { ok, getFts, getAnalyticsEmails, recordFromEmail } = ctx;
-    let fts: FtsIndexService;
-    try { fts = getFts(); } catch (err: unknown) {
-      if (err instanceof FtsUnavailableError) throw new McpError(ErrorCode.InvalidRequest, err.message);
-      throw err;
+    if (_ftsRebuilding) {
+      return { content: [{ type: "text" as const, text: "FTS rebuild already in progress — try again in a moment." }], isError: true };
     }
-    const { inbox, sent } = await getAnalyticsEmails();
-    fts.clear();
-    const indexed = fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
-    const stats = fts.stats();
-    return ok({ indexed, messageCount: stats.messageCount, dbPath: stats.dbPath });
+    _ftsRebuilding = true;
+    try {
+      const fts = getFts();
+      const { inbox, sent } = await getAnalyticsEmails();
+      fts.clear();
+      const indexed = fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
+      const stats = fts.stats();
+      return ok({ indexed, messageCount: stats.messageCount, dbPath: stats.dbPath });
+    } finally {
+      _ftsRebuilding = false;
+    }
   },
 
   fts_status: async (ctx) => {
@@ -830,7 +831,7 @@ export const handlers: Record<string, ToolHandler> = {
     const aiEmailId = requireNumericEmailId(args.email_id, "email_id");
     const email = await imapService.getEmailById(aiEmailId);
     if (!email) {
-      return { content: [{ type: "text" as const, text: "Email not found" }], isError: true, structuredContent: { success: false, reason: "Email not found" } };
+      return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
     const action_items = extractActionItems(email.body || "");
     return ok({ action_items });
@@ -841,7 +842,7 @@ export const handlers: Record<string, ToolHandler> = {
     const emEmailId = requireNumericEmailId(args.email_id, "email_id");
     const email = await imapService.getEmailById(emEmailId);
     if (!email) {
-      return { content: [{ type: "text" as const, text: "Email not found" }], isError: true, structuredContent: { success: false, reason: "Email not found" } };
+      return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
     let icsText: string | null = null;
     for (const att of email.attachments ?? []) {

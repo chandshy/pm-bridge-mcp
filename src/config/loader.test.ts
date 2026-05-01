@@ -13,6 +13,7 @@ vi.mock("fs", async (importOriginal) => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
+    statSync: vi.fn(),   // returns undefined by default → mtime check throws → cache invalidated
     appendFile: vi.fn((_path: string, _data: string, _enc: string, cb: () => void) => cb()),
   };
 });

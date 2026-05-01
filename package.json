@@ -1,6 +1,6 @@
 {
   "name": "mailpouch",
-  "version": "3.0.7",
+  "version": "3.0.8",
   "description": "mailpouch — MCP server that exposes Proton Mail via Proton Bridge. 69 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
   "type": "module",
   "main": "dist/index.js",
@@ -14,9 +14,10 @@
     "build:clean": "npm run clean && npm run build",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test": "vitest run --exclude test/agent-harness.test.ts",
+    "test:watch": "vitest --exclude test/agent-harness.test.ts",
+    "test:coverage": "vitest run --coverage --exclude test/agent-harness.test.ts",
+    "test:harness": "vitest run test/agent-harness.test.ts --reporter=verbose --testTimeout=30000",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build:clean && npm run lint && npm run test",
     "lint": "tsc --noEmit",
@@ -73,13 +74,13 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "~1.29.0",
+    "better-sqlite3": "^12.9.0",
     "imapflow": "~1.3.1",
     "mailparser": "~3.9.8",
     "nodemailer": "~8.0.7"
   },
   "optionalDependencies": {
     "@napi-rs/keyring": "~1.2.0",
-    "better-sqlite3": "^12.9.0",
     "systray2": "~2.1.4"
   },
   "devDependencies": {

@@ -8,7 +8,7 @@
  * to reduce the risk of credential exposure.
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, statSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, resolve, normalize } from "path";
 import { randomBytes } from "crypto";
@@ -158,13 +158,39 @@ export function defaultConfig(): ServerConfig {
 
 // ─── Load / Save ───────────────────────────────────────────────────────────────
 
+const CONFIG_CACHE_TTL_MS = 15_000;
+let _configCache: { config: ServerConfig | null; loadedAt: number; mtimeMs: number } | null = null;
+
+/** Invalidate the in-process config cache (called after saveConfig). */
+export function invalidateConfigCache(): void {
+  _configCache = null;
+}
+
 export function configExists(): boolean {
   return existsSync(getConfigPath());
 }
 
 export function loadConfig(): ServerConfig | null {
+  const path = getConfigPath();
+
+  // Serve from cache when it is fresh and the file hasn't been modified on disk.
+  if (_configCache !== null) {
+    const age = Date.now() - _configCache.loadedAt;
+    if (age < CONFIG_CACHE_TTL_MS) {
+      try {
+        const mtimeMs = statSync(path).mtimeMs;
+        if (mtimeMs === _configCache.mtimeMs) return _configCache.config;
+        // mtime changed — fall through to reload
+      } catch {
+        // statSync failed (file deleted, permission error, or test mock).
+        // Invalidate and reload rather than returning a potentially stale null.
+        _configCache = null;
+      }
+    }
+  }
+
   const tags: { found?: boolean } = {};
-  return tracer.spanSync('config.load', tags, () => {
+  const config = tracer.spanSync('config.load', tags, () => {
   const path = getConfigPath();
   if (!existsSync(path)) {
     tags.found = false;
@@ -279,6 +305,12 @@ export function loadConfig(): ServerConfig | null {
     return null;
   }
   }); // end tracer.spanSync('config.load')
+
+  // Populate cache with the mtime at the point we read the file.
+  let mtimeMs = 0;
+  try { mtimeMs = statSync(path).mtimeMs; } catch { /* file gone */ }
+  _configCache = { config, loadedAt: Date.now(), mtimeMs };
+  return config;
 }
 
 export function saveConfig(config: ServerConfig): void {
@@ -293,6 +325,7 @@ export function saveConfig(config: ServerConfig): void {
   const tmp = `${dest}.${randomBytes(8).toString("hex")}.tmp`;
   writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });
   renameSync(tmp, dest);
+  invalidateConfigCache();
   }); // end tracer.spanSync('config.save')
 }
 

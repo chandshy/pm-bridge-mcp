@@ -166,7 +166,7 @@ export class AnalyticsService {
 
     let totalBytes = 0;
     for (const email of allEmails) {
-      totalBytes += email.body.length;
+      totalBytes += email.body?.length ?? 0;
       if (email.attachments) {
         for (const att of email.attachments) {
           totalBytes += att.size;

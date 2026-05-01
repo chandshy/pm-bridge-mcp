@@ -157,7 +157,7 @@ export const handlers: Record<string, ToolHandler> = {
       attachments: args.attachments as EmailAttachment[] | undefined,
     });
     if (!result.success) {
-      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
+      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
     }
     return actionOk(result.messageId);
   },
@@ -179,7 +179,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const original = await imapService.getEmailById(emailId);
     if (!original) {
-      return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true, structuredContent: { success: false, reason: "Original email not found" } };
+      return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }
 
     const replyToAddress = original.from.match(/<([^>]+)>/)?.[1] ?? original.from.trim();
@@ -212,7 +212,7 @@ export const handlers: Record<string, ToolHandler> = {
     });
 
     if (!result.success) {
-      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
+      return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
     }
     if (result.success) {
       await imapService.setFlag(emailId, '\\Answered').catch(() => {});
@@ -228,7 +228,7 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const fwdOriginal = await imapService.getEmailById(fwdId);
     if (!fwdOriginal) {
-      return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true, structuredContent: { success: false, reason: "Original email not found" } };
+      return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }
 
     const fwdCleanSubject = fwdOriginal.subject.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
@@ -265,7 +265,7 @@ export const handlers: Record<string, ToolHandler> = {
     });
 
     if (!fwdResult.success) {
-      return { content: [{ type: "text" as const, text: "Forward failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
+      return { content: [{ type: "text" as const, text: "Forward failed" }], isError: true };
     }
     if (fwdResult.success) {
       await imapService.setFlag(fwdId, '$Forwarded').catch(() => {});
@@ -286,7 +286,7 @@ export const handlers: Record<string, ToolHandler> = {
       args.customMessage as string | undefined
     );
     if (!result.success) {
-      return { content: [{ type: "text" as const, text: "Test email failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
+      return { content: [{ type: "text" as const, text: "Test email failed" }], isError: true };
     }
     return actionOk(result.messageId);
   },
