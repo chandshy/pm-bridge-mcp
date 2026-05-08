@@ -2921,6 +2921,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       '<span class="tool-name">' + escHtml(tool) + '</span>' +
       '<span style="font-size:12px;color:var(--muted);flex:1">' + escHtml(label) + '</span>' +
       '<div class="rate-wrap">' +
+        '<label>Limit</label>' +
         '<input class="rate-input" type="number" min="1" max="9999" placeholder="∞" ' +
           'id="rate-' + escHtml(tool) + '" title="Max calls per window (blank = unlimited)">' +
         '<select class="rate-window" id="rate-window-' + escHtml(tool) + '" title="Rate limit time window">' +
