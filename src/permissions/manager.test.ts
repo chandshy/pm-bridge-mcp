@@ -208,7 +208,7 @@ describe("PermissionManager", () => {
       mockedLoadConfig.mockReturnValue(config);
       const manager = new PermissionManager();
       const status = manager.rateLimitStatus();
-      expect(status["delete_email"]).toEqual({ used: 0, limit: 5 });
+      expect(status["delete_email"]).toEqual({ used: 0, limit: 5, window: 'hour' });
     });
 
     it("returns used count matching the number of calls within the rolling window", () => {
@@ -222,7 +222,7 @@ describe("PermissionManager", () => {
       manager.check("delete_email");
       manager.check("delete_email");
       const status = manager.rateLimitStatus();
-      expect(status["delete_email"]).toEqual({ used: 3, limit: 10 });
+      expect(status["delete_email"]).toEqual({ used: 3, limit: 10, window: 'hour' });
     });
 
     it("does not include calls that have expired outside the 1-hour window", () => {
@@ -235,7 +235,7 @@ describe("PermissionManager", () => {
       // Advance past the 1-hour rolling window
       vi.advanceTimersByTime(60 * 60 * 1000 + 1);
       const status = manager.rateLimitStatus();
-      expect(status["delete_email"]).toEqual({ used: 0, limit: 10 });
+      expect(status["delete_email"]).toEqual({ used: 0, limit: 10, window: 'hour' });
     });
 
     it("returns empty object when config has no permissions.tools (fallback to {})", () => {

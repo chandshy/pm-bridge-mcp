@@ -9,7 +9,7 @@
  */
 
 import { loadConfig, defaultConfig } from "../config/loader.js";
-import { DEFAULT_RESPONSE_LIMITS, type ToolName, type ResponseLimits } from "../config/schema.js";
+import { DEFAULT_RESPONSE_LIMITS, type RateLimitWindow, type ToolName, type ResponseLimits } from "../config/schema.js";
 import { logger } from "../utils/logger.js";
 import { tracer } from "../utils/tracer.js";
 
@@ -25,6 +25,12 @@ export interface PermissionResult {
 }
 
 const CONFIG_CACHE_MS = 15_000;
+
+function windowMs_for(window: RateLimitWindow): number {
+  if (window === 'second') return 1_000;
+  if (window === 'minute') return 60_000;
+  return 3_600_000; // hour
+}
 
 export class PermissionManager {
   private rateBuckets = new Map<string, RateBucket>();
@@ -65,9 +71,10 @@ export class PermissionManager {
 
     const limit = perm.rateLimit;
     if (limit !== null && limit !== undefined && limit > 0) {
-      if (!this.consumeRateSlot(tool, limit)) {
-        logger.warn(`Rate limit reached for tool '${tool}' (limit: ${limit}/hour)`, "PermissionManager");
-        const reason = `'${tool}' rate limit of ${limit} calls/hour has been reached. Try again later or raise the limit in settings.`;
+      const window: RateLimitWindow = perm.rateLimitWindow ?? 'hour';
+      if (!this.consumeRateSlot(tool, limit, window)) {
+        logger.warn(`Rate limit reached for tool '${tool}' (limit: ${limit}/${window})`, "PermissionManager");
+        const reason = `'${tool}' rate limit of ${limit} calls/${window} has been reached. Try again later or raise the limit in settings.`;
         resultTags.allowed = false;
         resultTags.reason = reason;
         return { allowed: false, reason };
@@ -83,23 +90,24 @@ export class PermissionManager {
   /**
    * Return current call counts for each rate-limited tool (for the status UI).
    */
-  rateLimitStatus(): Record<string, { used: number; limit: number }> {
+  rateLimitStatus(): Record<string, { used: number; limit: number; window: RateLimitWindow }> {
     return tracer.spanSync('permission.rateLimitStatus', {}, () => {
     this.refreshConfigIfStale();
     const config = this.cachedConfig;
     if (!config) return {};
 
     const now = Date.now();
-    const windowStart = now - 60 * 60 * 1000;
-    const out: Record<string, { used: number; limit: number }> = {};
+    const out: Record<string, { used: number; limit: number; window: RateLimitWindow }> = {};
 
     for (const [tool, perm] of Object.entries(config.permissions?.tools ?? {})) {
       if (perm.rateLimit !== null && perm.rateLimit !== undefined) {
+        const window: RateLimitWindow = perm.rateLimitWindow ?? 'hour';
+        const windowMs = windowMs_for(window);
         const bucket = this.rateBuckets.get(tool);
         const used = bucket
-          ? bucket.timestamps.filter((ts) => ts > windowStart).length
+          ? bucket.timestamps.filter((ts) => ts > now - windowMs).length
           : 0;
-        out[tool] = { used, limit: perm.rateLimit };
+        out[tool] = { used, limit: perm.rateLimit, window };
       }
     }
     return out;
@@ -128,9 +136,9 @@ export class PermissionManager {
     }
   }
 
-  private consumeRateSlot(tool: string, limitPerHour: number): boolean {
+  private consumeRateSlot(tool: string, limit: number, window: RateLimitWindow): boolean {
     const now = Date.now();
-    const windowStart = now - 60 * 60 * 1000;
+    const windowStart = now - windowMs_for(window);
 
     let bucket = this.rateBuckets.get(tool);
     if (!bucket) {
@@ -138,10 +146,9 @@ export class PermissionManager {
       this.rateBuckets.set(tool, bucket);
     }
 
-    // Evict timestamps outside the rolling window
     bucket.timestamps = bucket.timestamps.filter((ts) => ts > windowStart);
 
-    if (bucket.timestamps.length >= limitPerHour) return false;
+    if (bucket.timestamps.length >= limit) return false;
 
     bucket.timestamps.push(now);
     return true;

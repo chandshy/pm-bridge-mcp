@@ -141,11 +141,15 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
 
 // ─── Permission Types ──────────────────────────────────────────────────────────
 
+export type RateLimitWindow = 'second' | 'minute' | 'hour';
+
 export interface ToolPermission {
   /** Whether the tool can be called at all */
   enabled: boolean;
-  /** Max calls per hour. null = unlimited. */
+  /** Max calls within the rateLimitWindow. null = unlimited. */
   rateLimit: number | null;
+  /** Rolling window for rateLimit enforcement. Defaults to 'hour' when absent. */
+  rateLimitWindow?: RateLimitWindow;
 }
 
 export const PERMISSION_PRESETS = ["full", "read_only", "supervised", "send_only", "custom"] as const;

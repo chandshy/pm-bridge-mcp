@@ -2920,9 +2920,13 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       '<span class="tool-name">' + escHtml(tool) + '</span>' +
       '<span style="font-size:12px;color:var(--muted);flex:1">' + escHtml(label) + '</span>' +
       '<div class="rate-wrap">' +
-        '<label>Limit/hr</label>' +
         '<input class="rate-input" type="number" min="1" max="9999" placeholder="∞" ' +
-          'id="rate-' + escHtml(tool) + '" title="Max calls per hour (blank = unlimited)">' +
+          'id="rate-' + escHtml(tool) + '" title="Max calls per window (blank = unlimited)">' +
+        '<select class="rate-window" id="rate-window-' + escHtml(tool) + '" title="Rate limit time window">' +
+          '<option value="second">/s</option>' +
+          '<option value="minute">/min</option>' +
+          '<option value="hour" selected>/hr</option>' +
+        '</select>' +
       '</div>' +
       '<label class="toggle-wrap">' +
         '<span class="toggle"><input type="checkbox" id="tool-' + escHtml(tool) + '" ' +
@@ -2945,8 +2949,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       const perm  = tools[tool] || { enabled: true, rateLimit: null };
       const cbEl  = document.getElementById('tool-' + tool);
       const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
       if (cbEl)   { cbEl.checked = perm.enabled !== false; toolEnabled[tool] = cbEl.checked; }
       if (rateEl) { rateEl.value = perm.rateLimit != null ? perm.rateLimit : ''; rateEl.disabled = !perm.enabled; toolRate[tool] = perm.rateLimit; }
+      if (winEl)  { winEl.value = perm.rateLimitWindow || 'hour'; winEl.disabled = !perm.enabled; }
     }
     for (const catKey of Object.keys(CATEGORIES)) { updateCategoryToggle(catKey); }
   }
@@ -2954,7 +2960,9 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   window.onToolToggle = function(tool, enabled) {
     toolEnabled[tool] = enabled;
     const rateEl = document.getElementById('rate-' + tool);
+    const winEl  = document.getElementById('rate-window-' + tool);
     if (rateEl) rateEl.disabled = !enabled;
+    if (winEl)  winEl.disabled  = !enabled;
     for (const [catKey, cat] of Object.entries(CATEGORIES)) {
       if (cat.tools.includes(tool)) { updateCategoryToggle(catKey); break; }
     }
@@ -3010,9 +3018,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     for (const tool of ALL_TOOLS) {
       const cbEl  = document.getElementById('tool-' + tool);
       const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
       const enabled  = cbEl ? cbEl.checked : true;
       const rateVal  = rateEl && rateEl.value.trim() !== '' ? parseInt(rateEl.value, 10) : null;
-      tools[tool] = { enabled, rateLimit: rateVal && rateVal > 0 ? rateVal : null };
+      const rateLimit = rateVal && rateVal > 0 ? rateVal : null;
+      const rateLimitWindow = winEl ? winEl.value : 'hour';
+      tools[tool] = { enabled, rateLimit, ...(rateLimit ? { rateLimitWindow } : {}) };
     }
     let preset = 'custom';
     document.querySelectorAll('.preset-btn').forEach(b => {
@@ -3038,7 +3049,11 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.getElementById('info-disabled').textContent = disabled.length ? disabled.join(', ') : 'None';
     const limited = ALL_TOOLS.filter(t => tools[t] && tools[t].rateLimit != null);
     document.getElementById('info-rate-limited').textContent =
-      limited.length ? limited.map(t => t + ' (' + tools[t].rateLimit + '/hr)').join(', ') : 'None';
+      limited.length ? limited.map(t => {
+        const w = tools[t].rateLimitWindow || 'hour';
+        const wLabel = w === 'second' ? 's' : w === 'minute' ? 'min' : 'hr';
+        return t + ' (' + tools[t].rateLimit + '/' + wLabel + ')';
+      }).join(', ') : 'None';
     var credStorageEl = document.getElementById('info-credential-storage');
     if (credStorageEl) {
       credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : c.credentialStorage === 'encrypted-file' ? 'Encrypted file' : 'Config file (plaintext)';
