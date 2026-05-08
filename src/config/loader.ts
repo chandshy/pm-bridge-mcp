@@ -66,9 +66,12 @@ const DEFAULT_TOOL_PERM: ToolPermission = { enabled: true, rateLimit: null };
  * Build a full permissions object from a named preset.
  *
  * full       — all tools enabled, no limits
- * read_only  — only reading / analytics / system tools enabled
- * supervised — all enabled; deletion capped at 5/hr, sending at 20/hr
- * send_only  — reading + sending only; no deletion, no folder writes
+ * read_only  — reading/analytics/system enabled; all writes blocked
+ * supervised — all tools enabled; reading unlimited; sending ≤200/hr,
+ *              schedule ≤100/hr, bulk actions ≤100/hr, deletion ≤20/hr,
+ *              folder delete ≤20/hr, server lifecycle ≤5/hr
+ * send_only  — reading unlimited; send/forward/schedule ≤50/hr;
+ *              actions, deletion, folder writes, and bulk ops disabled
  * custom     — same as full (caller modifies individual tools after)
  */
 export function buildPermissions(preset: PermissionPreset): ServerConfig["permissions"] {
@@ -92,28 +95,33 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
       tools[tool].enabled = allowed.has(tool);
     }
   } else if (preset === "supervised") {
-    // SimpleLogin write tools: cap creation + toggle + delete to keep a human
-    // in the loop even when the preset is otherwise permissive.
-    tools["alias_create_random"].rateLimit = 10;
-    tools["alias_create_custom"].rateLimit = 10;
-    tools["alias_toggle"].rateLimit = 20;
-    tools["alias_delete"].rateLimit = 5;
-    for (const tool of TOOL_CATEGORIES.deletion.tools) {
-      tools[tool].rateLimit = 5;
-    }
+    // Reading tools are safe — no rate limits.
+    // Sending: high cap.
     for (const tool of TOOL_CATEGORIES.sending.tools) {
+      tools[tool].rateLimit = 200;
+    }
+    tools["schedule_email"].rateLimit = 100;
+    tools["remind_if_no_reply"].rateLimit = 200;
+    // Bulk non-delete actions: high cap.
+    for (const tool of TOOL_CATEGORIES.actions.tools) {
+      if (tool.startsWith("bulk_")) tools[tool].rateLimit = 100;
+    }
+    // Deletion: lower cap — irreversible.
+    for (const tool of TOOL_CATEGORIES.deletion.tools) {
       tools[tool].rateLimit = 20;
     }
-    for (const tool of TOOL_CATEGORIES.actions.tools) {
-      if (tool.startsWith("bulk_")) tools[tool].rateLimit = 10;
-    }
-    // Rate limits for read-heavy tools to prevent excessive IMAP load
-    tools["get_emails"].rateLimit = 60;
-    tools["search_emails"].rateLimit = 30;
-    tools["get_email_by_id"].rateLimit = 200;
-    // Rate-limit server lifecycle tools — destructive but allowed in supervised
-    tools["shutdown_server"].rateLimit = 2;
-    tools["restart_server"].rateLimit = 2;
+    // Folder writes: create/rename high, delete lower.
+    tools["create_folder"].rateLimit = 100;
+    tools["rename_folder"].rateLimit = 100;
+    tools["delete_folder"].rateLimit = 20;
+    // SimpleLogin: create/toggle high, delete lower.
+    tools["alias_create_random"].rateLimit = 50;
+    tools["alias_create_custom"].rateLimit = 50;
+    tools["alias_toggle"].rateLimit = 100;
+    tools["alias_delete"].rateLimit = 20;
+    // Server lifecycle: allow a few per session.
+    tools["shutdown_server"].rateLimit = 5;
+    tools["restart_server"].rateLimit = 5;
   } else if (preset === "send_only") {
     const allowed = new Set<string>([
       ...TOOL_CATEGORIES.sending.tools,
@@ -121,12 +129,20 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
       ...TOOL_CATEGORIES.reading.tools,
       "get_folders",
       "get_connection_status",
+      "sync_emails",    // safe — reads from server, no email modified
+      "get_contacts",   // look up recipients when composing
       "get_logs",
-      "start_bridge",  // needed to bring Bridge up before sending
+      "start_bridge",
     ]);
     for (const tool of ALL_TOOLS) {
       tools[tool].enabled = allowed.has(tool);
     }
+    // Outbound ops: rate-limited. Reads, sync, and draft management: unlimited.
+    for (const tool of TOOL_CATEGORIES.sending.tools) {
+      tools[tool].rateLimit = 50;
+    }
+    tools["schedule_email"].rateLimit = 50;
+    tools["remind_if_no_reply"].rateLimit = 100;
   }
   // "full" and "custom" use the default (all enabled, no limits)
 

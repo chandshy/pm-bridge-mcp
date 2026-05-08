@@ -25,6 +25,7 @@ import {
   getConfigPath,
 } from "../config/loader.js";
 import {
+  ALL_TOOLS,
   TOOL_CATEGORIES,
   type PermissionPreset,
   type ServerConfig,
@@ -302,10 +303,10 @@ function renderEscalationRecord(e: EscalationRecord, ansi: boolean): string {
 }
 
 const PRESETS: { id: PermissionPreset; label: string; desc: string }[] = [
-  { id: "read_only",  label: "Read-Only",   desc: "Reading, analytics, system only — no writes"             },
-  { id: "supervised", label: "Supervised",  desc: "All tools; deletion ≤5/hr, sending ≤20/hr"              },
-  { id: "send_only",  label: "Send-Only",   desc: "Reading + sending only — no deletion or folder writes"   },
-  { id: "full",       label: "Full Access", desc: "All 40 tools, no rate limits — full agent trust"         },
+  { id: "read_only",  label: "Read-Only",   desc: "Reading unlimited — all writes blocked"                     },
+  { id: "supervised", label: "Supervised",  desc: "All tools; sending ≤200/hr, deletion ≤20/hr, bulk ≤100/hr" },
+  { id: "send_only",  label: "Send-Only",   desc: "Reading unlimited; send ≤50/hr — actions/deletion disabled" },
+  { id: "full",       label: "Full Access", desc: `All ${ALL_TOOLS.length} tools, no rate limits — full agent trust` },
 ];
 
 function ansiDraw(st: AnsiState): void {

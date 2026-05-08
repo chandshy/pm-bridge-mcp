@@ -1210,7 +1210,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
                 Supervised
                 <span class="perm-preset-tag tag-mod">Rate limited</span>
               </div>
-              <div class="perm-preset-desc">All tools enabled with safety caps: deletion at 5/hr, sending at 20/hr, bulk actions at 10/hr.</div>
+              <div class="perm-preset-desc">All tools enabled. High limits on sending and bulk ops; stricter caps on deletion and destructive actions. Reading unlimited.</div>
             </div>
           </label>
 
@@ -1219,7 +1219,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             <div class="perm-preset-badge" style="background:#6d4aff22">📤</div>
             <div>
               <div class="perm-preset-name">Send-Only</div>
-              <div class="perm-preset-desc">Reading and sending only. No deletion, no folder writes, no bulk operations.</div>
+              <div class="perm-preset-desc">Reading unlimited. Send operations rate-limited. Actions, deletion, folder writes, and bulk ops disabled.</div>
             </div>
           </label>
 
@@ -1231,7 +1231,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
                 Full Access
                 <span class="perm-preset-tag tag-high">No limits</span>
               </div>
-              <div class="perm-preset-desc">All 47 tools, no rate limits. Grant only when you fully trust the agent to act autonomously.</div>
+              <div class="perm-preset-desc">All ${ALL_TOOLS.length} tools, no rate limits. Grant only when you fully trust the agent to act autonomously.</div>
             </div>
           </label>
         </div>
@@ -1558,9 +1558,9 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       <button class="preset-btn" data-preset="custom" id="custom-preset-btn" style="display:none" onclick="restoreCustom()">Custom</button>
     </div>
     <table style="font-size:12px;color:var(--muted);border-collapse:collapse;width:100%">
-      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Read-Only</td><td>Reading, analytics, and system tools only.</td></tr>
-      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Supervised</td><td>All tools with rate caps: deletion 5/hr, sending 20/hr, bulk 10/hr.</td></tr>
-      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Send-Only</td><td>Reading and sending only — no deletion, no folder writes.</td></tr>
+      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Read-Only</td><td>Reading unlimited. Writing fully blocked.</td></tr>
+      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Supervised</td><td>All tools enabled. High limits on sending/bulk; stricter caps on deletion and destructive ops. Reading unlimited.</td></tr>
+      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Send-Only</td><td>Reading unlimited. Send ops rate-limited. Actions, deletion, folder writes, and bulk ops disabled.</td></tr>
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Full Access</td><td>All tools, no rate limits.</td></tr>
     </table>
   </div>

@@ -346,8 +346,8 @@ Pre-built prompt templates for common tasks:
 | Preset | What's allowed | Best for |
 |---|---|---|
 | **Read-Only** *(default)* | Read, search, analytics, connection status, logs, Bridge start | Starting out; untrusted or new agents |
-| **Supervised** | All tools; deletion 5/hr, sending 20/hr, bulk actions 10/hr, server lifecycle 2/hr; read-heavy tools rate-limited (`get_emails` 60/hr, `search_emails` 30/hr, `get_email_by_id` 200/hr) | Day-to-day agentic use |
-| **Send-Only** | Reading + sending + drafts + scheduling + connection status + logs + Bridge start; no deletion, no folder writes, no server lifecycle | Agents that only need to compose and send |
+| **Supervised** | All tools enabled; reading unlimited; sending 200/hr, schedule 100/hr, bulk actions 100/hr; deletion 20/hr; folder delete 20/hr; server lifecycle 5/hr | Day-to-day agentic use |
+| **Send-Only** | Reading unlimited; send/forward/schedule 50/hr, remind_if_no_reply 100/hr; actions, deletion, folder writes, and bulk ops disabled | Agents that only need to compose and send |
 | **Full Access** | All tools, no rate limits | Trusted workflows where you review actions |
 | **Custom** | User-defined per-tool toggles and rate limits (set via the Permissions tab) | Fine-grained control beyond the 4 presets |
 

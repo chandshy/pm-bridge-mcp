@@ -95,25 +95,25 @@ describe("buildPermissions", () => {
       }
     });
 
-    it("rate-limits deletion tools to 5", () => {
+    it("rate-limits deletion tools to 20", () => {
       for (const tool of TOOL_CATEGORIES.deletion.tools) {
-        expect(perms.tools[tool].rateLimit).toBe(5);
-      }
-    });
-
-    it("rate-limits sending tools to 20", () => {
-      for (const tool of TOOL_CATEGORIES.sending.tools) {
         expect(perms.tools[tool].rateLimit).toBe(20);
       }
     });
 
-    it("rate-limits bulk action tools to 10", () => {
+    it("rate-limits sending tools to 200", () => {
+      for (const tool of TOOL_CATEGORIES.sending.tools) {
+        expect(perms.tools[tool].rateLimit).toBe(200);
+      }
+    });
+
+    it("rate-limits bulk action tools to 100", () => {
       const bulkActions = TOOL_CATEGORIES.actions.tools.filter((t) =>
         t.startsWith("bulk_"),
       );
       expect(bulkActions.length).toBeGreaterThan(0);
       for (const tool of bulkActions) {
-        expect(perms.tools[tool].rateLimit).toBe(10);
+        expect(perms.tools[tool].rateLimit).toBe(100);
       }
     });
   });

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.17] — 2026-05-08
+
+### Changed
+- **Permission presets redesigned** — presets now follow a clear tiered model:
+  - **Read-Only**: reading/analytics/system unlimited; all writes blocked
+  - **Send-Only**: reading unlimited; send/forward/schedule 50/hr, `remind_if_no_reply` 100/hr; actions, deletion, folder writes, and bulk ops disabled; `sync_emails` and `get_contacts` added
+  - **Supervised**: reading unlimited (no rate limits on read ops); sending 200/hr, `schedule_email` 100/hr, bulk actions 100/hr, deletion 20/hr, folder delete 20/hr, folder create/rename 100/hr, alias create 50/hr, alias delete 20/hr, server lifecycle 5/hr
+  - **Full Access**: all tools, no limits (description now uses dynamic tool count)
+- **Docs and help text updated** — README, README_FIRST_AI, SECURITY, TUI preset descriptions, loader comment block, and Settings UI wizard/table text all reflect new values
+
+### Fixed
+- `schedule_email` was missing its rate limit in Supervised (it's in the drafts category, not sending)
+- Folder write tools (`create_folder`, `delete_folder`, `rename_folder`) had no rate limits in Supervised
+- Full Access description hardcoded "47 tools" — now renders `ALL_TOOLS.length` dynamically
+- Test assertions updated to match new Supervised rate limits
+
 ## [3.0.12] — 2026-05-01
 
 ### Fixed

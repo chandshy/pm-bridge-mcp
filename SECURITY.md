@@ -37,7 +37,7 @@ The server implements a 10-layer defense-in-depth security model:
 
 ### 2. Rate Limiting
 - Sliding-window rate limits enforced per tool
-- Supervised preset: deletion capped at 5/hr, sending at 20/hr
+- Supervised preset: reading unlimited; sending ≤200/hr, bulk ≤100/hr, deletion ≤20/hr, server lifecycle ≤5/hr
 - Rate-limiter buckets capped at 10k entries (memory safety)
 
 ### 3. Human-Gated Escalation

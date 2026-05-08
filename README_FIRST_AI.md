@@ -29,9 +29,9 @@ understand context before attempting any action that modifies email state.
 
 | Preset | What you can do |
 |---|---|
-| `read_only` | Read, search, analytics, system status, Bridge start only |
-| `send_only` | Read + send + drafts + scheduling + Bridge start; no deletion, no folder writes, no server lifecycle |
-| `supervised` | All tools; deletion 5/hr, sending 20/hr, bulk actions 10/hr, server lifecycle 2/hr; read-heavy tools also rate-limited: `get_emails` 60/hr, `search_emails` 30/hr, `get_email_by_id` 200/hr |
+| `read_only` | Reading unlimited; all writes blocked |
+| `send_only` | Reading unlimited; send/forward/schedule 50/hr, `remind_if_no_reply` 100/hr; actions, deletion, folder writes, and bulk ops disabled |
+| `supervised` | All tools enabled; reading unlimited; sending 200/hr, schedule 100/hr, bulk actions 100/hr, deletion 20/hr, folder delete 20/hr, server lifecycle 5/hr |
 | `full` | All tools, no rate limits |
 
 The current preset is enforced server-side — you cannot bypass it. If a tool
@@ -534,7 +534,7 @@ Refresh the folder list from IMAP. Returns `{ success, folderCount }`.
 
 ---
 
-### Deletion — requires `full` (capped at 5/hr in `supervised`)
+### Deletion — requires `full` (capped at 20/hr in `supervised`)
 
 **Deletion is permanent. There is no undo.**
 
@@ -644,7 +644,7 @@ did not become reachable within the window (may still be starting).
 attempt to bring Bridge up without asking the human to do it manually.
 
 #### `shutdown_server`
-Gracefully shut down the MCP server. Requires `supervised` or `full` (capped at 2/hr in supervised).
+Gracefully shut down the MCP server. Requires `supervised` or `full` (capped at 5/hr in supervised).
 
 Sequence: terminates Proton Bridge → disconnects IMAP/SMTP → scrubs credentials from memory → exits.
 The MCP server will not be available after this call completes.
@@ -653,7 +653,7 @@ Returns `{ success: true }` immediately; shutdown begins asynchronously so the r
 before the process exits.
 
 #### `restart_server`
-Restart the MCP server. Requires `supervised` or `full` (capped at 2/hr in supervised).
+Restart the MCP server. Requires `supervised` or `full` (capped at 5/hr in supervised).
 
 Sequence: terminates Proton Bridge → spawns a fresh copy of the server process → graceful shutdown
 of the current process. If `autoStartBridge` is enabled in settings, the new process will
