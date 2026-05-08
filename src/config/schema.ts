@@ -141,7 +141,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
 
 // ─── Permission Types ──────────────────────────────────────────────────────────
 
-export type RateLimitWindow = 'second' | 'minute' | 'hour';
+export type RateLimitWindow = 'second' | 'minute' | 'hour' | 'day';
 
 export interface ToolPermission {
   /** Whether the tool can be called at all */

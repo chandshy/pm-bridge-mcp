@@ -1555,7 +1555,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       <button class="preset-btn" data-preset="supervised" onclick="applyPreset('supervised')">Supervised</button>
       <button class="preset-btn" data-preset="send_only"  onclick="applyPreset('send_only')">Send-Only</button>
       <button class="preset-btn" data-preset="read_only"  onclick="applyPreset('read_only')">Read-Only</button>
-      <button class="preset-btn" data-preset="custom" id="custom-preset-btn" style="display:none">Custom</button>
+      <button class="preset-btn" data-preset="custom" id="custom-preset-btn" style="display:none" onclick="restoreCustom()">Custom</button>
     </div>
     <table style="font-size:12px;color:var(--muted);border-collapse:collapse;width:100%">
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Read-Only</td><td>Reading, analytics, and system tools only.</td></tr>
@@ -1852,9 +1852,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   const RUNNING_PORT  = ${runningPortJson};
 
   // ── State ─────────────────────────────────────────────────────────────────
-  let cfg         = null;
-  let toolEnabled = {};
-  let toolRate    = {};
+  let cfg            = null;
+  let toolEnabled    = {};
+  let toolRate       = {};
+  let customSnapshot = null; // saved custom tool state, keyed by tool name
 
   // Wizard in-progress state
   const W = {
@@ -2923,9 +2924,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         '<input class="rate-input" type="number" min="1" max="9999" placeholder="∞" ' +
           'id="rate-' + escHtml(tool) + '" title="Max calls per window (blank = unlimited)">' +
         '<select class="rate-window" id="rate-window-' + escHtml(tool) + '" title="Rate limit time window">' +
-          '<option value="second">/s</option>' +
+          '<option value="second">/sec</option>' +
           '<option value="minute">/min</option>' +
           '<option value="hour" selected>/hr</option>' +
+          '<option value="day">/day</option>' +
         '</select>' +
       '</div>' +
       '<label class="toggle-wrap">' +
@@ -2995,7 +2997,43 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     if (catEl) catEl.checked = allEnabled;
   }
 
+  function captureToolState() {
+    const snap = {};
+    for (const tool of ALL_TOOLS) {
+      const cbEl  = document.getElementById('tool-' + tool);
+      const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
+      const rateVal = rateEl && rateEl.value.trim() !== '' ? parseInt(rateEl.value, 10) : null;
+      snap[tool] = {
+        enabled:         cbEl ? cbEl.checked : true,
+        rateLimit:       rateVal && rateVal > 0 ? rateVal : null,
+        rateLimitWindow: winEl ? winEl.value : 'hour',
+      };
+    }
+    return snap;
+  }
+
+  window.restoreCustom = function() {
+    if (!customSnapshot) return;
+    for (const tool of ALL_TOOLS) {
+      const perm  = customSnapshot[tool] || { enabled: true, rateLimit: null, rateLimitWindow: 'hour' };
+      const cbEl  = document.getElementById('tool-' + tool);
+      const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
+      if (cbEl)   { cbEl.checked = perm.enabled !== false; toolEnabled[tool] = cbEl.checked; }
+      if (rateEl) { rateEl.value = perm.rateLimit != null ? perm.rateLimit : ''; rateEl.disabled = !perm.enabled; toolRate[tool] = perm.rateLimit; }
+      if (winEl)  { winEl.value = perm.rateLimitWindow || 'hour'; winEl.disabled = !perm.enabled; }
+    }
+    for (const catKey of Object.keys(CATEGORIES)) { updateCategoryToggle(catKey); }
+    markCustomPreset();
+  };
+
   window.applyPreset = async function(preset) {
+    // Snapshot current custom state before the preset wipes it so the user
+    // can click "Custom" to restore their settings.
+    if (cfg && cfg.permissions && cfg.permissions.preset === 'custom') {
+      customSnapshot = captureToolState();
+    }
     const r = await fetch('/api/preset', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
@@ -3003,7 +3041,14 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     });
     if (!r.ok) { toast('Failed to apply preset', 'err'); return; }
     await refresh();
-    document.getElementById('custom-preset-btn').style.display = 'none';
+    // Keep the Custom button visible if there's a snapshot to restore.
+    const customBtn = document.getElementById('custom-preset-btn');
+    if (customSnapshot) {
+      customBtn.style.display = '';
+      customBtn.classList.remove('active');
+    } else {
+      customBtn.style.display = 'none';
+    }
     toast('Preset "' + preset + '" applied.', 'ok');
   };
 
@@ -3051,7 +3096,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.getElementById('info-rate-limited').textContent =
       limited.length ? limited.map(t => {
         const w = tools[t].rateLimitWindow || 'hour';
-        const wLabel = w === 'second' ? 's' : w === 'minute' ? 'min' : 'hr';
+        const wLabel = w === 'second' ? 'sec' : w === 'minute' ? 'min' : w === 'day' ? 'day' : 'hr';
         return t + ' (' + tools[t].rateLimit + '/' + wLabel + ')';
       }).join(', ') : 'None';
     var credStorageEl = document.getElementById('info-credential-storage');

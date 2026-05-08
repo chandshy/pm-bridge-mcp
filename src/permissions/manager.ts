@@ -29,6 +29,7 @@ const CONFIG_CACHE_MS = 15_000;
 function windowMs_for(window: RateLimitWindow): number {
   if (window === 'second') return 1_000;
   if (window === 'minute') return 60_000;
+  if (window === 'day')    return 86_400_000;
   return 3_600_000; // hour
 }
 
