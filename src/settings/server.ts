@@ -3749,7 +3749,7 @@ const _agentSetupPkgVersion = (() => {
   } catch { return "unknown"; }
 })();
 
-function buildAgentSetupJson() {
+function buildAgentSetupJson(settingsPort = 8765) {
   return {
     product: "mailpouch",
     version: _agentSetupPkgVersion,
@@ -3878,14 +3878,14 @@ function buildAgentSetupJson() {
     firstCallAdvice:
       "Before invoking tools, call tools/list to discover the currently-exposed surface. Default tier is `complete` (69 tools) but operators can restrict to `core` (~20 tools) or `extended` (~50) via MAILPOUCH_TIER. Per-agent grants can further narrow the surface or impose folder allowlists / IP pins / rate limits. If a tool you expected is missing, ask the user to adjust the grant — don't assume it's a bug.",
     humanControls: {
-      settingsUi: "http://localhost:8766",
+      settingsUi: `http://localhost:${settingsPort}`,
       description: "The operator uses this UI to approve your agent, set conditions (expiry, folder allowlist, IP pins, per-tool rate limits, account scope), and revoke access. Every tool call you make is audit-logged (hashed-args, never values). Your audit trail is visible to them.",
     },
   };
 }
 
-function buildAgentSetupHtml(): string {
-  const data = buildAgentSetupJson();
+function buildAgentSetupHtml(settingsPort = 8765): string {
+  const data = buildAgentSetupJson(settingsPort);
   const jsonPretty = JSON.stringify(data, null, 2);
   const clients = data.clientConfig;
   const snip = (o: unknown) => escapeHtml(JSON.stringify(o, null, 2));
@@ -4178,7 +4178,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             "X-Content-Type-Options": "nosniff",
             "Cache-Control":          "no-store, no-cache",
           });
-          res.end(JSON.stringify(buildAgentSetupJson(), null, 2));
+          res.end(JSON.stringify(buildAgentSetupJson(port), null, 2));
         } else {
           res.writeHead(200, {
             "Content-Type":             "text/html; charset=utf-8",
@@ -4188,7 +4188,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             "Referrer-Policy":          "no-referrer",
             "Cache-Control":            "no-store, no-cache, must-revalidate",
           });
-          res.end(buildAgentSetupHtml());
+          res.end(buildAgentSetupHtml(port));
         }
         return;
       }
