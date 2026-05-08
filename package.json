@@ -1,6 +1,6 @@
 {
   "name": "mailpouch",
-  "version": "3.0.18",
+  "version": "3.0.19",
   "description": "mailpouch — MCP server that exposes Proton Mail via Proton Bridge. 69 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
   "type": "module",
   "main": "dist/index.js",
@@ -105,7 +105,8 @@
     "fast-xml-parser": ">=5.5.6",
     "hono": ">=4.12.14",
     "@hono/node-server": ">=1.19.13",
-    "path-to-regexp": ">=8.4.2"
+    "path-to-regexp": ">=8.4.2",
+    "fast-uri": ">=3.1.2"
   },
   "publishConfig": {
     "access": "public",
