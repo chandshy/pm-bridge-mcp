@@ -80,7 +80,7 @@
     "nodemailer": "~8.0.7"
   },
   "optionalDependencies": {
-    "@napi-rs/keyring": "~1.2.0",
+    "@napi-rs/keyring": "~1.3.0",
     "systray2": "~2.1.4"
   },
   "devDependencies": {
