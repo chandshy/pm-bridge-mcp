@@ -9,7 +9,7 @@ The pitch in one line: if you picked Proton Mail because you didn't want a third
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, or a static bearer token if you'd rather. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
 [![CI](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v3.0.12-blue.svg)](https://www.npmjs.com/package/mailpouch)
+[![npm version](https://img.shields.io/badge/npm-v3.0.21-blue.svg)](https://www.npmjs.com/package/mailpouch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
@@ -64,6 +64,8 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
 - **1,649 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
+
+**Documentation:** [HELP.md](HELP.md) (task-oriented how-tos) · [README_FIRST_AI.md](README_FIRST_AI.md) (agent API reference) · [docs/index.md](docs/index.md) (full index)
 
 ---
 
@@ -396,7 +398,7 @@ npx mailpouch-settings --no-open     # start server but don't auto-open browser
 
 Tabs:
 
-- **Setup** — credentials, SMTP/IMAP hosts and ports, Bridge TLS certificate, remote/HTTP mode, OAuth admin password, SimpleLogin / Pass tokens, debug mode
+- **Setup** — credentials, SMTP/IMAP hosts and ports, Bridge TLS certificate, Optional Integrations (SimpleLogin API key, Proton Pass PAT + CLI path), debug mode, auto-start Bridge, insecure-connection toggle, destructive-confirm toggle, desktop notifications toggle, settings port
 - **Accounts** — per-account Bridge credentials; hot-swap the active account
 - **Permissions** — preset selector, per-tool enable/rate-limit toggles, tool-tier (`core` / `extended` / `complete`), destructive-confirm toggle
 - **Agents** — per-client (OAuth `client_id`) approvable grants with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding

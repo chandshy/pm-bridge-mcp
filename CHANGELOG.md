@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.21] — 2026-05-08
+
+### Added
+- **Optional Integrations UI** — Settings → Setup tab now has a dedicated "Optional Integrations" card for SimpleLogin API key / base URL and Proton Pass PAT / CLI path. Previously these could only be set by editing `~/.mailpouch.json` directly.
+- **Desktop notifications toggle** — Settings → Setup tab toggle to enable/disable native OS notifications for agent permission requests (default on). Previously the field existed in config but had no UI control.
+- **HELP.md** — new comprehensive task-oriented help guide covering all features, configuration, and troubleshooting.
+- **docs/index.md** — full documentation index with feature map.
+
+### Fixed
+- Settings UI → agent setup JSON (`/api/agent-setup`) was hardcoding port `8766` in the `settingsUi` URL instead of the actual running port.
+
 ## [3.0.17] — 2026-05-08
 
 ### Changed

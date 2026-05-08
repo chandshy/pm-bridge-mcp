@@ -1522,6 +1522,16 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             the workflow user-initiated per Proton ToS §2.10.
           </div>
         </div>
+        <div class="field" style="margin-top:6px">
+          <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="desktop-notifications" checked><span class="slider"></span></span>
+            <span>Desktop notifications for agent permission requests</span>
+          </label>
+          <div class="hint" style="margin-top:4px">
+            Show a native OS notification when an agent requests elevated permissions. On by default.
+            Disable if you prefer to check the Agents tab manually.
+          </div>
+        </div>
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
           <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px"
@@ -1530,6 +1540,36 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           <div id="port-mismatch-warn" style="display:none;margin-top:4px;font-size:12px;color:var(--warn,#f59e0b)">
             ⚠ Currently running on port ${runningPort}. Save and restart settings for the new port to take effect.
           </div>
+        </div>
+      </fieldset>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Optional Integrations</div>
+      <div class="card-desc">Configure SimpleLogin alias management and Proton Pass credential access. Leave blank to disable.</div>
+      <fieldset style="border:none;padding:0;margin:0">
+        <legend style="font-size:13px;font-weight:600;color:var(--muted);margin-bottom:8px">SimpleLogin</legend>
+        <div class="field">
+          <label for="sl-api-key">API Key</label>
+          <input type="password" id="sl-api-key" placeholder="sl.*****" autocomplete="off">
+          <div class="hint">Generate in SimpleLogin → Settings → API Keys. Required for alias_* tools.</div>
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label for="sl-base-url">Base URL <span style="color:var(--muted);font-weight:400">(optional — leave blank for app.simplelogin.io)</span></label>
+          <input type="text" id="sl-base-url" placeholder="https://app.simplelogin.io">
+        </div>
+      </fieldset>
+      <fieldset style="border:none;padding:0;margin:16px 0 0">
+        <legend style="font-size:13px;font-weight:600;color:var(--muted);margin-bottom:8px">Proton Pass</legend>
+        <div class="field">
+          <label for="pass-access-token">Personal Access Token</label>
+          <input type="password" id="pass-access-token" placeholder="••••••••" autocomplete="off">
+          <div class="hint">Generate in Proton Pass web app → Settings → Developer → Personal Access Tokens. Required for pass_* tools.</div>
+        </div>
+        <div class="field" style="margin-top:8px">
+          <label for="pass-cli-path">pass-cli path <span style="color:var(--muted);font-weight:400">(optional — leave blank to use PATH)</span></label>
+          <input type="text" id="pass-cli-path" placeholder="/usr/local/bin/pass-cli">
+          <div class="hint">Only set if pass-cli is not on your PATH. <a href="https://github.com/protonpass/pass-cli" target="_blank" rel="noopener" style="color:var(--primary)">Install pass-cli ↗</a></div>
         </div>
       </fieldset>
     </div>
@@ -2637,6 +2677,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     if (insecureEl) insecureEl.checked = !!cn.allowInsecureBridge;
     var confirmEl = document.getElementById('require-destructive-confirm');
     if (confirmEl) confirmEl.checked = c.requireDestructiveConfirm !== false;
+    var desktopNotifEl = document.getElementById('desktop-notifications');
+    if (desktopNotifEl) desktopNotifEl.checked = c.desktopNotificationsEnabled !== false;
+    set('sl-api-key',        cn.simpleloginApiKey  ? '••••••••' : '');
+    set('sl-base-url',       cn.simpleloginBaseUrl || '');
+    set('pass-access-token', cn.passAccessToken    ? '••••••••' : '');
+    set('pass-cli-path',     cn.passCliPath        || '');
     set('settings-port', c.settingsPort || 8765);
     checkPortMismatch();
     const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
@@ -2724,8 +2770,13 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           debug:            document.getElementById('debug-mode').checked,
           autoStartBridge:  document.getElementById('auto-start-bridge').checked,
           allowInsecureBridge: !!(document.getElementById('allow-insecure-bridge') && document.getElementById('allow-insecure-bridge').checked),
+          simpleloginApiKey:  get('sl-api-key'),
+          simpleloginBaseUrl: get('sl-base-url'),
+          passAccessToken:    get('pass-access-token'),
+          passCliPath:        get('pass-cli-path'),
         },
         requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
+        desktopNotificationsEnabled: !!(document.getElementById('desktop-notifications') && document.getElementById('desktop-notifications').checked),
         settingsPort: parseInt(get('settings-port'), 10) || 8765,
       };
       const r = await fetch('/api/config', {
@@ -4253,9 +4304,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             debug:           typeof c.debug === "boolean" ? c.debug : current.connection.debug,
             autoStartBridge: typeof c.autoStartBridge === "boolean" ? c.autoStartBridge : current.connection.autoStartBridge,
             allowInsecureBridge: typeof c.allowInsecureBridge === "boolean" ? c.allowInsecureBridge : current.connection.allowInsecureBridge,
-            // SimpleLogin: only overwrite when a non-placeholder key was posted
+            // Optional integrations: only overwrite when a non-empty, non-placeholder value was posted
             ...(typeof c.simpleloginApiKey === "string" && c.simpleloginApiKey && c.simpleloginApiKey !== "••••••••" ? { simpleloginApiKey: c.simpleloginApiKey } : {}),
             simpleloginBaseUrl: typeof c.simpleloginBaseUrl === "string" ? c.simpleloginBaseUrl : current.connection.simpleloginBaseUrl,
+            ...(typeof c.passAccessToken === "string" && c.passAccessToken && c.passAccessToken !== "••••••••" ? { passAccessToken: c.passAccessToken } : {}),
+            passCliPath: typeof c.passCliPath === "string" ? c.passCliPath.trim() : current.connection.passCliPath,
             // Only overwrite credentials if a non-empty, non-placeholder string was sent
             ...(typeof c.password  === "string" && c.password  && c.password  !== "••••••••" ? { password:  c.password  } : {}),
             ...(typeof c.smtpToken === "string" && c.smtpToken && c.smtpToken !== "••••••••" ? { smtpToken: c.smtpToken } : {}),
@@ -4268,9 +4321,12 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (sp >= 1 && sp <= 65535) current.settingsPort = sp;
         }
 
-        // Merge compliance flags (destructive-confirm, ToS ack)
+        // Merge compliance flags (destructive-confirm, ToS ack) and notification prefs
         if (typeof body.requireDestructiveConfirm === "boolean") {
           current.requireDestructiveConfirm = body.requireDestructiveConfirm;
+        }
+        if (typeof body.desktopNotificationsEnabled === "boolean") {
+          current.desktopNotificationsEnabled = body.desktopNotificationsEnabled;
         }
         if (body.tosAcknowledged && typeof body.tosAcknowledged === "object") {
           const t = body.tosAcknowledged as Record<string, unknown>;
