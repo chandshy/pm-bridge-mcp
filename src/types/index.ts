@@ -147,6 +147,10 @@ export interface EmailAnalytics {
 export interface Contact {
   email: string;
   name?: string;
+  /** Email domain (e.g. "anthropic.com") */
+  domain: string;
+  /** Inferred organization name from domain; absent for personal email providers */
+  organization?: string;
   emailsSent: number;
   emailsReceived: number;
   lastInteraction: Date;

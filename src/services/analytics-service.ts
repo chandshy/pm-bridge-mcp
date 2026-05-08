@@ -4,11 +4,72 @@
 
 import { EmailMessage, EmailStats, EmailAnalytics, Contact } from '../types/index.js';
 import { logger } from '../utils/logger.js';
-import { extractEmailAddress, bytesToMB } from '../utils/helpers.js';
+import { extractEmailAddress, extractName, bytesToMB } from '../utils/helpers.js';
 import { tracer } from '../utils/tracer.js';
 
 /** Maximum unique contacts tracked — prevents unbounded Map growth. */
 const MAX_CONTACTS = 10_000;
+
+/** Known personal email providers — we don't infer an org for these. */
+const PERSONAL_DOMAINS = new Set([
+  'gmail', 'yahoo', 'hotmail', 'outlook', 'icloud', 'protonmail', 'aol',
+  'live', 'me', 'msn', 'mail', 'inbox', 'yandex', 'gmx', 'zoho', 'fastmail',
+]);
+
+/**
+ * Extract the domain from an email address (e.g. "user@acme.com" → "acme.com").
+ * Returns an empty string when the address is malformed.
+ */
+function emailDomain(email: string): string {
+  const at = email.lastIndexOf('@');
+  return at >= 0 ? email.slice(at + 1).toLowerCase() : '';
+}
+
+/**
+ * Infer a human-readable organisation name from a domain.
+ * Returns undefined for known personal providers (gmail, yahoo, etc.)
+ * and for addresses without a recognisable company segment.
+ *
+ * Examples:
+ *   anthropic.com  → Anthropic
+ *   cs.mit.edu     → MIT
+ *   co.uk compound → uses third-level label
+ */
+function inferOrganization(domain: string): string | undefined {
+  if (!domain) return undefined;
+  const parts = domain.split('.');
+  if (parts.length < 2) return undefined;
+
+  const tld  = parts[parts.length - 1];
+  const sld  = parts[parts.length - 2];
+
+  // Academic / government TLDs — org is the label just before the TLD
+  if (['edu', 'gov', 'mil', 'ac'].includes(tld)) {
+    return sld.charAt(0).toUpperCase() + sld.slice(1);
+  }
+
+  // Compound SLDs like co.uk, com.au — org is one level higher
+  if (['co', 'com', 'org', 'net', 'gov'].includes(sld) && parts.length >= 3) {
+    const org = parts[parts.length - 3];
+    if (PERSONAL_DOMAINS.has(org)) return undefined;
+    return org.charAt(0).toUpperCase() + org.slice(1);
+  }
+
+  // Standard two-part domain — SLD is the org
+  if (PERSONAL_DOMAINS.has(sld)) return undefined;
+  return sld.charAt(0).toUpperCase() + sld.slice(1);
+}
+
+export type ContactSortBy = 'recent' | 'total' | 'sent' | 'received';
+
+/**
+ * Recency weight: harmonic decay with a 30-day half-life.
+ * A contact last seen yesterday scores ~1.0; 30 days ago ~0.5; 90 days ago ~0.25.
+ */
+function recencyWeight(lastInteraction: Date): number {
+  const daysAgo = (Date.now() - lastInteraction.getTime()) / 86_400_000;
+  return 1 / (1 + daysAgo / 30);
+}
 
 export class AnalyticsService {
   private inboxEmails: EmailMessage[] = [];
@@ -65,16 +126,18 @@ export class AnalyticsService {
 
     for (const email of this.inboxEmails) {
       const fromAddress = extractEmailAddress(email.from);
+      const fromName    = extractName(email.from);
       if (fromAddress) {
-        this.updateContact(fromAddress, 'received', email.date);
+        this.updateContact(fromAddress, 'received', email.date, fromName);
       }
     }
 
     for (const email of this.sentEmails) {
       for (const to of email.to) {
         const toAddress = extractEmailAddress(to);
+        const toName    = extractName(to);
         if (toAddress) {
-          this.updateContact(toAddress, 'sent', email.date);
+          this.updateContact(toAddress, 'sent', email.date, toName);
         }
       }
     }
@@ -82,15 +145,16 @@ export class AnalyticsService {
     logger.debug(`Processed ${this.contacts.size} contacts`, 'AnalyticsService');
   }
 
-  private updateContact(email: string, type: 'sent' | 'received', date: Date): void {
+  private updateContact(email: string, type: 'sent' | 'received', date: Date, displayName?: string): void {
     let contact = this.contacts.get(email);
 
     if (!contact) {
-      // Silently drop new contacts once the cap is reached.
-      // Existing contacts (already in the map) are still updated below.
       if (this.contacts.size >= MAX_CONTACTS) return;
+      const domain = emailDomain(email);
       contact = {
         email,
+        domain,
+        organization: inferOrganization(domain),
         emailsSent: 0,
         emailsReceived: 0,
         lastInteraction: date,
@@ -107,10 +171,14 @@ export class AnalyticsService {
 
     if (date > contact.lastInteraction) {
       contact.lastInteraction = date;
+      // Prefer the most recently seen display name (tends to be most current).
+      if (displayName) contact.name = displayName;
     }
     if (date < contact.firstInteraction) {
       contact.firstInteraction = date;
     }
+    // Seed name on first occurrence if not yet set.
+    if (!contact.name && displayName) contact.name = displayName;
   }
 
   getEmailStats(): EmailStats {
@@ -356,18 +424,25 @@ export class AnalyticsService {
     };
   }
 
-  getContacts(limit: number = 100): Contact[] {
-    const tags = { limit } as { limit: number; resultCount?: number };
+  getContacts(limit: number = 100, sortBy: ContactSortBy = 'recent'): Contact[] {
+    const tags = { limit, sortBy } as { limit: number; sortBy: string; resultCount?: number };
     return tracer.spanSync('analytics.getContacts', tags, () => {
-    // Clamp: minimum 1, maximum 500.  Prevents accidental or malicious
-    // requests that would serialize thousands of contact records into MCP output.
+    // Clamp: minimum 1, maximum 500.
     const safeLimit = Math.min(Math.max(1, Math.trunc(limit) || 100), 500);
+
+    const comparators: Record<ContactSortBy, (a: Contact, b: Contact) => number> = {
+      recent: (a, b) => {
+        const aScore = (a.emailsSent + a.emailsReceived) * recencyWeight(a.lastInteraction);
+        const bScore = (b.emailsSent + b.emailsReceived) * recencyWeight(b.lastInteraction);
+        return bScore - aScore;
+      },
+      total:    (a, b) => (b.emailsSent + b.emailsReceived) - (a.emailsSent + a.emailsReceived),
+      sent:     (a, b) => b.emailsSent     - a.emailsSent,
+      received: (a, b) => b.emailsReceived - a.emailsReceived,
+    };
+
     const result = Array.from(this.contacts.values())
-      .sort((a, b) => {
-        const aTotal = a.emailsSent + a.emailsReceived;
-        const bTotal = b.emailsSent + b.emailsReceived;
-        return bTotal - aTotal;
-      })
+      .sort(comparators[sortBy] ?? comparators.recent)
       .slice(0, safeLimit);
     tags.resultCount = result.length;
     return result;

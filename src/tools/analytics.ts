@@ -4,6 +4,7 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import type { ContactSortBy } from "../services/analytics-service.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 export const defs: ToolDef[] = [
@@ -131,12 +132,18 @@ export const defs: ToolDef[] = [
     name: "get_contacts",
     title: "Get Contacts",
     description:
-      "Extract contact list from email history with send/receive counts and last-interaction dates. Includes contacts from both inbox and sent folders.",
+      "Extract contact list from email history with send/receive counts, last-interaction dates, inferred organization, and recency-weighted ranking. Includes contacts from both inbox and sent folders.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",
       properties: {
-        limit: { type: "number", description: "Max contacts to return", default: 100 },
+        limit: { type: "number", description: "Max contacts to return (default 100, max 500)", default: 100 },
+        sortBy: {
+          type: "string",
+          enum: ["recent", "total", "sent", "received"],
+          description: "Sort order: recent = recency-weighted total (default), total = raw interaction count, sent = emails you sent them, received = emails they sent you",
+          default: "recent",
+        },
       },
     },
     outputSchema: {
@@ -147,16 +154,16 @@ export const defs: ToolDef[] = [
           items: {
             type: "object",
             properties: {
-              email: { type: "string" },
-              name: { type: "string", description: "Display name if available" },
-              emailsSent: { type: "number" },
-              emailsReceived: { type: "number" },
-              lastInteraction: { type: "string", format: "date-time" },
+              email:            { type: "string" },
+              name:             { type: "string", description: "Display name seen in email headers" },
+              domain:           { type: "string", description: "Email domain (e.g. anthropic.com)" },
+              organization:     { type: "string", description: "Inferred org name; absent for personal providers" },
+              emailsSent:       { type: "number" },
+              emailsReceived:   { type: "number" },
+              lastInteraction:  { type: "string", format: "date-time" },
               firstInteraction: { type: "string", format: "date-time" },
-              averageResponseTime: { type: "number", description: "Average response time in hours, if measurable" },
-              isFavorite: { type: "boolean" },
             },
-            required: ["email", "emailsSent", "emailsReceived"],
+            required: ["email", "domain", "emailsSent", "emailsReceived", "lastInteraction", "firstInteraction"],
           },
         },
       },
@@ -215,9 +222,14 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.limit !== undefined && typeof args.limit !== "number") {
       throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
     }
+    const VALID_SORT: ContactSortBy[] = ["recent", "total", "sent", "received"];
+    if (args.sortBy !== undefined && !VALID_SORT.includes(args.sortBy as ContactSortBy)) {
+      throw new McpError(ErrorCode.InvalidParams, `'sortBy' must be one of: ${VALID_SORT.join(", ")}.`);
+    }
     await getAnalyticsEmails();
     const contactLimit = Math.min((args.limit as number) || 100, limits.maxEmailListResults);
-    const contacts = analyticsService.getContacts(contactLimit);
+    const sortBy = (args.sortBy as ContactSortBy | undefined) ?? "recent";
+    const contacts = analyticsService.getContacts(contactLimit, sortBy);
     return ok({ contacts });
   },
 
