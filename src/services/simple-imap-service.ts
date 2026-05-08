@@ -95,6 +95,16 @@ function truncateBody(body: string, maxLength: number = 300): string {
   return truncated + '...';
 }
 
+function expandImapSequence(range: string): number[] {
+  const nums: number[] = [];
+  for (const part of range.split(',')) {
+    const [a, b] = part.split(':').map(Number);
+    if (b === undefined) nums.push(a);
+    else for (let i = a; i <= b; i++) nums.push(i);
+  }
+  return nums;
+}
+
 /** Maximum number of emails held in the in-process cache (count-based guard). */
 const MAX_EMAIL_CACHE_SIZE = 500;
 /**
@@ -947,10 +957,25 @@ export class SimpleIMAPService {
       if (options.sentBefore) searchCriteria.sentBefore = options.sentBefore;
       if (options.sentSince)  searchCriteria.sentSince  = options.sentSince;
 
-      const uids = await this.client.search(searchCriteria, { uid: true });
+      // Request ESEARCH PARTIAL so the server returns only the first `limit` UIDs
+      // rather than the full result set. Falls back transparently to a plain number[]
+      // on servers that lack ESEARCH capability (e.g. older Proton Bridge builds),
+      // in which case we slice client-side as before.
+      const searchResult = await this.client.search(searchCriteria, {
+        uid: true,
+        returnOptions: [{ partial: `1:${limit}` }],
+      });
       const results: EmailMessage[] = [];
 
-      const limitedUids = Array.isArray(uids) ? uids.slice(0, limit) : [];
+      let limitedUids: number[];
+      if (Array.isArray(searchResult)) {
+        limitedUids = (searchResult as number[]).slice(0, limit);
+      } else if (searchResult && typeof searchResult === 'object' && 'partial' in searchResult) {
+        const { messages } = (searchResult as { partial: { messages?: string } }).partial;
+        limitedUids = messages ? expandImapSequence(messages) : [];
+      } else {
+        limitedUids = [];
+      }
 
       for (const uid of limitedUids) {
         const email = await this.getEmailById(uid.toString());
