@@ -1765,6 +1765,9 @@ async function _initTray(): Promise<void> {
 }
 
 async function main() {
+  const noTray       = process.argv.includes("--no-tray");
+  const noSettingsUi = process.argv.includes("--no-settings-ui");
+
   // Clear log file from previous run so each session starts fresh
   try { writeFileSync(getLogFilePath(), "", "utf8"); } catch { /* ignore */ }
 
@@ -2011,7 +2014,16 @@ async function main() {
     const remoteCn = loadedCfg?.connection;
     const hasBearer = !!remoteCn?.remoteBearerToken;
     const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!remoteCn?.remoteOauthAdminPassword;
-    if (remoteCn?.remoteMode && (hasBearer || hasOAuth)) {
+    if (remoteCn?.remoteMode) {
+      if (!hasBearer && !hasOAuth) {
+        logger.error(
+          "remoteMode is set but no authentication is configured. " +
+          "Set remoteBearerToken OR both remoteOauthEnabled and remoteOauthAdminPassword in ~/.mailpouch.json. " +
+          "Refusing to start without auth — edit the config or remove remoteMode to use stdio.",
+          "MCPServer"
+        );
+        process.exit(1);
+      }
       const { startHttpTransport } = await import("./transports/http.js");
       const handle = await startHttpTransport({
         server,
@@ -2037,13 +2049,16 @@ async function main() {
     }
 
     // ── Daemon: start settings HTTP server + system tray ───────────────────
-    // Both run alongside the MCP stdio transport. stdout is now owned by the
+    // Both run alongside the MCP transport. stdout is now owned by the
     // MCP protocol, so startSettingsServer is called with quiet=true.
-    await _startSettingsServerDaemon();
+    // Suppressed in headless environments via --no-settings-ui / --no-tray.
+    if (!noSettingsUi) {
+      await _startSettingsServerDaemon();
+    }
     // Only the process that owns the settings server gets a tray.
     // If another MCP already holds the port, _settingsExternal is true
     // and that process already has the tray — skip to avoid duplicates.
-    if (!_settingsExternal) {
+    if (!noTray && !_settingsExternal) {
       _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
     }
   } catch (error) {

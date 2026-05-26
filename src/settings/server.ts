@@ -109,13 +109,17 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 function safeConfig(cfg: ServerConfig): unknown {
   const hasPassword  = !!(cfg.connection.password || cfg.connection.passwordEncrypted);
   const hasSmtpToken = !!(cfg.connection.smtpToken || cfg.connection.smtpTokenEncrypted);
+  const hasSlApiKey  = !!cfg.connection.simpleloginApiKey;
+  const hasPassToken = !!cfg.connection.passAccessToken;
   return {
     ...cfg,
     credentialStorage: cfg.credentialStorage ?? "config",
     connection: {
       ...cfg.connection,
-      password:  hasPassword  ? "••••••••" : "",
-      smtpToken: hasSmtpToken ? "••••••••" : "",
+      password:          hasPassword  ? "••••••••" : "",
+      smtpToken:         hasSmtpToken ? "••••••••" : "",
+      simpleloginApiKey: hasSlApiKey  ? "••••••••" : "",
+      passAccessToken:   hasPassToken ? "••••••••" : "",
       // Never send encrypted blobs to the browser
       passwordEncrypted:  undefined,
       smtpTokenEncrypted: undefined,
@@ -2777,7 +2781,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         },
         requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
         desktopNotificationsEnabled: !!(document.getElementById('desktop-notifications') && document.getElementById('desktop-notifications').checked),
-        settingsPort: parseInt(get('settings-port'), 10) || 8765,
+        settingsPort: (function(){ var p = parseInt(get('settings-port'), 10); return isNaN(p) ? 8765 : p; })(),
       };
       const r = await fetch('/api/config', {
         method: 'POST',
@@ -4291,6 +4295,14 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (c.imapHost !== undefined && c.imapHost !== null && !validHost(c.imapHost)) {
             json(res, 400, { error: "Invalid imapHost: must be a non-empty string with no control characters (max 253 chars)." }); return;
           }
+          const validUrl = (u: unknown): boolean => {
+            if (typeof u !== "string") return false;
+            if (u.trim() === "") return true;
+            try { const p = new URL(u.trim()); return p.protocol === "http:" || p.protocol === "https:"; } catch { return false; }
+          };
+          if (c.simpleloginBaseUrl !== undefined && !validUrl(c.simpleloginBaseUrl)) {
+            json(res, 400, { error: "Invalid simpleloginBaseUrl: must be an http:// or https:// URL, or empty." }); return;
+          }
 
           current.connection = {
             ...current.connection,
@@ -4304,10 +4316,10 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             debug:           typeof c.debug === "boolean" ? c.debug : current.connection.debug,
             autoStartBridge: typeof c.autoStartBridge === "boolean" ? c.autoStartBridge : current.connection.autoStartBridge,
             allowInsecureBridge: typeof c.allowInsecureBridge === "boolean" ? c.allowInsecureBridge : current.connection.allowInsecureBridge,
-            // Optional integrations: only overwrite when a non-empty, non-placeholder value was posted
-            ...(typeof c.simpleloginApiKey === "string" && c.simpleloginApiKey && c.simpleloginApiKey !== "••••••••" ? { simpleloginApiKey: c.simpleloginApiKey } : {}),
-            simpleloginBaseUrl: typeof c.simpleloginBaseUrl === "string" ? c.simpleloginBaseUrl : current.connection.simpleloginBaseUrl,
-            ...(typeof c.passAccessToken === "string" && c.passAccessToken && c.passAccessToken !== "••••••••" ? { passAccessToken: c.passAccessToken } : {}),
+            // Optional integrations: placeholder ("••••••••") = keep existing; any other string (incl. "") = set (empty clears)
+            ...(typeof c.simpleloginApiKey === "string" && c.simpleloginApiKey !== "••••••••" ? { simpleloginApiKey: c.simpleloginApiKey.trim() || undefined } : {}),
+            simpleloginBaseUrl: typeof c.simpleloginBaseUrl === "string" ? c.simpleloginBaseUrl.trim() : current.connection.simpleloginBaseUrl,
+            ...(typeof c.passAccessToken === "string" && c.passAccessToken !== "••••••••" ? { passAccessToken: c.passAccessToken.trim() || undefined } : {}),
             passCliPath: typeof c.passCliPath === "string" ? c.passCliPath.trim() : current.connection.passCliPath,
             // Only overwrite credentials if a non-empty, non-placeholder string was sent
             ...(typeof c.password  === "string" && c.password  && c.password  !== "••••••••" ? { password:  c.password  } : {}),
@@ -4318,7 +4330,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // Merge settingsPort
         if (typeof body.settingsPort === "number") {
           const sp = Math.round(body.settingsPort);
-          if (sp >= 1 && sp <= 65535) current.settingsPort = sp;
+          if (sp >= 1 && sp <= 65535) {
+            current.settingsPort = sp;
+          } else {
+            json(res, 400, { error: `Invalid settingsPort: must be 1–65535 (got ${sp}).` }); return;
+          }
         }
 
         // Merge compliance flags (destructive-confirm, ToS ack) and notification prefs
