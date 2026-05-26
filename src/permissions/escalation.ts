@@ -335,13 +335,14 @@ export function requestEscalation(
   const newTools         = computeNewTools(currentPreset, targetPreset);
   const unthrottledTools = computeUnthrottledTools(currentPreset, targetPreset);
 
+  const sanitizedReason = reason.replace(/[\x00-\x1f\x7f]|\x1b\[[0-9;]*[a-zA-Z]/g, "").slice(0, 500);
   const record: EscalationRecord = {
     id,
     requestedAt:      now.toISOString(),
     expiresAt:        expiresAt.toISOString(),
     targetPreset,
     currentPreset,
-    reason:           reason.replace(/[\x00-\x1f\x7f]|\x1b\[[0-9;]*[a-zA-Z]/g, "").slice(0, 500),
+    reason:           sanitizedReason,
     status:           "pending",
     resolvedAt:       null,
     resolvedBy:       null,
@@ -358,7 +359,7 @@ export function requestEscalation(
     id,
     fromPreset: currentPreset,
     toPreset:   targetPreset,
-    reason,
+    reason:     sanitizedReason,
   });
 
   return { ok: true, id, expiresAt: expiresAt.toISOString(), newTools, unthrottledTools };

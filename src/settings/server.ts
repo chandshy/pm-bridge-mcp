@@ -4939,10 +4939,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no"); // disable proxy buffering
         res.write(`: connected\n\n`);
+        const stripNL = (s: unknown) => String(s).replace(/[\r\n]/g, "");
         const unsub = agentNotifications.subscribe((ev) => {
           try {
-            res.write(`event: ${ev.kind}\n`);
-            res.write(`id: ${ev.seq}\n`);
+            res.write(`event: ${stripNL(ev.kind)}\n`);
+            res.write(`id: ${stripNL(ev.seq)}\n`);
             res.write(`data: ${JSON.stringify(ev.grant)}\n\n`);
           } catch { /* client disconnected mid-write */ }
         });

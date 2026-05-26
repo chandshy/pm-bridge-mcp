@@ -132,11 +132,15 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise
  */
 export function clientIp(req: IncomingMessage): string {
   const direct = req.socket.remoteAddress ?? "0.0.0.0";
+  // Only the exact loopback addresses qualify — earlier code accepted any
+  // 127.x.x.x or any ::ffff:127.x.x.x form, which on dual-stack/containerized
+  // setups let an attacker reaching the host from a non-loopback IPv6 address
+  // spoof X-Forwarded-For. Reject any IPv4-mapped-loopback variant other than
+  // ::ffff:127.0.0.1.
   const isLoopback =
     direct === "127.0.0.1" ||
     direct === "::1" ||
-    direct === "::ffff:127.0.0.1" ||
-    direct.startsWith("127.");
+    direct === "::ffff:127.0.0.1";
   if (!isLoopback) return direct;
   const h = req.headers["x-forwarded-for"];
   const raw = Array.isArray(h) ? h[0] : h;

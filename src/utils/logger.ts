@@ -15,7 +15,7 @@ import { LogEntry } from "../types/index.js";
  * want on disk"; the second is "email body-like fields" that might carry
  * user content we don't need in a debug log.
  */
-const SENSITIVE_KEYS = /(password|token|secret|apikey|api_key|verifier|credential|authorization|bridgecertpath|attachments|content|^body$)/i;
+const SENSITIVE_KEYS = /(password|token|secret|apikey|api_key|verifier|credential|authorization|cookie|oauth|bridgecertpath|attachments|content|^body$)/i;
 
 export function getLogFilePath(): string {
   const envPath = process.env.MAILPOUCH_LOG_FILE;

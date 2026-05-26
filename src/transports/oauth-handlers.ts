@@ -13,8 +13,11 @@
  *   POST /oauth/revoke                            — token revocation
  *
  * The "consent page" is a single minimal HTML form that asks the user to
- * paste the admin password (the same value as remoteBearerToken — the
- * intent is to prove physical presence, not to model a full user base).
+ * paste the admin password — a value distinct from remoteBearerToken,
+ * configured separately as remoteOauthAdminPassword. The intent is to
+ * prove physical presence, not to model a full user base. Do NOT reuse
+ * the bearer token here: a single shared secret across both auth modes
+ * means compromise of one path compromises both.
  *
  * Rate-limited through the shared TokenBucketLimiter (per client IP).
  */
@@ -242,6 +245,7 @@ export class OAuthHandlers {
       return { handled: true };
     }
     if (method !== "S256") { error(res, 400, "invalid_request", "PKCE S256 is required."); return { handled: true }; }
+    if (state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
     if (!codeChallenge || codeChallenge.length < 43) { error(res, 400, "invalid_request", "code_challenge missing or too short."); return { handled: true }; }
 
     const html = this.consentPage({
@@ -279,6 +283,7 @@ export class OAuthHandlers {
     if (!client) { error(res, 400, "invalid_client", "Unknown client_id."); return { handled: true }; }
     const redirectUri = body.redirect_uri ?? "";
     if (!client.redirect_uris.includes(redirectUri)) { error(res, 400, "invalid_redirect_uri"); return { handled: true }; }
+    if (body.state && body.state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
 
     const rec = this.store.issueAuthCode({
       clientId: client.client_id,
