@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.22] — 2026-05-26
+
+### Security
+- **`safeConfig` credential leak** — `simpleloginApiKey` and `passAccessToken` are now redacted to `"••••••••"` before `GET /api/config` is sent to the browser. Previously both were returned in plaintext alongside `password`/`smtpToken`.
+- **SSRF via `simpleloginBaseUrl`** — `validUrl` now enforces `http:`/`https:` scheme only. `file://`, `javascript:`, `ftp://`, and internal network addresses are rejected with HTTP 400 at save time.
+
+### Fixed
+- **SimpleLogin / Pass token revocation** — clearing the API key or PAT field in Settings and clicking Save now removes the stored value. Previously the truthy guard blocked empty-string writes, making revocation impossible from the UI.
+- **Whitespace in pasted tokens** — `simpleloginApiKey` and `passAccessToken` are now `.trim()`'d before storage, preventing silent 401 failures from clipboard-pasted keys with trailing newlines.
+- **`bulk_delete_emails` / `bulk_delete` performance** — replaced per-email loop with `imapService.bulkDeleteEmails()` (single batched IMAP UID STORE). Closes #120.
+- **`bulk_move_emails` performance** — replaced per-email loop with `imapService.bulkMoveEmails()` (single batched IMAP UID COPY + expunge). Closes #120.
+- **`sendProgress` restored** — `bulk_delete_emails` and `bulk_move_emails` now emit a completion progress notification when a `progressToken` is provided, honouring the documented contract.
+- **Silent success on invalid email IDs** — if all IDs in a bulk call fail the numeric-UID filter, the handler now throws `InvalidParams` instead of returning `{success:0, failed:0, errors:[]}`.
+- **`remoteMode` silent stdio fallback** — if `remoteMode` is set in config but no bearer token or OAuth credentials are configured, the server now exits with a clear error message instead of silently falling back to stdio (which caused invisible hangs under NSSM/systemd).
+- **`settingsPort` out-of-range silent no-op** — values outside 1–65535 now return HTTP 400; previously the assignment was silently skipped.
+- **`settingsPort` falsy-zero** — `parseInt(port) || 8765` replaced with `isNaN(p) ? 8765 : p` so port `0` is passed to the server for proper rejection rather than silently substituted.
+
+### Added
+- **`--no-tray` / `--no-settings-ui` CLI flags** — the `mailpouch` binary now accepts these flags for headless service deployments (NSSM, systemd) where no display is available. Partially addresses #119.
+
 ## [3.0.21] — 2026-05-08
 
 ### Added
