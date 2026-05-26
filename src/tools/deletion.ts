@@ -82,7 +82,7 @@ export const defs: ToolDef[] = [
 ];
 
 const bulkDeleteHandler: ToolHandler = async (ctx) => {
-  const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, safeErrorMessage, state } = ctx;
+  const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, state } = ctx;
   if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
     throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
   }
@@ -90,20 +90,12 @@ const bulkDeleteHandler: ToolHandler = async (ctx) => {
   const emailIds3: string[] = rawIds3
     .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
     .slice(0, MAX_BULK_IDS);
-  const total3 = emailIds3.length;
-  const results3 = { success: 0, failed: 0, errors: [] as string[] };
-
-  for (let i = 0; i < emailIds3.length; i++) {
-    try {
-      await imapService.deleteEmail(emailIds3[i]);
-      results3.success++;
-    } catch (e: unknown) {
-      results3.failed++;
-      results3.errors.push(`${emailIds3[i]}: ${safeErrorMessage(e)}`);
-    }
-    await sendProgress(i + 1, total3, `Deleted ${i + 1} of ${total3}`);
+  if (emailIds3.length === 0) {
+    throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list. Email IDs must be numeric UID strings.");
   }
 
+  const results3 = await imapService.bulkDeleteEmails(emailIds3);
+  await sendProgress(emailIds3.length, emailIds3.length, `Deleted ${results3.success} of ${emailIds3.length} (${results3.failed} failed)`);
   state.analyticsCache = null;
   state.analyticsCacheInflight = null;
   return bulkOk(results3);

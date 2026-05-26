@@ -393,7 +393,7 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   bulk_move_emails: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, safeErrorMessage, state } = ctx;
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, state } = ctx;
     const bmValidErr = validateTargetFolder(args.targetFolder);
     if (bmValidErr) throw new McpError(ErrorCode.InvalidParams, bmValidErr);
     if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
@@ -403,21 +403,13 @@ export const handlers: Record<string, ToolHandler> = {
     const emailIds: string[] = rawIds
       .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
       .slice(0, MAX_BULK_IDS);
-    const targetFolder = args.targetFolder as string;
-    const total = emailIds.length;
-    const results = { success: 0, failed: 0, errors: [] as string[] };
-
-    for (let i = 0; i < emailIds.length; i++) {
-      try {
-        await imapService.moveEmail(emailIds[i], targetFolder);
-        results.success++;
-      } catch (e: unknown) {
-        results.failed++;
-        results.errors.push(`${emailIds[i]}: ${safeErrorMessage(e)}`);
-      }
-      await sendProgress(i + 1, total, `Moved ${i + 1} of ${total}`);
+    if (emailIds.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list. Email IDs must be numeric UID strings.");
     }
+    const targetFolder = args.targetFolder as string;
 
+    const results = await imapService.bulkMoveEmails(emailIds, targetFolder);
+    await sendProgress(emailIds.length, emailIds.length, `Moved ${results.success} of ${emailIds.length} to ${targetFolder} (${results.failed} failed)`);
     state.analyticsCache = null;
     state.analyticsCacheInflight = null;
     return bulkOk(results);
