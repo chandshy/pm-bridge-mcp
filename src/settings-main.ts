@@ -23,8 +23,10 @@
  *   --help          Show usage and exit
  */
 
-import { createRequire } from "module";
 import { spawn } from "child_process";
+import { readFileSync } from "fs";
+import { fileURLToPath as _fileURLToPath } from "url";
+import nodePath from "path";
 import {
   detectEnvironment,
   openBrowser,
@@ -36,6 +38,13 @@ import { startSettingsServer } from "./settings/server.js";
 import { loadConfig } from "./config/loader.js";
 import { createTray, trayPreconditionSkip, inheritDisplayFromParent, type TrayHandle } from "./utils/tray.js";
 import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
+
+const _pkgVersion = (() => {
+  try {
+    const dir = nodePath.dirname(_fileURLToPath(import.meta.url));
+    return (JSON.parse(readFileSync(nodePath.resolve(dir, "../package.json"), "utf-8")) as { version: string }).version;
+  } catch { return "unknown"; }
+})();
 
 // ─── Parse CLI flags ──────────────────────────────────────────────────────────
 
@@ -62,13 +71,7 @@ if (hasFlag("--help") || hasFlag("-h")) {
 }
 
 if (hasFlag("--version") || hasFlag("-v")) {
-  try {
-    const require = createRequire(import.meta.url);
-    const pkg = require("../package.json") as { version: string };
-    process.stdout.write(`${pkg.version}\n`);
-  } catch {
-    process.stdout.write("unknown\n");
-  }
+  process.stdout.write(`${_pkgVersion}\n`);
   process.exit(0);
 }
 
@@ -176,6 +179,7 @@ function _startTrayIcon(url: string): void {
       tooltip: "mailpouch — Proton Mail via Bridge",
       items: [
         { id: "header",   label: "mailpouch", enabled: false },
+        { id: "version",  label: `v${_pkgVersion}`, enabled: false },
         { id: "sep1",     label: "",          separator: true },
         { id: "open",     label: "Open Settings" },
         { id: "sep2",     label: "",          separator: true },

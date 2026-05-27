@@ -304,7 +304,7 @@ function buildAgentSetupJson(settingsPort = 8765) {
       discovery: "The list of configured accounts is not exposed as a tool (operator's decision for privacy). Ask the user to set the default in the settings UI, or pass account_id on every call.",
     },
     firstCallAdvice:
-      "Before invoking tools, call tools/list to discover the currently-exposed surface. Default tier is `complete` (69 tools) but operators can restrict to `core` (~20 tools) or `extended` (~50) via MAILPOUCH_TIER. Per-agent grants can further narrow the surface or impose folder allowlists / IP pins / rate limits. If a tool you expected is missing, ask the user to adjust the grant — don't assume it's a bug.",
+      "Before invoking tools, call tools/list to discover the currently-exposed surface. Default tier is `complete` (70 tools) but operators can restrict to `core` (~20 tools) or `extended` (~50) via MAILPOUCH_TIER. Per-agent grants can further narrow the surface or impose folder allowlists / IP pins / rate limits. If a tool you expected is missing, ask the user to adjust the grant — don't assume it's a bug.",
     humanControls: {
       settingsUi: `http://localhost:${settingsPort}`,
       description: "The operator uses this UI to approve your agent, set conditions (expiry, folder allowlist, IP pins, per-tool rate limits, account scope), and revoke access. Every tool call you make is audit-logged (hashed-args, never values). Your audit trail is visible to them.",

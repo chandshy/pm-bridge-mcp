@@ -1,9 +1,12 @@
 /**
  * System & maintenance tools: get_connection_status, sync_emails,
- * clear_cache, get_logs.
+ * clear_cache, get_logs, get_server_version.
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { readFileSync } from "fs";
+import { fileURLToPath as _fileURLToPath } from "url";
+import nodePath from "path";
 import { validateTargetFolder } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
@@ -131,6 +134,20 @@ export const defs: ToolDef[] = [
       required: ["logs"],
     },
   },
+  {
+    name: "get_server_version",
+    title: "Get Server Version",
+    description: "Return the running mailpouch server version. Use to confirm which version is active before reporting bugs or checking for new features.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: {
+      type: "object",
+      properties: {
+        version: { type: "string", description: "Semver string (e.g. '3.0.33')" },
+      },
+      required: ["version"],
+    },
+  },
 ];
 
 export const handlers: Record<string, ToolHandler> = {
@@ -213,6 +230,16 @@ export const handlers: Record<string, ToolHandler> = {
     const limit   = Math.min(Math.max(1, Math.trunc(rawLimit)), 500);
     const logs    = logger.getLogs(level, limit);
     return ok({ logs });
+  },
+
+  get_server_version: async (ctx) => {
+    const { ok } = ctx;
+    let version = "unknown";
+    try {
+      const dir = nodePath.dirname(_fileURLToPath(import.meta.url));
+      version = (JSON.parse(readFileSync(nodePath.resolve(dir, "../../package.json"), "utf-8")) as { version: string }).version;
+    } catch { /* package.json missing in unusual deploy */ }
+    return ok({ version });
   },
 };
 

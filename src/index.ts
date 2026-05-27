@@ -1684,6 +1684,7 @@ function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
     : "mailpouch";
   const items: TrayItem[] = [
     { id: "header",  label: "mailpouch", enabled: false },
+    { id: "version", label: `v${_pkgVersion}`, enabled: false },
     { id: "sep1",    label: "",          separator: true },
     { id: "status",  label: statusLabel, enabled: false },
     { id: "account", label: emailLabel,  enabled: false },

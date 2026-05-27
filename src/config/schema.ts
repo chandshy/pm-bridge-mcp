@@ -30,7 +30,7 @@ export const ALL_TOOLS = [
   // Analytics
   "get_email_stats", "get_email_analytics", "get_contacts", "get_volume_trends",
   // System
-  "get_connection_status", "sync_emails", "clear_cache", "get_logs",
+  "get_connection_status", "sync_emails", "clear_cache", "get_logs", "get_server_version",
   // Bridge & server control
   "start_bridge", "shutdown_server", "restart_server",
   // SimpleLogin aliases (Proton-owned; optional — requires API key)
@@ -112,8 +112,8 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   },
   system: {
     label: "System",
-    description: "Connection status, cache control, and server logs",
-    tools: ["get_connection_status", "sync_emails", "clear_cache", "get_logs"],
+    description: "Connection status, cache control, server logs, and version info",
+    tools: ["get_connection_status", "sync_emails", "clear_cache", "get_logs", "get_server_version"],
     risk: "safe",
   },
   bridge_control: {

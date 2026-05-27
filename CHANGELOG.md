@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.34] — 2026-05-27
+
+### Added
+- **`get_server_version` tool** — agents can now query the running server version directly via MCP (`get_server_version` → `{ version: "3.0.34" }`). Belongs to the `system` / `core` tier so it is always available.
+- **Version label in tray icon menu** — both the MCP server tray and the standalone settings-daemon tray now display the running version (e.g. `v3.0.34`) as a disabled menu item below the `mailpouch` header.
+
 ## [3.0.33] — 2026-05-27
 
 ### Fixed
