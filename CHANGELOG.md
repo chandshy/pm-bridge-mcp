@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.40] — 2026-05-27
+
+### Fixed
+- **Settings UI: page hangs after header load** — unescaped apostrophe in a JS string literal inside the `buildShellHtml` template literal. `\'` inside a TS template literal produces `'` in output, breaking the generated JS string `'This removes the server's ability...'` with a syntax error. The entire `<script>` block failed to parse, so the IIFE never ran and the page never initialized. Fixed by using `\\'` to produce a properly escaped `\'` in the output.
+
 ## [3.0.39] — 2026-05-27
 
 ### Fixed

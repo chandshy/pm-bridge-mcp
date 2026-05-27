@@ -502,7 +502,7 @@ ${buildStyles(cspNonce)}
   function deleteAccountConfirm(id) {
     showConfirm({
       title: 'Delete account?',
-      body:  'This removes the server\'s ability to connect to it. The active account cannot be deleted.',
+      body:  'This removes the server\\'s ability to connect to it. The active account cannot be deleted.',
       label: 'Delete',
       onConfirm: async () => {
         const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
