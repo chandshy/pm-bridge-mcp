@@ -587,7 +587,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         const html = buildShellHtml(configPath, csrfToken, port, cspNonce);
         res.writeHead(200, {
           "Content-Type":             "text/html; charset=utf-8",
-          "Content-Security-Policy":  `default-src 'self'; style-src 'nonce-${cspNonce}'; script-src 'nonce-${cspNonce}'`,
+          // 'unsafe-inline' alongside a nonce is intentional:
+          // - For <script>/<style> blocks: the nonce overrides 'unsafe-inline' in
+          //   CSP3 browsers, so only our nonce'd blocks run.
+          // - For inline onclick="..." handlers and style="..." attributes: nonces
+          //   do NOT cover these; 'unsafe-inline' is required to allow them.
+          //   Without it, every button onclick and every style="display:none"
+          //   attribute is silently blocked, breaking all interactivity and
+          //   causing hidden modals to render in normal document flow.
+          "Content-Security-Policy":  `default-src 'self'; style-src 'nonce-${cspNonce}' 'unsafe-inline'; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
           "X-Content-Type-Options":   "nosniff",
           "X-Frame-Options":          "DENY",
           "Referrer-Policy":          "no-referrer",

@@ -412,10 +412,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
    WIZARD STYLES
    ═══════════════════════════════════════════════════════ */
 
-/* Wizard takes over the full viewport */
+/* Wizard takes over the full viewport — hidden by default, shown by JS */
 #wizard-view {
   min-height: calc(100vh - 58px);
-  display: flex; align-items: flex-start; justify-content: center;
+  display: none; align-items: flex-start; justify-content: center;
   padding: 40px 20px 80px;
 }
 

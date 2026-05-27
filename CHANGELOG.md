@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.33] — 2026-05-27
+
+### Fixed
+- **Settings page completely non-interactive** — the CSP header used `style-src/script-src 'nonce-...'` without `'unsafe-inline'`. CSP3 nonces cover `<script>`/`<style>` block elements but do NOT cover (a) inline `onclick="..."` event handlers or (b) `style="..."` attributes on HTML elements. Effect: every button click was silently swallowed, and every `style="display:none"` attribute was ignored — causing the "Approve with conditions" grant modal and other hidden elements to render in normal document flow on top of the settings content. Added `'unsafe-inline'` to both directives; in CSP3 browsers the nonce still gates `<script>`/`<style>` blocks (nonce overrides unsafe-inline for those), while unsafe-inline covers event handlers and inline style attributes.
+- **Wizard-view flash on load** — `#wizard-view` CSS had `display:flex` as its default, so an empty flex container was briefly visible before JavaScript ran. Changed default to `display:none`; the JS sets `display:flex` explicitly when the wizard is needed.
+
 ## [3.0.32] — 2026-05-27
 
 ### Fixed
