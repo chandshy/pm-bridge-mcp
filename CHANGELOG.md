@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.24] — 2026-05-26
+
+### Security
+- **Credential encryption — per-system entropy (v2 blob format)** — the AES-256-GCM key for `passwordEncrypted` / `smtpTokenEncrypted` is now derived from `machine-id || hostname || salt || platform`. The previous v1 derivation used only `hostname || salt || platform`, so a VM/container clone (or any host sharing hostname + platform) could decrypt credentials from a sibling install. Machine secret resolved in priority order: `/etc/machine-id`, `/var/lib/dbus/machine-id`, macOS `IOPlatformUUID`, Windows `MachineGuid`, then a per-install `~/.mailpouch-machine-id` (mode 0600) as fallback. `MAILPOUCH_MACHINE_SECRET` env override for containers / tests.
+- **Transparent v1 → v2 migration** — existing encrypted blobs continue to decrypt with the legacy key; `migrateCredentials()` (run at every startup) upgrades v1 blobs in place by decrypting with the old key and re-encrypting with the new key. Operators never have to re-enter credentials.
+
 ## [3.0.23] — 2026-05-26
 
 ### Security
