@@ -343,6 +343,7 @@ export class OAuthHandlers {
       clientId: auth.clientId,
       scopes: auth.scopes,
       resource: auth.resource ?? resource,
+      issuedFromIp: clientIp(req),
     });
 
     json(res, 200, {

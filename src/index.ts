@@ -2025,13 +2025,20 @@ async function main() {
     // Claude Desktop spawns.
     const loadedCfg = loadConfig();
     const remoteCn = loadedCfg?.connection;
-    const hasBearer = !!remoteCn?.remoteBearerToken;
-    const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!remoteCn?.remoteOauthAdminPassword;
+    // Prefer keychain-stored remote secrets over the (legacy) plaintext
+    // config-file values. When both are present the keychain wins, matching
+    // the loadCredentialsFromKeychain priority chain for password/smtpToken.
+    const { loadRemoteSecrets } = await import("./security/keychain.js");
+    const remoteSecrets = await loadRemoteSecrets();
+    const effectiveBearer = remoteSecrets?.remoteBearerToken || remoteCn?.remoteBearerToken || "";
+    const effectiveAdminPassword = remoteSecrets?.remoteOauthAdminPassword || remoteCn?.remoteOauthAdminPassword || "";
+    const hasBearer = !!effectiveBearer;
+    const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!effectiveAdminPassword;
     if (remoteCn?.remoteMode) {
       if (!hasBearer && !hasOAuth) {
         logger.error(
           "remoteMode is set but no authentication is configured. " +
-          "Set remoteBearerToken OR both remoteOauthEnabled and remoteOauthAdminPassword in ~/.mailpouch.json. " +
+          "Set remoteBearerToken OR both remoteOauthEnabled and remoteOauthAdminPassword in ~/.mailpouch.json (or via keychain). " +
           "Refusing to start without auth — edit the config or remove remoteMode to use stdio.",
           "MCPServer"
         );
@@ -2043,11 +2050,11 @@ async function main() {
         host: remoteCn.remoteHost || "127.0.0.1",
         port: remoteCn.remotePort ?? 8788,
         path: remoteCn.remotePath || "/mcp",
-        bearerToken: remoteCn.remoteBearerToken || "",
+        bearerToken: effectiveBearer,
         tlsCertPath: remoteCn.remoteTlsCertPath || undefined,
         tlsKeyPath:  remoteCn.remoteTlsKeyPath  || undefined,
         oauthEnabled: !!remoteCn.remoteOauthEnabled,
-        oauthAdminPassword: remoteCn.remoteOauthAdminPassword || undefined,
+        oauthAdminPassword: effectiveAdminPassword || undefined,
         oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
         rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
         rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,

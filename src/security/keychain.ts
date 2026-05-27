@@ -18,6 +18,8 @@ import type { ServerConfig } from "../config/schema.js";
 const SERVICE_NAME = "mailpouch";
 const KEY_PASSWORD = "bridge-password";
 const KEY_SMTP_TOKEN = "smtp-token";
+const KEY_REMOTE_BEARER = "remote-bearer-token";
+const KEY_REMOTE_OAUTH_ADMIN = "remote-oauth-admin-password";
 
 /**
  * Build the keychain account key for a per-account credential. Multi-
@@ -238,23 +240,67 @@ export async function migrateFromConfig(
 ): Promise<boolean> {
   const password = config.connection.password;
   const smtpToken = config.connection.smtpToken;
+  const remoteBearer = config.connection.remoteBearerToken;
+  const remoteOauthAdmin = config.connection.remoteOauthAdminPassword;
 
-  // Nothing to migrate if credentials are already blank
-  if (!password && !smtpToken) return false;
+  // Nothing to migrate if all credentials are already blank
+  if (!password && !smtpToken && !remoteBearer && !remoteOauthAdmin) return false;
 
   // Check if keychain is available
   const available = await isKeychainAvailable();
   if (!available) return false;
 
-  // Store in keychain
-  const saved = await saveCredentials(password, smtpToken);
-  if (!saved) return false;
+  // Store bridge creds (existing flow)
+  let migrated = false;
+  if (password || smtpToken) {
+    const saved = await saveCredentials(password, smtpToken);
+    if (saved) {
+      config.connection.password = "";
+      config.connection.smtpToken = "";
+      migrated = true;
+    }
+  }
 
-  // Blank credentials in config file
-  config.connection.password = "";
-  config.connection.smtpToken = "";
-  config.credentialStorage = "keychain";
-  saveConfigFn(config);
+  // Store OAuth secrets (new) — same pattern, separate keychain entries.
+  if (remoteBearer || remoteOauthAdmin) {
+    const saved = await saveRemoteSecrets(remoteBearer ?? "", remoteOauthAdmin ?? "");
+    if (saved) {
+      config.connection.remoteBearerToken = "";
+      config.connection.remoteOauthAdminPassword = "";
+      migrated = true;
+    }
+  }
 
-  return true;
+  if (migrated) {
+    config.credentialStorage = "keychain";
+    saveConfigFn(config);
+  }
+  return migrated;
+}
+
+/** Load remoteBearerToken + remoteOauthAdminPassword from the keychain. */
+export async function loadRemoteSecrets(): Promise<{ remoteBearerToken: string; remoteOauthAdminPassword: string } | null> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return null;
+    const remoteBearerToken = new keyring.Entry(SERVICE_NAME, KEY_REMOTE_BEARER).getPassword() ?? "";
+    const remoteOauthAdminPassword = new keyring.Entry(SERVICE_NAME, KEY_REMOTE_OAUTH_ADMIN).getPassword() ?? "";
+    if (!remoteBearerToken && !remoteOauthAdminPassword) return null;
+    return { remoteBearerToken, remoteOauthAdminPassword };
+  } catch {
+    return null;
+  }
+}
+
+/** Save remoteBearerToken + remoteOauthAdminPassword to the keychain. */
+export async function saveRemoteSecrets(remoteBearerToken: string, remoteOauthAdminPassword: string): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    if (remoteBearerToken) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_BEARER).setPassword(remoteBearerToken);
+    if (remoteOauthAdminPassword) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_OAUTH_ADMIN).setPassword(remoteOauthAdminPassword);
+    return true;
+  } catch {
+    return false;
+  }
 }
