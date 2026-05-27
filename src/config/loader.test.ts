@@ -571,6 +571,10 @@ describe("saveConfigWithCredentials", () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    // Avoid having CredentialEncryption write a machine-id fallback file when
+    // every fs call is mocked — supply the secret via env override so the
+    // writeFileSync assertions count only the config-save itself.
+    process.env.MAILPOUCH_MACHINE_SECRET = "test-machine-secret-deterministic";
   });
 
   it("stores credentials in keychain and blanks them in config file when keychain succeeds", async () => {

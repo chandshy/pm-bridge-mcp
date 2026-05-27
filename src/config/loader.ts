@@ -484,9 +484,39 @@ export async function migrateCredentials(): Promise<boolean> {
     return false;
   }
 
-  // Only migrate when there are plaintext credentials that haven't been migrated yet.
+  // Plaintext-creds path: hoist to keychain (preferred) or encrypted-file.
   const hasPlaintext = !!(config.connection.password || config.connection.smtpToken);
   const alreadyEncrypted = !!(config.connection.passwordEncrypted || config.connection.smtpTokenEncrypted);
+
+  // Re-encryption path: existing v1 blobs upgraded to v2 (per-system entropy).
+  // Decrypt with the matching old key, re-encrypt with the new key, save.
+  const passwordEncryptedField = config.connection.passwordEncrypted;
+  const smtpEncryptedField = config.connection.smtpTokenEncrypted;
+  const pwNeedsReencrypt = CredentialEncryption.isValidEncrypted(passwordEncryptedField)
+    && CredentialEncryption.needsReencrypt(passwordEncryptedField);
+  const smtpNeedsReencrypt = CredentialEncryption.isValidEncrypted(smtpEncryptedField)
+    && CredentialEncryption.needsReencrypt(smtpEncryptedField);
+  if (!hasPlaintext && (pwNeedsReencrypt || smtpNeedsReencrypt)) {
+    try {
+      if (pwNeedsReencrypt && CredentialEncryption.isValidEncrypted(passwordEncryptedField)) {
+        const plain = CredentialEncryption.decrypt(passwordEncryptedField);
+        config.connection.passwordEncrypted = CredentialEncryption.encrypt(plain);
+      }
+      if (smtpNeedsReencrypt && CredentialEncryption.isValidEncrypted(smtpEncryptedField)) {
+        const plain = CredentialEncryption.decrypt(smtpEncryptedField);
+        config.connection.smtpTokenEncrypted = CredentialEncryption.encrypt(plain);
+      }
+      saveConfig(config);
+      tags.migrated = true;
+      return true;
+    } catch {
+      // Decryption failed (e.g. host moved without preserving v1 key inputs).
+      // Don't crash; leave the v1 blob as-is so the next save path can rotate.
+      tags.migrated = false;
+      return false;
+    }
+  }
+
   if (!hasPlaintext || alreadyEncrypted) {
     tags.migrated = false;
     return false;
@@ -499,7 +529,7 @@ export async function migrateCredentials(): Promise<boolean> {
     return true;
   }
 
-  // Fall back to encrypted-file
+  // Fall back to encrypted-file (always writes the current version)
   config.connection.passwordEncrypted  = config.connection.password
     ? CredentialEncryption.encrypt(config.connection.password)
     : undefined;
