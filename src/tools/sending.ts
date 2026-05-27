@@ -62,6 +62,7 @@ export const defs: ToolDef[] = [
       type: "object",
       properties: {
         emailId: { type: "string", description: "UID of the email to reply to" },
+        folder: { type: "string", description: "Folder the original message lives in. Providing this avoids UID collisions across folders." },
         body: { type: "string", description: "Reply body (plain text or HTML)" },
         isHtml: { type: "boolean", default: false },
         replyAll: {
@@ -84,6 +85,7 @@ export const defs: ToolDef[] = [
       type: "object",
       properties: {
         emailId: { type: "string", description: "UID of the email to forward" },
+        folder: { type: "string", description: "Folder the original message lives in. Providing this avoids UID collisions across folders." },
         to: { type: "string", description: "Recipient address(es), comma-separated" },
         message: { type: "string", description: "Optional message to prepend before the forwarded content" },
       },
@@ -177,7 +179,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.replyAll !== undefined && typeof args.replyAll !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'replyAll' must be a boolean when provided.");
     }
-    const original = await imapService.getEmailById(emailId);
+    const original = await imapService.getEmailById(emailId, args.folder as string | undefined);
     if (!original) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }
@@ -226,7 +228,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
       throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
     }
-    const fwdOriginal = await imapService.getEmailById(fwdId);
+    const fwdOriginal = await imapService.getEmailById(fwdId, args.folder as string | undefined);
     if (!fwdOriginal) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }

@@ -290,6 +290,7 @@ export const defsLate: ToolDef[] = [
       type: "object",
       properties: {
         email_id: { type: "string", description: "IMAP UID of any message in the thread" },
+        folder: { type: "string", description: "Folder the seed message lives in. Providing this avoids UID collisions across folders." },
         max_messages: { type: "number", description: "Max messages to return (default 50, cap 200)" },
       },
       required: ["email_id"],
@@ -417,6 +418,7 @@ export const defsLate: ToolDef[] = [
       type: "object",
       properties: {
         email_id: { type: "string", description: "IMAP UID from get_emails / search_emails" },
+        folder: { type: "string", description: "Folder the email lives in. Providing this avoids UID collisions across folders." },
       },
       required: ["email_id"],
     },
@@ -449,6 +451,7 @@ export const defsLate: ToolDef[] = [
       type: "object",
       properties: {
         email_id: { type: "string", description: "IMAP UID from get_emails / search_emails" },
+        folder: { type: "string", description: "Folder the email lives in. Providing this avoids UID collisions across folders." },
       },
       required: ["email_id"],
     },
@@ -716,10 +719,11 @@ export const handlers: Record<string, ToolHandler> = {
   get_thread: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const threadEmailId = requireNumericEmailId(args.email_id, "email_id");
+    const threadFolderHint = args.folder as string | undefined;
     const maxMsgs = typeof args.max_messages === "number"
       ? Math.min(Math.max(1, args.max_messages), 200)
       : 50;
-    const seed = await imapService.getEmailById(threadEmailId);
+    const seed = await imapService.getEmailById(threadEmailId, threadFolderHint);
     if (!seed) {
       return { content: [{ type: "text" as const, text: "Seed message not found" }], isError: true };
     }
@@ -831,7 +835,7 @@ export const handlers: Record<string, ToolHandler> = {
   extract_action_items: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const aiEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const email = await imapService.getEmailById(aiEmailId);
+    const email = await imapService.getEmailById(aiEmailId, args.folder as string | undefined);
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
@@ -842,7 +846,7 @@ export const handlers: Record<string, ToolHandler> = {
   extract_meeting: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const emEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const email = await imapService.getEmailById(emEmailId);
+    const email = await imapService.getEmailById(emEmailId, args.folder as string | undefined);
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
