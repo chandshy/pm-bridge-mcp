@@ -287,6 +287,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 #toast.show { opacity: 1; transform: translateY(0); }
 #toast.ok   { border-color: var(--success); color: var(--success); }
 #toast.err  { border-color: var(--danger);  color: var(--danger); }
+#toast.warn { border-color: var(--warn);    color: var(--warn); }
 
 /* ── Code block ── */
 .code-block {

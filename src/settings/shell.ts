@@ -194,6 +194,9 @@ ${buildStyles(cspNonce)}
 
   function _dispatch(action, el) {
     switch (action) {
+      // Shared confirm modal
+      case 'confirmModalOk':            return confirmModalOk();
+      case 'confirmModalCancel':        return confirmModalCancel();
       // Shell / view
       case 'shutdownServer':            return shutdownServer();
       case 'openSettingsView':          return openSettingsView();
@@ -455,7 +458,7 @@ ${buildStyles(cspNonce)}
       password: document.getElementById('af-password').value,
       bridgeCertPath: document.getElementById('af-cert').value.trim() || undefined,
     };
-    if (!body.name) { alert('Name is required.'); return; }
+    if (!body.name) { toast('Name is required.', 'err'); return; }
     const url = isEdit ? '/api/accounts/' + encodeURIComponent(id) : '/api/accounts';
     const method = isEdit ? 'PATCH' : 'POST';
     const r = await fetch(url, {
@@ -466,42 +469,55 @@ ${buildStyles(cspNonce)}
     if (!r.ok) {
       if (__mpReloading) return;
       const errBody = await r.json().catch(() => null);
-      alert('Save failed: ' + (errBody?.error || r.status));
+      toast('Save failed: ' + (errBody?.error || r.status), 'err');
       return;
     }
     closeAccountForm();
     refreshAccounts();
   }
 
-  async function activateAccount(id) {
-    if (!confirm('Switching the active account requires a server restart. Continue?')) return;
-    const r = await fetch('/api/accounts/' + encodeURIComponent(id) + '/activate', {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': CSRF },
+  function activateAccount(id) {
+    showConfirm({
+      title: 'Restart required',
+      body:  'Switching the active account requires a server restart. Continue?',
+      label: 'Switch account',
+      btnClass: 'btn-primary',
+      onConfirm: async () => {
+        const r = await fetch('/api/accounts/' + encodeURIComponent(id) + '/activate', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': CSRF },
+        });
+        if (!r.ok) {
+          if (__mpReloading) return;
+          const errBody = await r.json().catch(() => null);
+          toast('Activate failed: ' + (errBody?.error || r.status), 'err');
+          return;
+        }
+        toast('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).', 'ok');
+        refreshAccounts();
+      },
     });
-    if (!r.ok) {
-      if (__mpReloading) return;
-      const errBody = await r.json().catch(() => null);
-      alert('Activate failed: ' + (errBody?.error || r.status));
-      return;
-    }
-    alert('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).');
-    refreshAccounts();
   }
 
-  async function deleteAccountConfirm(id) {
-    if (!confirm('Delete this account? This removes the server\\'s ability to connect to it. Active account cannot be deleted.')) return;
-    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
-      method: 'DELETE',
-      headers: { 'X-CSRF-Token': CSRF },
+  function deleteAccountConfirm(id) {
+    showConfirm({
+      title: 'Delete account?',
+      body:  'This removes the server\'s ability to connect to it. The active account cannot be deleted.',
+      label: 'Delete',
+      onConfirm: async () => {
+        const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
+          method: 'DELETE',
+          headers: { 'X-CSRF-Token': CSRF },
+        });
+        if (!r.ok) {
+          if (__mpReloading) return;
+          const errBody = await r.json().catch(() => null);
+          toast('Delete failed: ' + (errBody?.error || r.status), 'err');
+          return;
+        }
+        refreshAccounts();
+      },
     });
-    if (!r.ok) {
-      if (__mpReloading) return;
-      const errBody = await r.json().catch(() => null);
-      alert('Delete failed: ' + (errBody?.error || r.status));
-      return;
-    }
-    refreshAccounts();
   }
 
   // ══ AGENTS TAB LOGIC ══════════════════════════════════════════════════════
@@ -622,29 +638,41 @@ ${buildStyles(cspNonce)}
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
       body: JSON.stringify({ preset })
     });
-    if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
+    if (!r.ok) { toast('Approve failed: ' + (await r.text()), 'err'); return; }
     refreshAgents();
   }
 
-  async function denyGrant(clientId) {
-    if (!confirm('Deny this agent? It will be unable to call any tools.')) return;
-    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/deny', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
-      body: '{}'
+  function denyGrant(clientId) {
+    showConfirm({
+      title: 'Deny agent?',
+      body:  'This agent will be unable to call any tools.',
+      label: 'Deny',
+      onConfirm: async () => {
+        const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/deny', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+          body: '{}'
+        });
+        if (!r.ok) { toast('Deny failed: ' + (await r.text()), 'err'); return; }
+        refreshAgents();
+      },
     });
-    if (!r.ok) { alert('Deny failed: ' + (await r.text())); return; }
-    refreshAgents();
   }
 
-  async function revokeGrant(clientId) {
-    if (!confirm('Revoke this agent\\'s access? Currently running tool calls finish; the next one will be denied.')) return;
-    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/revoke', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
+  function revokeGrant(clientId) {
+    showConfirm({
+      title: 'Revoke access?',
+      body:  'Currently running tool calls will finish; the next one will be denied.',
+      label: 'Revoke',
+      onConfirm: async () => {
+        const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
+        });
+        if (!r.ok) { toast('Revoke failed: ' + (await r.text()), 'err'); return; }
+        refreshAgents();
+      },
     });
-    if (!r.ok) { alert('Revoke failed: ' + (await r.text())); return; }
-    refreshAgents();
   }
 
   // SSE subscription — live-update the Agents tab and the nav badge.
@@ -1010,17 +1038,23 @@ ${buildStyles(cspNonce)}
   }
 
   // ── Shutdown server ───────────────────────────────────────────────────────
-  async function shutdownServer() {
-    if (!confirm('Stop the settings server? The browser tab will no longer work after this.')) return;
-    const btn = document.getElementById('shutdown-btn');
-    btn.disabled = true;
-    btn.textContent = 'Shutting down…';
-    try {
-      await fetch('/api/shutdown', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
-    } catch { /* expected — server closes the connection */ }
-    btn.textContent = '✓ Stopped';
-    toast('Settings server stopped.', 'ok');
-    setTimeout(() => { document.body.innerHTML = '<div style="font-family:sans-serif;color:#ccc;background:#0f0e1a;min-height:100vh;display:flex;align-items:center;justify-content:center;font-size:18px">Server stopped. Close this tab.</div>'; }, 1500);
+  function shutdownServer() {
+    showConfirm({
+      title: 'Stop settings server?',
+      body:  'The browser tab will no longer work after this.',
+      label: 'Stop server',
+      onConfirm: async () => {
+        const btn = document.getElementById('shutdown-btn');
+        btn.disabled = true;
+        btn.textContent = 'Shutting down…';
+        try {
+          await fetch('/api/shutdown', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+        } catch { /* expected — server closes the connection */ }
+        btn.textContent = '✓ Stopped';
+        toast('Settings server stopped.', 'ok');
+        setTimeout(() => { document.body.innerHTML = '<div style="font-family:sans-serif;color:#ccc;background:#0f0e1a;min-height:100vh;display:flex;align-items:center;justify-content:center;font-size:18px">Server stopped. Close this tab.</div>'; }, 1500);
+      },
+    });
   }
 
   // ══ SETTINGS TAB LOGIC ════════════════════════════════════════════════════
@@ -1203,10 +1237,10 @@ ${buildStyles(cspNonce)}
         input.value = d.path;
         input.dispatchEvent(new Event('change'));
       } else {
-        alert('No cert.pem found under your home directory. Click Browse to pick one manually, or export a cert via Bridge → Help → Export TLS Certificate.');
+        toast('No cert.pem found under your home directory. Click Browse to pick one manually, or export a cert via Bridge → Help → Export TLS Certificate.', 'warn');
       }
     } catch (e) {
-      alert('Detection failed: ' + (e && e.message ? e.message : e));
+      toast('Detection failed: ' + (e && e.message ? e.message : e), 'err');
     }
   }
 
@@ -1217,7 +1251,7 @@ ${buildStyles(cspNonce)}
     const file = el.files && el.files[0];
     if (!file) return;
     if (file.size > 256 * 1024) {
-      alert('File too large (max 256 KB for a PEM cert).');
+      toast('File too large (max 256 KB for a PEM cert).', 'err');
       el.value = '';
       return;
     }
@@ -1236,10 +1270,10 @@ ${buildStyles(cspNonce)}
           input.dispatchEvent(new Event('change'));
         }
       } else {
-        alert('Upload failed: ' + (d.error || ('HTTP ' + r.status)));
+        toast('Upload failed: ' + (d.error || ('HTTP ' + r.status)), 'err');
       }
     } catch (e) {
-      alert('Upload error: ' + (e && e.message ? e.message : e));
+      toast('Upload error: ' + (e && e.message ? e.message : e), 'err');
     } finally {
       el.value = ''; // allow re-picking the same file
     }
@@ -1725,11 +1759,17 @@ ${buildStyles(cspNonce)}
   function logToggleFollow() {
     if (LOG.following) { logStopFollow(); } else { logGoLast(); }
   }
-  async function logClear() {
-    if (!confirm('Clear the log file?')) return;
-    await fetch('/api/logs/clear', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
-    LOG.page = 1; LOG.pages = 1; LOG.total = 0;
-    logFetch(1);
+  function logClear() {
+    showConfirm({
+      title: 'Clear log file?',
+      body:  'All log entries will be permanently deleted.',
+      label: 'Clear',
+      onConfirm: async () => {
+        await fetch('/api/logs/clear', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+        LOG.page = 1; LOG.pages = 1; LOG.total = 0;
+        logFetch(1);
+      },
+    });
   }
 
   // ── Response Limits ───────────────────────────────────────────────────────
@@ -1811,11 +1851,17 @@ ${buildStyles(cspNonce)}
     }
   }
 
-  async function resetConfig() {
-    if (!confirm('Reset the config file to defaults? Current settings will be lost.')) return;
-    const r = await fetch('/api/reset', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
-    if (r.ok) { toast('Config reset.', 'ok'); await refresh(); }
-    else       { toast('Reset failed.', 'err'); }
+  function resetConfig() {
+    showConfirm({
+      title: 'Reset to defaults?',
+      body:  'Current settings will be permanently lost.',
+      label: 'Reset',
+      onConfirm: async () => {
+        const r = await fetch('/api/reset', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+        if (r.ok) { toast('Config reset.', 'ok'); await refresh(); }
+        else       { toast('Reset failed.', 'err'); }
+      },
+    });
   }
 
   // ── Escalation management ─────────────────────────────────────────────────
@@ -2027,7 +2073,7 @@ ${buildStyles(cspNonce)}
     if (!r.ok) {
       if (__mpReloading) return;
       const errBody = await r.json().catch(() => null);
-      alert('Approve failed: ' + (errBody?.error || r.status));
+      toast('Approve failed: ' + (errBody?.error || r.status), 'err');
       return;
     }
     closeGrantModal();
@@ -2044,6 +2090,30 @@ ${buildStyles(cspNonce)}
       .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
+  // ── Shared confirm modal ─────────────────────────────────────────────────
+  let _confirmCallback = null;
+  function showConfirm({ title, body, label, btnClass, onConfirm }) {
+    label    = label    || 'Confirm';
+    btnClass = btnClass || 'btn-danger';
+    document.getElementById('mp-confirm-title').textContent = title || '';
+    document.getElementById('mp-confirm-body').textContent  = body;
+    const okBtn = document.getElementById('mp-confirm-ok');
+    okBtn.textContent = label;
+    okBtn.className   = 'btn ' + btnClass;
+    _confirmCallback  = onConfirm;
+    document.getElementById('mp-confirm-backdrop').style.display = '';
+  }
+  function confirmModalOk() {
+    document.getElementById('mp-confirm-backdrop').style.display = 'none';
+    const cb = _confirmCallback;
+    _confirmCallback = null;
+    if (cb) cb();
+  }
+  function confirmModalCancel() {
+    document.getElementById('mp-confirm-backdrop').style.display = 'none';
+    _confirmCallback = null;
+  }
+
   let toastTimer;
   function toast(msg, type) {
     const el = document.getElementById('toast');
@@ -2055,6 +2125,18 @@ ${buildStyles(cspNonce)}
 
 })();
 </script>
+
+<!-- ══ SHARED CONFIRM MODAL ══════════════════════════════════════════════ -->
+<div id="mp-confirm-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:150">
+  <div style="max-width:420px;margin:20vh auto;background:var(--surface);border-radius:var(--radius);padding:22px;color:var(--text);font-family:system-ui,sans-serif;border:1px solid var(--border);box-shadow:var(--shadow-lg)">
+    <div id="mp-confirm-title" style="font-size:16px;font-weight:700;margin-bottom:8px"></div>
+    <div id="mp-confirm-body" style="font-size:14px;color:var(--text2);margin-bottom:20px;line-height:1.5"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost" data-action="confirmModalCancel">Cancel</button>
+      <button class="btn btn-danger" id="mp-confirm-ok" data-action="confirmModalOk">Confirm</button>
+    </div>
+  </div>
+</div>
 
 <!-- ══ APPROVE-WITH-CONDITIONS MODAL (Agents tab) ═════════════════════════ -->
 <div id="grant-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100">

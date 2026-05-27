@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.39] — 2026-05-27
+
+### Fixed
+- **Settings UI: native alert()/confirm() dialogs replaced** — all 13 `alert()` and 7 `confirm()` calls in the settings UI replaced with styled alternatives. Informational alerts become `toast()` notifications (red for errors, green for success, orange for warnings). Destructive confirmations use a new shared confirm modal that matches the UI's dark-theme design and supports per-action titles, body text, and button labels.
+
 ## [3.0.38] — 2026-05-27
 
 ### Fixed
