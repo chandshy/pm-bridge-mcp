@@ -156,7 +156,8 @@ export const defs: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        email_id: { type: "string", description: "IMAP UID of the sent message (from Sent folder)" },
+        email_id: { type: "string", description: "IMAP UID of the sent message" },
+        folder: { type: "string", description: "Folder containing the message (default: Sent). Provide this to avoid UID collisions across folders." },
         after_days: { type: "number", description: "Days from the message's send date until the reminder fires (1–365)" },
         note: { type: "string", description: "Optional note explaining the reminder" },
       },
@@ -449,29 +450,45 @@ export const handlers: Record<string, ToolHandler> = {
   remind_if_no_reply: async (ctx) => {
     const { args, imapService, reminderService, ok } = ctx;
     const remEmailId = requireNumericEmailId(args.email_id, "email_id");
+    const folderHint = (args.folder as string | undefined) ?? "Sent";
     const afterDays = typeof args.after_days === "number" ? args.after_days : NaN;
     if (!Number.isFinite(afterDays) || afterDays < 1 || afterDays > 365) {
       throw new McpError(ErrorCode.InvalidParams, "after_days must be a number between 1 and 365.");
     }
-    const msg = await imapService.getEmailById(remEmailId);
+    let msg;
+    try {
+      msg = await imapService.getEmailById(remEmailId, folderHint);
+    } catch (fetchErr: unknown) {
+      throw new McpError(ErrorCode.InternalError, `Failed to fetch message ${remEmailId} from ${folderHint}: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`);
+    }
     if (!msg) {
-      return { content: [{ type: "text" as const, text: "Source message not found" }], isError: true };
+      return { content: [{ type: "text" as const, text: `Source message ${remEmailId} not found in ${folderHint}` }], isError: true };
     }
     const headers = msg.headers ?? {};
     const rawMsgId = Array.isArray(headers["message-id"]) ? headers["message-id"][0] : (headers["message-id"] as string | undefined);
     if (!rawMsgId) {
       throw new McpError(ErrorCode.InvalidRequest, "Source message has no Message-ID header; cannot track replies.");
     }
+    const sentAt = msg.date ?? new Date();
+    const fireAt = new Date(sentAt.getTime() + afterDays * 24 * 60 * 60 * 1000);
+    if (fireAt <= new Date()) {
+      throw new McpError(ErrorCode.InvalidParams, `Computed fireAt (${fireAt.toISOString()}) is in the past. The message was sent on ${sentAt.toISOString()} — increase after_days or choose a more recent sent message.`);
+    }
     const recipient = (msg.to ?? [])[0] ?? "";
-    const reminder = reminderService.add({
-      messageId: rawMsgId,
-      imapUid: remEmailId,
-      recipient,
-      subject: msg.subject ?? "",
-      sentAt: msg.date ?? new Date(),
-      afterDays,
-      note: typeof args.note === "string" ? args.note : undefined,
-    });
+    let reminder;
+    try {
+      reminder = reminderService.add({
+        messageId: rawMsgId,
+        imapUid: remEmailId,
+        recipient,
+        subject: msg.subject ?? "",
+        sentAt,
+        afterDays,
+        note: typeof args.note === "string" ? args.note : undefined,
+      });
+    } catch (addErr: unknown) {
+      throw new McpError(ErrorCode.InternalError, `Failed to persist reminder: ${addErr instanceof Error ? addErr.message : String(addErr)}`);
+    }
     return ok({
       id: reminder.id,
       recipient: reminder.recipient,

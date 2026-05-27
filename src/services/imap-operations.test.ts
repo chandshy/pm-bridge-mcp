@@ -98,7 +98,7 @@ describe("SimpleIMAPService.markEmailRead", () => {
 
     await svc.markEmailRead("44", true);
 
-    const cached = (svc as any).getCacheEntry("44");
+    const cached = (svc as any).getCacheEntry("44", "INBOX");
     expect(cached?.isRead).toBe(true);
   });
 
@@ -150,7 +150,7 @@ describe("SimpleIMAPService.starEmail", () => {
 
     await svc.starEmail("12", true);
 
-    expect((svc as any).getCacheEntry("12")?.isStarred).toBe(true);
+    expect((svc as any).getCacheEntry("12", "INBOX")?.isStarred).toBe(true);
   });
 
   it("throws (re-throws) when getEmailById returns null", async () => {
@@ -183,7 +183,7 @@ describe("SimpleIMAPService.moveEmail", () => {
     expect(client.messageMove).toHaveBeenCalledWith("20", "Trash", { uid: true });
   });
 
-  it("updates cache folder when entry is present", async () => {
+  it("evicts old cache entry on move (UID is not stable across folders)", async () => {
     const svc = new SimpleIMAPService();
     connectSvc(svc);
     const email = makeEmail("21", "INBOX");
@@ -192,7 +192,7 @@ describe("SimpleIMAPService.moveEmail", () => {
 
     await svc.moveEmail("21", "Sent");
 
-    expect((svc as any).getCacheEntry("21")?.folder).toBe("Sent");
+    expect((svc as any).emailCache.has("INBOX:21")).toBe(false);
   });
 
   it("throws when email not found", async () => {
@@ -261,7 +261,7 @@ describe("SimpleIMAPService.deleteFromFolder", () => {
 
     await svc.deleteFromFolder("51", "INBOX");
 
-    expect((svc as any).emailCache.has("51")).toBe(false);
+    expect((svc as any).emailCache.has("INBOX:51")).toBe(false);
   });
 
   it("throws when messageDelete fails", async () => {
@@ -301,7 +301,7 @@ describe("SimpleIMAPService.deleteEmail", () => {
 
     await svc.deleteEmail("61");
 
-    expect((svc as any).emailCache.has("61")).toBe(false);
+    expect((svc as any).emailCache.has("INBOX:61")).toBe(false);
   });
 
   it("throws when email not found", async () => {
@@ -429,9 +429,9 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
     expect(results.failed).toBe(0);
     // Batch move: the UID set is sent as a single messageMove call
     expect(client.messageMove).toHaveBeenCalledWith("80,81", "Trash", { uid: true });
-    // Cache entries should have folder updated
-    expect((svc as any).getCacheEntry("80")?.folder).toBe("Trash");
-    expect((svc as any).getCacheEntry("81")?.folder).toBe("Trash");
+    // Cache entries at the old folder key should be evicted (UID is not stable across folders)
+    expect((svc as any).emailCache.has("INBOX:80")).toBe(false);
+    expect((svc as any).emailCache.has("INBOX:81")).toBe(false);
   });
 
   it("falls back to per-email move when batch fails", async () => {
@@ -476,10 +476,11 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
     expect(results.success).toBe(0);
   });
 
-  it("falls back to INBOX when email not in cache (line 1526 branch 1)", async () => {
+  it("discovers folder via getEmailById when email not in cache", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
-    // Email 95 is NOT in cache — folder defaults to 'INBOX'
+    // Email 95 is NOT in cache — getEmailById is called to discover its folder
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("95", "INBOX"));
 
     const results = await svc.bulkMoveEmails(["95"], "Archive");
 
@@ -513,15 +514,16 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
     expect(results.errors[0]).toContain("string error"); // String("string error")
   });
 
-  it("skips cache update when email not in cache after successful batch move (line 1545 branch 1)", async () => {
+  it("skips cache eviction when email not in cache after successful batch move", async () => {
     const svc = new SimpleIMAPService();
     connectSvc(svc);
-    // Email 97 is NOT in cache — after successful move, no cache update needed
+    // Email 97 is NOT in cache — getEmailById discovers its folder, then move succeeds
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("97", "INBOX"));
 
     const results = await svc.bulkMoveEmails(["97"], "Archive");
 
     expect(results.success).toBe(1);
-    // No crash — getCacheEntry returned null and the if(cachedForBulkMove) was false
+    // No crash — evictCacheEntry is a no-op when key is absent
   });
 });
 
@@ -544,9 +546,9 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
     expect(results.success).toBe(2);
     expect(results.failed).toBe(0);
     expect(client.messageDelete).toHaveBeenCalledWith("90,91", { uid: true });
-    // Cache entries should be evicted
-    expect((svc as any).emailCache.has("90")).toBe(false);
-    expect((svc as any).emailCache.has("91")).toBe(false);
+    // Cache entries should be evicted (compound key)
+    expect((svc as any).emailCache.has("INBOX:90")).toBe(false);
+    expect((svc as any).emailCache.has("INBOX:91")).toBe(false);
   });
 
   it("falls back to per-email delete when batch fails", async () => {
@@ -614,11 +616,11 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
     expect(results.errors[0]).toContain("delete-error-string");
   });
 
-  it("falls back to INBOX folder for emails not in cache", async () => {
+  it("discovers folder via getEmailById when email not in cache", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
-    // Email "95" is NOT in cache — should default to INBOX
-    // messageDelete resolves successfully
+    // Email "95" is NOT in cache — getEmailById is called to discover its folder
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("95", "INBOX"));
 
     const results = await svc.bulkDeleteEmails(["95"]);
 
@@ -947,7 +949,7 @@ describe("SimpleIMAPService.estimateCacheBytes null fallbacks (lines 96-98)", ()
     const svc = new SimpleIMAPService();
     // Setting a cache entry exercises estimateCacheBytes internally
     (svc as any).setCacheEntry("x", email);
-    expect((svc as any).emailCache.has("x")).toBe(true);
+    expect((svc as any).emailCache.has("INBOX:x")).toBe(true);
     // Byte estimate should be 200 (fixed overhead) when all string fields are undefined
     expect((svc as any).cacheByteEstimate).toBe(200);
   });
@@ -1406,15 +1408,15 @@ describe("SimpleIMAPService getCacheEntry TTL (lines 216-217)", () => {
 
     const email = makeEmail("77");
     // Manually insert with an expired timestamp (10 min ago, well past 5-min TTL)
-    (svc as any).emailCache.set("77", { email, cachedAt: Date.now() - 10 * 60 * 1000 });
+    (svc as any).emailCache.set("INBOX:77", { email, cachedAt: Date.now() - 10 * 60 * 1000 });
     (svc as any).cacheByteEstimate = 100;
 
-    // getEmailById calls getCacheEntry internally; with an expired entry and
+    // getEmailById calls findCacheEntryByUid internally; with an expired entry and
     // isConnected=false it should return null (cache miss after TTL eviction)
     const result = await svc.getEmailById("77");
     expect(result).toBeNull();
     // Cache entry should have been evicted
-    expect((svc as any).emailCache.has("77")).toBe(false);
+    expect((svc as any).emailCache.has("INBOX:77")).toBe(false);
   });
 });
 
@@ -1520,19 +1522,20 @@ describe("SimpleIMAPService.setFlag non-matching UID", () => {
 // ─── bulkMoveEmails: per-email fallback with no cache entry ───────────────────
 
 describe("SimpleIMAPService.bulkMoveEmails per-email cache update", () => {
-  it("skips cache update in per-email fallback when email not in cache (line 1555 branch1)", async () => {
+  it("skips cache eviction in per-email fallback when email not in cache", async () => {
     const svc = new SimpleIMAPService();
     connectSvc(svc, {
       messageMove: vi.fn()
         .mockRejectedValueOnce(new Error("batch fail")) // batch fails → per-email fallback
         .mockResolvedValueOnce(undefined),               // per-email succeeds
     });
-    // Email "198" is NOT in cache → getCacheEntry returns undefined → if(cachedForBulkMove) is false
+    // Email "198" is NOT in cache → getEmailById is called to discover folder
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("198", "INBOX"));
 
     const results = await svc.bulkMoveEmails(["198"], "Archive");
 
     expect(results.success).toBe(1);
-    // No crash — getCacheEntry returned undefined and if() was false (branch1)
+    // No crash — evictCacheEntry is a no-op when key is absent
   });
 });
 

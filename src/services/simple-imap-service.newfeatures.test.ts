@@ -77,7 +77,7 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     const content = Buffer.from("hello world");
     // Inject directly (bypassing setCacheEntry) so content is NOT stripped
-    (svc as any).emailCache.set("456", {
+    (svc as any).emailCache.set("INBOX:456", {
       email: {
         id: "456",
         from: "a@b.com",
@@ -111,7 +111,7 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     const base64Content = Buffer.from("test data").toString("base64");
     // Inject directly (bypassing setCacheEntry) so string content is preserved
-    (svc as any).emailCache.set("789", {
+    (svc as any).emailCache.set("INBOX:789", {
       email: {
         id: "789",
         from: "a@b.com",
@@ -166,7 +166,7 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     // Email in cache but attachment has no content (stripped by setCacheEntry)
-    (svc as any).emailCache.set("888", {
+    (svc as any).emailCache.set("INBOX:888", {
       email: {
         id: "888",
         from: "a@b.com",
@@ -867,8 +867,8 @@ describe("SimpleIMAPService cache byte-size limit", () => {
     (svc as any).setCacheEntry("2", makeEmail("2", 2048));
 
     // Entry "1" should have been evicted to make room
-    expect((svc as any).emailCache.has("1")).toBe(false);
-    expect((svc as any).emailCache.has("2")).toBe(true);
+    expect((svc as any).emailCache.has("INBOX:1")).toBe(false);
+    expect((svc as any).emailCache.has("INBOX:2")).toBe(true);
     expect((svc as any).cacheByteEstimate).toBeLessThanOrEqual(MAX_BYTES);
   });
 
@@ -878,9 +878,9 @@ describe("SimpleIMAPService cache byte-size limit", () => {
     const beforeBytes: number = (svc as any).cacheByteEstimate;
     expect(beforeBytes).toBeGreaterThan(0);
 
-    (svc as any).evictCacheEntry("10");
+    (svc as any).evictCacheEntry("INBOX:10");
     expect((svc as any).cacheByteEstimate).toBeLessThan(beforeBytes);
-    expect((svc as any).emailCache.has("10")).toBe(false);
+    expect((svc as any).emailCache.has("INBOX:10")).toBe(false);
   });
 
   it("resets cacheByteEstimate to 0 on clearCacheAll", () => {

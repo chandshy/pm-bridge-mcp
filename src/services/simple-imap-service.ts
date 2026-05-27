@@ -150,11 +150,11 @@ export class SimpleIMAPService {
    * Remove one entry from emailCache and decrement the byte estimate.
    * Use in place of direct `this.emailCache.delete(id)` everywhere.
    */
-  private evictCacheEntry(id: string): void {
-    const entry = this.emailCache.get(id);
+  private evictCacheEntry(cacheKey: string): void {
+    const entry = this.emailCache.get(cacheKey);
     if (entry) {
       this.cacheByteEstimate -= SimpleIMAPService.estimateCacheBytes(entry.email);
-      this.emailCache.delete(id);
+      this.emailCache.delete(cacheKey);
     }
   }
 
@@ -174,6 +174,8 @@ export class SimpleIMAPService {
    * buffers accumulating in memory (GAP 7.5).
    */
   private setCacheEntry(id: string, email: EmailMessage): void {
+    // Cache key is folder-qualified to prevent UID collisions across folders
+    const key = `${email.folder}:${id}`;
     // Strip attachment binary content before caching — content is re-fetched on demand
     const toCache: EmailMessage = {
       ...email,
@@ -184,7 +186,7 @@ export class SimpleIMAPService {
     // Evict oldest entries until both size and byte limits are satisfied
     while (
       this.emailCache.size > 0 &&
-      !this.emailCache.has(id) && // don't evict when updating an existing entry
+      !this.emailCache.has(key) && // don't evict when updating an existing entry
       (this.emailCache.size >= MAX_EMAIL_CACHE_SIZE ||
        this.cacheByteEstimate + entryBytes > MAX_EMAIL_CACHE_BYTES)
     ) {
@@ -194,12 +196,12 @@ export class SimpleIMAPService {
     }
 
     // If updating an existing entry, subtract its old byte contribution first
-    if (this.emailCache.has(id)) {
-      const old = this.emailCache.get(id)!;
+    if (this.emailCache.has(key)) {
+      const old = this.emailCache.get(key)!;
       this.cacheByteEstimate -= SimpleIMAPService.estimateCacheBytes(old.email);
     }
 
-    this.emailCache.set(id, { email: toCache, cachedAt: Date.now() });
+    this.emailCache.set(key, { email: toCache, cachedAt: Date.now() });
     this.cacheByteEstimate += entryBytes;
   }
 
@@ -254,14 +256,29 @@ export class SimpleIMAPService {
 
   private static readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-  private getCacheEntry(id: string): EmailMessage | undefined {
-    const entry = this.emailCache.get(id);
+  private getCacheEntry(uid: string, folder: string): EmailMessage | undefined {
+    const key = `${folder}:${uid}`;
+    const entry = this.emailCache.get(key);
     if (!entry) return undefined;
     if (Date.now() - entry.cachedAt > SimpleIMAPService.CACHE_TTL_MS) {
-      this.evictCacheEntry(id);
+      this.evictCacheEntry(key);
       return undefined;
     }
     return entry.email;
+  }
+
+  /** Folder-agnostic cache lookup — scans all entries for a matching UID. */
+  private findCacheEntryByUid(uid: string): EmailMessage | undefined {
+    const suffix = `:${uid}`;
+    for (const [key, entry] of this.emailCache.entries()) {
+      if (!key.endsWith(suffix)) continue;
+      if (Date.now() - entry.cachedAt > SimpleIMAPService.CACHE_TTL_MS) {
+        this.evictCacheEntry(key);
+        continue;
+      }
+      return entry.email;
+    }
+    return undefined;
   }
 
   /** Validate that an email ID is a numeric UID string (prevents IMAP injection) */
@@ -781,14 +798,16 @@ export class SimpleIMAPService {
    * @param emailId Numeric UID string (e.g. "12345")
    * @returns The EmailMessage, or null if not found
    */
-  async getEmailById(emailId: string): Promise<EmailMessage | null> {
+  async getEmailById(emailId: string, folderHint?: string): Promise<EmailMessage | null> {
     this.validateEmailId(emailId);
     const tags: SpanTags = { emailId };
     return tracer.span('imap.getEmailById', tags, async () => {
-    logger.debug('Fetching email by ID', 'IMAPService', { emailId });
+    logger.debug('Fetching email by ID', 'IMAPService', { emailId, folderHint });
 
-    // Check cache first
-    const cachedEntry = this.getCacheEntry(emailId);
+    // Check cache first — use folder-qualified key when hint is available
+    const cachedEntry = folderHint
+      ? this.getCacheEntry(emailId, folderHint)
+      : this.findCacheEntryByUid(emailId);
     if (cachedEntry) {
       tags.hasAttachments = !!(cachedEntry.attachments?.length);
       tags.attachmentCount = cachedEntry.attachments?.length ?? 0;
@@ -801,10 +820,12 @@ export class SimpleIMAPService {
     }
 
     try {
-      // Search all folders for this email
-      const folders = await this.getFolders();
+      // If a folder hint is provided, only look there; otherwise scan all folders
+      const foldersToSearch = folderHint
+        ? [{ path: folderHint }]
+        : await this.getFolders();
 
-      for (const folder of folders) {
+      for (const folder of foldersToSearch) {
         const lock = await this.client.getMailboxLock(folder.path);
 
         try {
@@ -978,12 +999,85 @@ export class SimpleIMAPService {
       }
 
       for (const uid of limitedUids) {
-        const email = await this.getEmailById(uid.toString());
-        if (email) {
+        const uidStr = uid.toString();
+
+        // Serve from cache when possible (folder-qualified to prevent cross-folder collisions)
+        const cached = this.getCacheEntry(uidStr, folder);
+        if (cached) {
           results.push({
-            ...email,
-            body: truncateBody(email.body),
-            attachments: email.attachments?.map(att => ({
+            ...cached,
+            body: truncateBody(cached.body),
+            attachments: cached.attachments?.map(att => ({
+              filename: att.filename,
+              contentType: att.contentType,
+              size: att.size,
+              contentId: att.contentId
+            }))
+          });
+          continue;
+        }
+
+        // Fetch directly within this already-held lock — avoids re-acquiring
+        // the mailbox lock and the cross-folder UID collision in getEmailById.
+        for await (const message of this.client.fetch(uidStr, {
+          envelope: true,
+          bodyStructure: true,
+          flags: true,
+          uid: true,
+          source: true,
+        }, { uid: true })) {
+          if (!message.source) continue;
+          const parsed = await simpleParser(message.source);
+
+          const fullBody = parsed.text || parsed.html || '';
+          const plainBody = parsed.text || stripHtml(parsed.html || '');
+          const contentType = parsed.headers?.get('content-type');
+          const ctStr = typeof contentType === 'string' ? contentType : ((contentType as unknown as { value?: string } | null)?.value ?? '');
+          const pmId = parsed.headers?.get('x-pm-internal-id');
+
+          const emailMessage: EmailMessage = {
+            id: message.uid.toString(),
+            from: parsed.from?.text || '',
+            to: parsed.to?.text ? [parsed.to.text] : [],
+            cc: parsed.cc?.text ? [parsed.cc.text] : [],
+            subject: parsed.subject || '(No Subject)',
+            body: fullBody,
+            bodyPreview: truncateBody(plainBody),
+            isHtml: !!parsed.html,
+            date: parsed.date || new Date(),
+            folder,
+            isRead: message.flags?.has('\\Seen') || false,
+            isStarred: message.flags?.has('\\Flagged') || false,
+            hasAttachment: (parsed.attachments?.length || 0) > 0,
+            attachments: parsed.attachments?.map((att: Attachment) => ({
+              filename: att.filename || 'unnamed',
+              contentType: att.contentType,
+              size: att.size,
+              content: att.content,
+              contentId: att.cid
+            })),
+            headers: parsed.headers
+              ? Object.fromEntries(
+                  Array.from(parsed.headers.entries()).map(([k, v]) => [
+                    k,
+                    Array.isArray(v) ? v.join(', ') : String(v),
+                  ])
+                )
+              : undefined,
+            inReplyTo: parsed.inReplyTo,
+            references: parsed.references,
+            isAnswered: message.flags?.has('\\Answered') ?? false,
+            isForwarded: message.flags?.has('\\Forward') ?? false,
+            isSignedPGP: ctStr.includes('multipart/signed') && ctStr.includes('application/pgp-signature'),
+            isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
+            protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
+          };
+
+          this.setCacheEntry(emailMessage.id, emailMessage);
+
+          results.push({
+            ...emailMessage,
+            attachments: emailMessage.attachments?.map(att => ({
               filename: att.filename,
               contentType: att.contentType,
               size: att.size,
@@ -1111,27 +1205,27 @@ export class SimpleIMAPService {
     return tracer.span('imap.downloadAttachment', tags, async () => {
     logger.debug('Downloading attachment', 'IMAPService', { emailId, attachmentIndex });
 
-    // Ensure the email metadata is in cache (getCacheEntry returns stripped version)
-    if (!this.getCacheEntry(emailId)) {
-      await this.getEmailById(emailId);
+    // Get email metadata — prefer cache hit, then fall through to IMAP fetch
+    let emailMeta: EmailMessage | null | undefined = this.findCacheEntryByUid(emailId);
+    if (!emailMeta) {
+      emailMeta = await this.getEmailById(emailId);
     }
 
-    const cached = this.getCacheEntry(emailId);
-    if (!cached || !cached.attachments || cached.attachments.length === 0) {
+    if (!emailMeta || !emailMeta.attachments || emailMeta.attachments.length === 0) {
       return null;
     }
 
     const idx = Math.trunc(attachmentIndex);
-    if (idx < 0 || idx >= cached.attachments.length) {
+    if (idx < 0 || idx >= emailMeta.attachments.length) {
       return null;
     }
 
-    let att = cached.attachments[idx];
+    let att = emailMeta.attachments[idx];
 
     // GAP 7.5: attachment content is stripped from cache — re-fetch full source on demand
     if (!att.content) {
       logger.debug('Attachment content not in cache, re-fetching full email source', 'IMAPService', { emailId, attachmentIndex });
-      const fresh = await this.fetchEmailFullSource(emailId);
+      const fresh = await this.fetchEmailFullSource(emailId, emailMeta.folder);
       const freshAtt = fresh?.attachments?.[idx];
       if (!freshAtt?.content) {
         logger.warn('Attachment content unavailable after re-fetch', 'IMAPService', { emailId, attachmentIndex });
@@ -1164,11 +1258,11 @@ export class SimpleIMAPService {
    * Used by downloadAttachment() to retrieve attachment binary content on demand
    * when the cache entry has had its attachment content stripped (GAP 7.5).
    */
-  private async fetchEmailFullSource(emailId: string): Promise<EmailMessage | null> {
+  private async fetchEmailFullSource(emailId: string, folderHint?: string): Promise<EmailMessage | null> {
     if (!this.client || !this.isConnected) return null;
     try {
-      const folders = await this.getFolders();
-      for (const folder of folders) {
+      const foldersToSearch = folderHint ? [{ path: folderHint }] : await this.getFolders();
+      for (const folder of foldersToSearch) {
         const lock = await this.client.getMailboxLock(folder.path);
         try {
           for await (const message of this.client.fetch(emailId, {
@@ -1370,7 +1464,7 @@ export class SimpleIMAPService {
         }
 
         // Update cache
-        const cachedForRead = this.getCacheEntry(emailId);
+        const cachedForRead = this.getCacheEntry(emailId, email.folder);
         if (cachedForRead) {
           cachedForRead.isRead = isRead;
         }
@@ -1419,7 +1513,7 @@ export class SimpleIMAPService {
         }
 
         // Update cache
-        const cachedForStar = this.getCacheEntry(emailId);
+        const cachedForStar = this.getCacheEntry(emailId, email.folder);
         if (cachedForStar) {
           cachedForStar.isStarred = isStarred;
         }
@@ -1464,11 +1558,8 @@ export class SimpleIMAPService {
       try {
         await this.client.messageMove(emailId, targetFolder, { uid: true });
 
-        // Update cache
-        const cachedForMove = this.getCacheEntry(emailId);
-        if (cachedForMove) {
-          cachedForMove.folder = targetFolder;
-        }
+        // Evict old cache entry — after MOVE the UID in the target folder may differ
+        this.evictCacheEntry(`${email.folder}:${emailId}`);
 
         logger.info(`Email ${emailId} moved to ${targetFolder}`, 'IMAPService');
         return true;
@@ -1545,8 +1636,8 @@ export class SimpleIMAPService {
 
       try {
         await this.client.messageDelete(emailId, { uid: true });
-        // Remove from cache if present
-        this.evictCacheEntry(emailId);
+        // Remove from cache using folder-qualified key
+        this.evictCacheEntry(`${folder}:${emailId}`);
         logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
         return true;
       } finally {
@@ -1579,7 +1670,7 @@ export class SimpleIMAPService {
     try {
       // Find folder from cache first, then scan
       let folder: string | undefined;
-      const cached = this.getCacheEntry(emailId);
+      const cached = this.findCacheEntryByUid(emailId);
       if (cached) {
         folder = cached.folder;
       } else {
@@ -1638,14 +1729,25 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    // Group emails by their source folder (use cache for known folders; fall back to INBOX)
+    // Group emails by their source folder
     const emailsByFolder = new Map<string, string[]>();
 
     for (const emailId of emailIds) {
       try {
         this.validateEmailId(emailId);
-        const cached = this.getCacheEntry(emailId);
-        const folder = cached?.folder ?? 'INBOX';
+        const cachedEmail = this.findCacheEntryByUid(emailId);
+        let folder: string;
+        if (cachedEmail) {
+          folder = cachedEmail.folder;
+        } else {
+          const discovered = await this.getEmailById(emailId);
+          if (!discovered) {
+            results.failed++;
+            results.errors.push(`Email ${emailId} not found in any folder`);
+            continue;
+          }
+          folder = discovered.folder;
+        }
         if (!emailsByFolder.has(folder)) emailsByFolder.set(folder, []);
         emailsByFolder.get(folder)!.push(emailId);
       } catch (error: unknown) {
@@ -1661,10 +1763,9 @@ export class SimpleIMAPService {
         const uidSet = ids.join(',');
         try {
           await this.client.messageMove(uidSet, targetFolder, { uid: true });
-          // Update cache and count successes
+          // Evict old cache entries — after MOVE the UID in target folder may differ
           for (const emailId of ids) {
-            const cachedForBulkMove = this.getCacheEntry(emailId);
-            if (cachedForBulkMove) cachedForBulkMove.folder = targetFolder;
+            this.evictCacheEntry(`${sourceFolder}:${emailId}`);
             results.success++;
           }
         } catch (batchError: unknown) {
@@ -1673,8 +1774,7 @@ export class SimpleIMAPService {
           for (const emailId of ids) {
             try {
               await this.client.messageMove(emailId, targetFolder, { uid: true });
-              const cachedForBulkMove = this.getCacheEntry(emailId);
-              if (cachedForBulkMove) cachedForBulkMove.folder = targetFolder;
+              this.evictCacheEntry(`${sourceFolder}:${emailId}`);
               results.success++;
             } catch (error: unknown) {
               results.failed++;
@@ -1716,8 +1816,8 @@ export class SimpleIMAPService {
       try {
         await this.client.messageDelete(emailId, { uid: true });
 
-        // Remove from cache
-        this.evictCacheEntry(emailId);
+        // Remove from cache using folder-qualified key
+        this.evictCacheEntry(`${email.folder}:${emailId}`);
 
         logger.info(`Email ${emailId} deleted`, 'IMAPService');
         return true;
@@ -1747,14 +1847,25 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    // Group emails by their folder (use cache for known folders; fall back to INBOX)
+    // Group emails by their folder — discover folder for any uncached IDs via IMAP
     const emailsByFolder2 = new Map<string, string[]>();
 
     for (const emailId of emailIds) {
       try {
         this.validateEmailId(emailId);
-        const cached = this.getCacheEntry(emailId);
-        const folder = cached?.folder ?? 'INBOX';
+        const cachedEmail = this.findCacheEntryByUid(emailId);
+        let folder: string;
+        if (cachedEmail) {
+          folder = cachedEmail.folder;
+        } else {
+          const discovered = await this.getEmailById(emailId);
+          if (!discovered) {
+            results.failed++;
+            results.errors.push(`Email ${emailId} not found in any folder`);
+            continue;
+          }
+          folder = discovered.folder;
+        }
         if (!emailsByFolder2.has(folder)) emailsByFolder2.set(folder, []);
         emailsByFolder2.get(folder)!.push(emailId);
       } catch (error: unknown) {
@@ -1771,7 +1882,7 @@ export class SimpleIMAPService {
         try {
           await this.client.messageDelete(uidSet, { uid: true });
           for (const emailId of ids) {
-            this.evictCacheEntry(emailId);
+            this.evictCacheEntry(`${folder}:${emailId}`);
             results.success++;
           }
         } catch (batchError: unknown) {
@@ -1780,7 +1891,7 @@ export class SimpleIMAPService {
           for (const emailId of ids) {
             try {
               await this.client.messageDelete(emailId, { uid: true });
-              this.evictCacheEntry(emailId);
+              this.evictCacheEntry(`${folder}:${emailId}`);
               results.success++;
             } catch (error: unknown) {
               results.failed++;
@@ -1818,7 +1929,7 @@ export class SimpleIMAPService {
     for (const id of emailIds) {
       try {
         this.validateEmailId(id);
-        const folder = this.getCacheEntry(id)?.folder ?? 'INBOX';
+        const folder = this.findCacheEntryByUid(id)?.folder ?? 'INBOX';
         if (!grouped.has(folder)) grouped.set(folder, []);
         grouped.get(folder)!.push(id);
       } catch (e: unknown) {
@@ -1835,7 +1946,7 @@ export class SimpleIMAPService {
           if (isRead) await this.client.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true });
           else        await this.client.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true });
           for (const id of ids) {
-            const c = this.getCacheEntry(id); if (c) c.isRead = isRead;
+            const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
             results.success++;
           }
         } catch (batchErr: unknown) {
@@ -1844,7 +1955,7 @@ export class SimpleIMAPService {
             try {
               if (isRead) await this.client.messageFlagsAdd(id, ['\\Seen'], { uid: true });
               else        await this.client.messageFlagsRemove(id, ['\\Seen'], { uid: true });
-              const c = this.getCacheEntry(id); if (c) c.isRead = isRead;
+              const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
               results.success++;
             } catch (e: unknown) {
               results.failed++;
@@ -1872,7 +1983,7 @@ export class SimpleIMAPService {
     for (const id of emailIds) {
       try {
         this.validateEmailId(id);
-        const folder = this.getCacheEntry(id)?.folder ?? 'INBOX';
+        const folder = this.findCacheEntryByUid(id)?.folder ?? 'INBOX';
         if (!grouped.has(folder)) grouped.set(folder, []);
         grouped.get(folder)!.push(id);
       } catch (e: unknown) {
@@ -1889,7 +2000,7 @@ export class SimpleIMAPService {
           if (isStarred) await this.client.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true });
           else           await this.client.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true });
           for (const id of ids) {
-            const c = this.getCacheEntry(id); if (c) c.isStarred = isStarred;
+            const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
             results.success++;
           }
         } catch (batchErr: unknown) {
@@ -1898,7 +2009,7 @@ export class SimpleIMAPService {
             try {
               if (isStarred) await this.client.messageFlagsAdd(id, ['\\Flagged'], { uid: true });
               else           await this.client.messageFlagsRemove(id, ['\\Flagged'], { uid: true });
-              const c = this.getCacheEntry(id); if (c) c.isStarred = isStarred;
+              const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
               results.success++;
             } catch (e: unknown) {
               results.failed++;
@@ -1928,7 +2039,7 @@ export class SimpleIMAPService {
     for (const id of emailIds) {
       try {
         this.validateEmailId(id);
-        const folder = this.getCacheEntry(id)?.folder ?? 'INBOX';
+        const folder = this.findCacheEntryByUid(id)?.folder ?? 'INBOX';
         if (!grouped.has(folder)) grouped.set(folder, []);
         grouped.get(folder)!.push(id);
       } catch (e: unknown) {
@@ -1993,13 +2104,13 @@ export class SimpleIMAPService {
       const uidSet = validIds.join(',');
       try {
         await this.client.messageDelete(uidSet, { uid: true });
-        for (const id of validIds) { this.evictCacheEntry(id); results.success++; }
+        for (const id of validIds) { this.evictCacheEntry(`${folder}:${id}`); results.success++; }
       } catch (batchErr: unknown) {
         logger.warn(`Batch delete-from-folder failed for ${folder}, falling back to per-email`, 'IMAPService', batchErr);
         for (const id of validIds) {
           try {
             await this.client.messageDelete(id, { uid: true });
-            this.evictCacheEntry(id);
+            this.evictCacheEntry(`${folder}:${id}`);
             results.success++;
           } catch (e: unknown) {
             results.failed++;

@@ -98,6 +98,7 @@ export const defsEarly: ToolDef[] = [
       type: "object",
       properties: {
         emailId: { type: "string", description: "IMAP UID from get_emails or search_emails" },
+        folder: { type: "string", description: "Folder the email lives in (e.g. INBOX, Sent, Drafts). Providing this avoids a cross-folder UID collision." },
       },
       required: ["emailId"],
     },
@@ -512,7 +513,8 @@ export const handlers: Record<string, ToolHandler> = {
   get_email_by_id: async (ctx) => {
     const { args, imapService, ok, limits } = ctx;
     const rawEmailId = requireNumericEmailId(args.emailId);
-    const email = await imapService.getEmailById(rawEmailId);
+    const folderHint = args.folder as string | undefined;
+    const email = await imapService.getEmailById(rawEmailId, folderHint);
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.28] — 2026-05-27
+
+### Fixed
+- **UID-scoping bug (root cause for Bugs 1, 2, 4)** — IMAP UIDs are per-mailbox, not globally unique. The email cache was keyed by bare UID, so UID 63 in Drafts collided with UID 63 in INBOX. Cache keys are now `${folder}:${uid}` throughout. A new `findCacheEntryByUid(uid)` linear-scan helper covers callers that don't know the folder in advance (single-email `setFlag`, `downloadAttachment`, bulk fallback paths).
+- **`search_emails` deadlock / timeout (Bug 3)** — `searchSingleFolder` held the imapflow mailbox lock, then called `getEmailById` which attempted to acquire a second lock on the same connection. imapflow serializes lock acquisitions, so the inner lock request never resolved → MCP timeout (-32001). Fixed by fetching messages directly within the already-held lock instead of delegating to `getEmailById`.
+- **`search_emails` folder-scope leak (Bug 2)** — because of the cache collision, a hit for UID 63 in the wrong folder was returned as a Drafts result. Eliminated by the UID-scoping fix above.
+- **`get_email_by_id` wrong-folder result (Bug 1)** — same root cause. `get_email_by_id` now accepts an optional `folder` param; when provided, it constrains both the cache lookup and the IMAP search to that folder only.
+- **`remind_if_no_reply` wrong-message + opaque error (Bug 4)** — now accepts an optional `folder` param (default "Sent") passed to `getEmailById`. Added `fireAt > now` guard to reject reminders that would fire immediately in the past. Wrapped fetch and persist steps in try/catch that surfaces the real exception instead of swallowing it as "An error occurred".
+- **Destructive bulk operations UID safety** — `bulkMoveEmails`, `bulkDeleteEmails`, and `bulkDeleteFromFolder` no longer assume uncached emails live in INBOX. They now call `getEmailById` to discover the real folder before operating, and count "email not found" as a per-item failure rather than silently operating on the wrong folder.
+
 ## [3.0.27] — 2026-05-26
 
 ### Docs

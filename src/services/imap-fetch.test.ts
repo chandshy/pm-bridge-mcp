@@ -139,8 +139,8 @@ describe("SimpleIMAPService.getEmailById (fetch loop)", () => {
     vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
 
     await svc.getEmailById("55");
-    // Should now be in cache
-    expect((svc as any).emailCache.has("55")).toBe(true);
+    // Should now be in cache under the compound key folder:uid
+    expect((svc as any).emailCache.has("INBOX:55")).toBe(true);
   });
 
   it("returns email with attachment metadata stripped (line 778)", async () => {
@@ -463,34 +463,30 @@ describe("SimpleIMAPService private searchSingleFolder", () => {
     expect(mockClient.search).toHaveBeenCalledTimes(1);
   });
 
-  it("fetches and returns matching messages via getEmailById", async () => {
+  it("fetches and returns matching messages via client.fetch (in-lock fetch)", async () => {
     const svc = new SimpleIMAPService();
     (svc as any).isConnected = true;
 
-    const mockEmail = {
-      id: "70", folder: "INBOX", from: "a@b.com", to: [], subject: "Test Email",
-      body: "Email body text that is long enough to need truncation in search results",
-      date: new Date(), isRead: false, isStarred: false, hasAttachment: true, isHtml: false,
-      attachments: [
-        { filename: "doc.pdf", contentType: "application/pdf", size: 1024, contentId: "cid1" },
-      ],
+    const mockMessage = {
+      uid: 70,
+      source: Buffer.from("raw email"),
+      flags: new Set(["\\Seen"]),
     };
 
     const mockClient = {
       getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
       search: vi.fn().mockResolvedValue([70]),
+      fetch: vi.fn().mockReturnValue(asyncYield(mockMessage)),
     };
     (svc as any).client = mockClient;
-    // Mock getEmailById to return the email directly (avoids needing full IMAP stack)
-    vi.spyOn(svc, "getEmailById").mockResolvedValue(mockEmail);
 
     const results = await (svc as any).searchSingleFolder("INBOX", { subject: "test" }, 50);
 
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe("70");
-    expect(results[0].subject).toBe("Test Email");
-    // Attachment metadata should be present in search result (content stripped)
-    expect(results[0].attachments![0].filename).toBe("doc.pdf");
+    expect(results[0].subject).toBe("Parsed Subject");
+    expect(results[0].folder).toBe("INBOX");
+    expect(results[0].isRead).toBe(true);
   });
 
   it("covers all search criteria options", async () => {
@@ -539,18 +535,19 @@ describe("SimpleIMAPService private searchSingleFolder", () => {
     const svc = new SimpleIMAPService();
     (svc as any).isConnected = true;
 
-    // 5 UIDs returned by search, limit=2 → only first 2 are processed
+    // 5 UIDs returned by search, limit=2 → only first 2 are fetched
+    const mockFetch = vi.fn().mockReturnValue(asyncYield()); // yields nothing → no results
     const mockClient = {
       getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
       search: vi.fn().mockResolvedValue([1, 2, 3, 4, 5]),
+      fetch: mockFetch,
     };
     (svc as any).client = mockClient;
-    vi.spyOn(svc, "getEmailById").mockResolvedValue(null);
 
     const results = await (svc as any).searchSingleFolder("INBOX", {}, 2);
-    // With limit=2, getEmailById is called at most 2 times
-    expect((svc.getEmailById as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThanOrEqual(2);
-    expect(results).toHaveLength(0); // all returned null
+    // With limit=2, fetch is called at most 2 times (once per UID)
+    expect(mockFetch.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(results).toHaveLength(0);
   });
 
   it("returns [] immediately when client is null (line 805)", async () => {
