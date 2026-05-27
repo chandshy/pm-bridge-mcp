@@ -587,15 +587,16 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         const html = buildShellHtml(configPath, csrfToken, port, cspNonce);
         res.writeHead(200, {
           "Content-Type":             "text/html; charset=utf-8",
-          // 'unsafe-inline' alongside a nonce is intentional:
-          // - For <script>/<style> blocks: the nonce overrides 'unsafe-inline' in
-          //   CSP3 browsers, so only our nonce'd blocks run.
-          // - For inline onclick="..." handlers and style="..." attributes: nonces
-          //   do NOT cover these; 'unsafe-inline' is required to allow them.
-          //   Without it, every button onclick and every style="display:none"
-          //   attribute is silently blocked, breaking all interactivity and
-          //   causing hidden modals to render in normal document flow.
-          "Content-Security-Policy":  `default-src 'self'; style-src 'nonce-${cspNonce}' 'unsafe-inline'; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
+          // CSP3 behaviour note:
+          // - script-src: nonce gates <script> block execution; 'unsafe-inline'
+          //   is ignored for <script> elements when a nonce is present but still
+          //   covers inline onclick="..." event handlers (browser carve-out).
+          // - style-src: NO nonce here. When a nonce is present in style-src,
+          //   CSP3 browsers completely ignore 'unsafe-inline', blocking all
+          //   element.style.* JS assignments and style="" HTML attributes.
+          //   Keeping style-src nonce-free lets 'unsafe-inline' take effect,
+          //   which is necessary for every show/hide operation in the UI.
+          "Content-Security-Policy":  `default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
           "X-Content-Type-Options":   "nosniff",
           "X-Frame-Options":          "DENY",
           "Referrer-Policy":          "no-referrer",

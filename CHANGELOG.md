@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.37] — 2026-05-27
+
+### Fixed
+- **Settings UI: inline styles blocked by CSP** — `style-src` included a nonce alongside `'unsafe-inline'`. Per CSP3 spec, when any nonce is present in a directive's source list, `'unsafe-inline'` is completely ignored for that directive — including `element.style.*` JavaScript assignments and `style=""` HTML attributes. This caused every show/hide operation in the settings UI to be silently blocked (modals, tab switches, status indicators all invisible). Fixed by removing the nonce from `style-src`; the nonce is only meaningful for `script-src` where it gates `<script>` block execution.
+
 ## [3.0.36] — 2026-05-27
 
 ### Documentation
