@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.26] — 2026-05-26
+
+### Changed
+- **Dependency bumps** (Dependabot, #117/#121/#122/#123/#124):
+  - `better-sqlite3` 12.9.0 → 12.10.0 (patch)
+  - `nodemailer` 8.0.7 → 8.0.8 (patch)
+  - `@types/node` 25.6.0 → 25.9.1 (dev, minor)
+  - `vitest` 4.1.5 → 4.1.7 (dev, patch)
+  - `@vitest/coverage-v8` 4.1.5 → 4.1.7 (dev, patch)
+
 ## [3.0.25] — 2026-05-26
 
 ### Fixed
