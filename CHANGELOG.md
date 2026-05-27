@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.23] — 2026-05-26
+
+### Security
+- **`pass-cli` env hardening** — the Proton Pass subprocess now receives only `PATH`, `HOME`, `LANG`, `LC_ALL`, and `PROTON_PASS_PAT`. Previously it inherited the full parent `process.env`, so a compromised CLI binary would have read every other credential the server held.
+- **`pass-cli` PATH resolution** — bare-name `passCliPath` is now resolved via `which` at startup and validated against a trusted prefix list (`/usr/bin`, `/usr/local/bin`, `/opt/`, `/bin/`, `/opt/homebrew/bin/`). Refuses agent-writable PATH directories like `~/.local/bin` that could shadow the real binary.
+- **Bridge shutdown by PID** — `killProtonBridge()` now records the spawn PID and kills that PID directly (SIGTERM, then SIGKILL after 2 s). Replaces `pkill -f proton-bridge`, which matched the full command line and could kill any unrelated process whose argv contained that string.
+- **Bridge TOCTOU** — dropped the `existsSync(bridgePath)` pre-check that opened a swap window between check and spawn.
+- **Bridge cert pinning** — the configured CA cert is now hashed on first read; subsequent reads verify the hash and refuse the connection on mismatch. Closes the TLS-cert-swap TOCTOU.
+- **AppleScript injection** — `escAppleScript()` strips ASCII control chars (0x00–0x1F + 0x7F) in addition to escaping `"` and `\`. Agent-supplied notification reasons can no longer break out of the `display notification … with title …` clause.
+- **Windows toast XML injection** — new `escXml()` HTML-escapes `& < > " '` for all content embedded in the WinRT toast XML before the PowerShell single-quote layer.
+- **Self-signed cert cleanup** — `tryGenerateSelfSignedCert()` now `rmSync`s its temp directory in a `finally{}` block. A crash no longer leaves the generated private key in `/tmp`.
+- **OAuth admin password + bearer token encryption** — `remoteBearerToken` and `remoteOauthAdminPassword` are now migrated into the OS keychain on first run alongside `password`/`smtpToken`. Previously these two equally-valuable secrets were the only credentials still stored plaintext in `~/.mailpouch.json`.
+- **Token revocation propagation** — outstanding OAuth access tokens are immediately invalidated when a grant transitions to revoked/denied/expired. Previously tokens stayed valid until the 24 h TTL.
+- **Token IP pinning** — `IssuedToken` records the issuing client IP; `verifyToken()` rejects mismatched-IP requests. Closes the "issue from loopback, replay from remote" gap even when no per-agent `ipPins` are configured.
+- **IPv6 X-Forwarded-For loopback gap** — the loopback check that gated XFF trust now accepts only exact `127.0.0.1` / `::1` / `::ffff:127.0.0.1`. Other IPv4-mapped IPv6 loopback variants (common in dual-stack containers) no longer admit a spoofed X-Forwarded-For.
+- **Logger redaction expansion** — `cookie` and `oauth` field families now redacted alongside `password`, `token`, `secret`, etc.
+- **Settings UI CSP nonces** — dropped `'unsafe-inline'` for both `script-src` and `style-src`. A fresh 128-bit nonce is generated per response and emitted on the CSP header and on every inline `<script>` / `<style>` tag.
+- **Access token: header-only** — query-string `?token=` removed. Tokens in URLs leak into browser history, referer headers, and proxy logs.
+- **HSTS** — upgraded to `max-age=31536000; includeSubDomains; preload`.
+- **Mode 0600 sweep** — `~/.mailpouch.log` and `~/.mailpouch-fts.db` (plus `-wal` / `-shm` / `-journal` siblings) are now explicitly chmod'd to 0600 after creation.
+- **PKCE strictness** — `code_challenge` and `code_verifier` are now validated as 43–128 chars of base64url alphabet (`[A-Za-z0-9_\-.~]`) before SHA-256, blocking short-verifier brute-force.
+- **Authorization-code error opacity** — unknown code, wrong `client_id`, wrong `redirect_uri`, and PKCE-mismatch all return the same `invalid_grant: "Invalid authorization code."` message. No more client-id enumeration via error-string differences.
+- **LAN origin: IPv6 ULA / link-local** — origin validation in LAN mode now admits `fc00::/7`, `fd00::/8`, and `fe80::/10` alongside IPv4 RFC-1918.
+- **Tool-permissions allowlist** — POST `/api/config` now filters incoming `permissions.tools` keys against the canonical `ALL_TOOLS` set; an attacker can no longer plant a key for a future tool that doesn't yet ship.
+- **Rate-limit LRU eviction** — bucket eviction switched from insertion-order to LRU by most-recent activity. Blocks the "rotate fake keys to force out legitimate clients" DoS-of-DoS pattern.
+- **Folder allowlist fail-closed** — folder-scoped tools without a recognized folder argument now hit a `false` decision instead of being silently allowed. `FOLDER_AGNOSTIC_TOOLS` enumerates the tools that legitimately operate without a folder.
+- **`sanitizeData()` recursion bounded** — logger sanitisation now caps at depth 100 with a `[depth-limit]` placeholder. Defeats stack-blow / CPU-burn via adversarial deeply-nested JSON.
+- **State parameter length-capped** — OAuth `state` rejected if >500 chars (both GET and POST authorize).
+- **Escalation reason log injection** — the audit log now records the same sanitized reason that's persisted to the pending file (control chars stripped, capped at 500). Agent-supplied `\r\n` can no longer inject fake JSONL lines.
+- **SSE field sanitisation** — `event:` and `id:` SSE frame fields now strip `\r\n` before writing.
+- **`credentialStorage` derived from observed state** — the badge in the settings UI is now computed from the actual presence of encrypted blobs / plaintext creds; a forged value in the config file can no longer hide plaintext-on-disk storage.
+- **Dependency** — `qs` 6.15.0 → 6.15.2 via `npm audit fix` (GHSA-q8mj-m7cp-5q26 DoS).
+
 ## [3.0.22] — 2026-05-26
 
 ### Security
