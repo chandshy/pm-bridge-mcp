@@ -255,6 +255,8 @@ let bridgeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
  *  never fall back to `pkill -f proton-bridge`, which would kill any unrelated
  *  process that happens to carry "proton-bridge" in its command line. */
 let launchedBridgePid: number | null = null;
+/** Prevents concurrent gracefulShutdown invocations (SIGINT + tray quit race, etc.). */
+let _shutdownInProgress = false;
 
 // ─── Shared mutable state ────────────────────────────────────────────────────
 // Referenced by both the tool handlers (via ToolCallContext.state) and
@@ -2066,6 +2068,12 @@ async function main() {
       const transport = new StdioServerTransport();
       await server.connect(transport);
       logger.info("mailpouch started on stdio transport.", "MCPServer");
+      // When the MCP client (Claude cowork) exits, stdin closes.  Treat that
+      // as a graceful-quit signal so the tray and settings server shut down
+      // rather than keeping the process alive indefinitely.
+      process.stdin.on("close", () => {
+        gracefulShutdown("stdin-closed").catch(() => process.exit(1));
+      });
     }
 
     // ── Daemon: start settings HTTP server + system tray ───────────────────
@@ -2099,34 +2107,47 @@ process.on("unhandledRejection", (reason) => {
 });
 
 async function gracefulShutdown(signal: string): Promise<void> {
+  if (_shutdownInProgress) return;
+  _shutdownInProgress = true;
   logger.info(`Received ${signal}, shutting down gracefully...`, "MCPServer");
+
+  // Bridge is often off at quit time; disconnect() can wait on a dead TCP socket.
+  // Guarantee process exit within 5 s regardless of cleanup outcome.
+  const hardExit = setTimeout(() => {
+    if (_trayInstance) { try { _trayInstance.destroy(); } catch { } }
+    process.exit(0);
+  }, 5000);
+  hardExit.unref();
+
   try {
-    // 0. Stop settings server + tray
-    await _stopSettingsServerDaemon();
+    // 0. Destroy tray first so the icon vanishes immediately on click.
     if (_trayInstance) {
       try { _trayInstance.destroy(); } catch { /* ignore */ }
       _trayInstance = null;
     }
 
+    // 0b. Stop settings server
+    await _stopSettingsServerDaemon();
+
     // 1. Stop bridge watchdog
     if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
 
-    // 1. Stop scheduler (persists pending items before close)
+    // 2. Stop scheduler (persists pending items before close)
     schedulerService.stop();
 
     // Stop IDLE background watcher
     imapService.stopIdle();
 
-    // 2. Disconnect services
+    // 3. Disconnect services
     await imapService.disconnect();
     await smtpService.close();
 
-    // 3. Scrub sensitive data from memory
+    // 4. Scrub sensitive data from memory
     imapService.wipeCache();
     analyticsService.wipeData();
     smtpService.wipeCredentials();
 
-    // 4. Wipe top-level config credentials
+    // 5. Wipe top-level config credentials
     if (config?.smtp) {
       config.smtp.password = "";
       config.smtp.username = "";
@@ -2144,9 +2165,14 @@ async function gracefulShutdown(signal: string): Promise<void> {
     }
 
     logger.info("Shutdown complete (memory scrubbed)", "MCPServer");
+    clearTimeout(hardExit);
+    // Brief pause so the native tray's D-Bus deregistration message can flush
+    // before file descriptors close on exit.
+    await new Promise(r => setTimeout(r, 50));
     process.exit(0);
   } catch (error) {
     logger.error(`Error during ${signal} shutdown`, "MCPServer", error);
+    clearTimeout(hardExit);
     process.exit(1);
   }
 }

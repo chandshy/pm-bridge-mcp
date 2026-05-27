@@ -188,8 +188,9 @@ function _startTrayIcon(url: string): void {
             break;
           case "quit":
             try { _activeTray?.destroy(); } catch { /* already gone */ }
-            // Let the tray teardown flush, then exit cleanly.
-            setTimeout(() => process.exit(0), 150);
+            // Give the native D-Bus SNI deregistration message time to flush
+            // before file descriptors close on exit.
+            setTimeout(() => process.exit(0), 300);
             break;
         }
       },
