@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.32] — 2026-05-27
+
+### Fixed
+- **Tray Quit now exits reliably** — `gracefulShutdown` previously called `imapService.disconnect()` and `smtpService.close()` on a dead TCP socket (Bridge off), which could hang indefinitely and prevent `process.exit()` from ever running. Fixed by: (1) destroying the tray icon before any async cleanup so the icon vanishes immediately on click; (2) adding a 5 s hard-exit timeout so the process always terminates even if IMAP/SMTP teardown stalls; (3) adding a 50 ms D-Bus flush pause after cleanup so the native SNI deregistration message lands before fds close.
+- **Process stays alive after MCP client disconnect** — when Claude cowork (or any stdio MCP client) exits, stdin closes but the settings server + tray were keeping the event loop alive indefinitely. The process now listens for `stdin close` and calls `gracefulShutdown` automatically so the tray icon disappears when the client goes away.
+- **Duplicate shutdown guard** — added `_shutdownInProgress` flag so concurrent SIGINT/SIGTERM/tray-quit signals don't race through multiple `gracefulShutdown` invocations.
+
 ## [3.0.31] — 2026-05-27
 
 ### Changed
