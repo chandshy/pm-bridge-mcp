@@ -335,60 +335,42 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   bulk_mark_read: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, safeErrorMessage } = ctx;
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS } = ctx;
     if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
       throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
     }
-    const bmrIds = args.emailIds as unknown[];
-    const bmrEmailIds: string[] = bmrIds
+    const bmrEmailIds: string[] = (args.emailIds as unknown[])
       .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
       .slice(0, MAX_BULK_IDS);
+    if (bmrEmailIds.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
+    }
     if (args.isRead !== undefined && typeof args.isRead !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
     }
     const bmrIsRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
-    const bmrTotal = bmrEmailIds.length;
-    const bmrResults = { success: 0, failed: 0, errors: [] as string[] };
-
-    for (let i = 0; i < bmrEmailIds.length; i++) {
-      try {
-        await imapService.markEmailRead(bmrEmailIds[i], bmrIsRead);
-        bmrResults.success++;
-      } catch (e: unknown) {
-        bmrResults.failed++;
-        bmrResults.errors.push(`${bmrEmailIds[i]}: ${safeErrorMessage(e)}`);
-      }
-      await sendProgress(i + 1, bmrTotal, `Marked ${i + 1} of ${bmrTotal}`);
-    }
+    const bmrResults = await imapService.bulkMarkRead(bmrEmailIds, bmrIsRead);
+    await sendProgress(bmrEmailIds.length, bmrEmailIds.length, `Marked ${bmrResults.success} of ${bmrEmailIds.length} (${bmrResults.failed} failed)`);
     return bulkOk(bmrResults);
   },
 
   bulk_star: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, safeErrorMessage } = ctx;
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS } = ctx;
     if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
       throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
     }
-    const bsIds = args.emailIds as unknown[];
-    const bsEmailIds: string[] = bsIds
+    const bsEmailIds: string[] = (args.emailIds as unknown[])
       .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
       .slice(0, MAX_BULK_IDS);
+    if (bsEmailIds.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
+    }
     if (args.isStarred !== undefined && typeof args.isStarred !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
     }
     const bsIsStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
-    const bsTotal = bsEmailIds.length;
-    const bsResults = { success: 0, failed: 0, errors: [] as string[] };
-
-    for (let i = 0; i < bsEmailIds.length; i++) {
-      try {
-        await imapService.starEmail(bsEmailIds[i], bsIsStarred);
-        bsResults.success++;
-      } catch (e: unknown) {
-        bsResults.failed++;
-        bsResults.errors.push(`${bsEmailIds[i]}: ${safeErrorMessage(e)}`);
-      }
-      await sendProgress(i + 1, bsTotal, `Starred ${i + 1} of ${bsTotal}`);
-    }
+    const bsResults = await imapService.bulkStar(bsEmailIds, bsIsStarred);
+    await sendProgress(bsEmailIds.length, bsEmailIds.length, `Starred ${bsResults.success} of ${bsEmailIds.length} (${bsResults.failed} failed)`);
     return bulkOk(bsResults);
   },
 
@@ -429,14 +411,16 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   bulk_move_to_label: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, safeErrorMessage, state } = ctx;
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, state } = ctx;
     if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
       throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
     }
-    const rawIds2 = args.emailIds as unknown[];
-    const emailIds2: string[] = rawIds2
+    const emailIds2: string[] = (args.emailIds as unknown[])
       .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
       .slice(0, MAX_BULK_IDS);
+    if (emailIds2.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
+    }
     if (!args.label || typeof args.label !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
     }
@@ -444,20 +428,9 @@ export const handlers: Record<string, ToolHandler> = {
     const bmlValidErr = validateLabelName(rawLabel);
     if (bmlValidErr) throw new McpError(ErrorCode.InvalidParams, bmlValidErr);
     const labelFolder = `Labels/${rawLabel}`;
-    const total2 = emailIds2.length;
-    const results2 = { success: 0, failed: 0, errors: [] as string[] };
 
-    for (let i = 0; i < emailIds2.length; i++) {
-      try {
-        await imapService.copyEmailToFolder(emailIds2[i], labelFolder);
-        results2.success++;
-      } catch (e: unknown) {
-        results2.failed++;
-        results2.errors.push(`${emailIds2[i]}: ${safeErrorMessage(e)}`);
-      }
-      await sendProgress(i + 1, total2, `Labeled ${i + 1} of ${total2}`);
-    }
-
+    const results2 = await imapService.bulkCopyToFolder(emailIds2, labelFolder);
+    await sendProgress(emailIds2.length, emailIds2.length, `Labeled ${results2.success} of ${emailIds2.length} (${results2.failed} failed)`);
     state.analyticsCache = null;
     state.analyticsCacheInflight = null;
     return bulkOk(results2);
@@ -477,14 +450,16 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   bulk_remove_label: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, safeErrorMessage, state } = ctx;
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, state } = ctx;
     if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
       throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
     }
-    const brlIds = args.emailIds as unknown[];
-    const brlEmailIds: string[] = brlIds
+    const brlEmailIds: string[] = (args.emailIds as unknown[])
       .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
       .slice(0, MAX_BULK_IDS);
+    if (brlEmailIds.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
+    }
     if (!args.label || typeof args.label !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
     }
@@ -492,20 +467,9 @@ export const handlers: Record<string, ToolHandler> = {
     const brlLabelValidErr = validateLabelName(brlLabel);
     if (brlLabelValidErr) throw new McpError(ErrorCode.InvalidParams, brlLabelValidErr);
     const brlLabelFolder = `Labels/${brlLabel}`;
-    const brlTotal = brlEmailIds.length;
-    const brlResults = { success: 0, failed: 0, errors: [] as string[] };
 
-    for (let i = 0; i < brlEmailIds.length; i++) {
-      try {
-        await imapService.deleteFromFolder(brlEmailIds[i], brlLabelFolder);
-        brlResults.success++;
-      } catch (e: unknown) {
-        brlResults.failed++;
-        brlResults.errors.push(`${brlEmailIds[i]}: ${safeErrorMessage(e)}`);
-      }
-      await sendProgress(i + 1, brlTotal, `Unlabeled ${i + 1} of ${brlTotal}`);
-    }
-
+    const brlResults = await imapService.bulkDeleteFromFolder(brlEmailIds, brlLabelFolder);
+    await sendProgress(brlEmailIds.length, brlEmailIds.length, `Unlabeled ${brlResults.success} of ${brlEmailIds.length} (${brlResults.failed} failed)`);
     state.analyticsCache = null;
     state.analyticsCacheInflight = null;
     return bulkOk(brlResults);
