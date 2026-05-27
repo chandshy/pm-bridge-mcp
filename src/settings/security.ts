@@ -15,7 +15,7 @@
 
 import http from "http";
 import { spawnSync } from "child_process";
-import { mkdtempSync, readFileSync, existsSync } from "fs";
+import { mkdtempSync, readFileSync, existsSync, rmSync } from "fs";
 import { tmpdir, networkInterfaces } from "os";
 import { join } from "path";
 import { randomBytes, createHash, timingSafeEqual } from "crypto";
@@ -296,8 +296,9 @@ export interface TlsCredentials {
  * The resulting credentials are suitable for `https.createServer()`.
  */
 export function tryGenerateSelfSignedCert(): TlsCredentials | null {
+  let dir: string | null = null;
   try {
-    const dir      = mkdtempSync(join(tmpdir(), "protonmcp-tls-"));
+    dir            = mkdtempSync(join(tmpdir(), "protonmcp-tls-"));
     const keyFile  = join(dir, "key.pem");
     const certFile = join(dir, "cert.pem");
 
@@ -335,6 +336,13 @@ export function tryGenerateSelfSignedCert(): TlsCredentials | null {
     return { key, cert, fingerprint };
   } catch {
     return null;
+  } finally {
+    // The cert + private key only ever needed to be read once — they're now
+    // in-memory buffers. Wipe the on-disk copy immediately so a crash or
+    // forensic capture of /tmp doesn't surface the private key.
+    if (dir) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
   }
 }
 

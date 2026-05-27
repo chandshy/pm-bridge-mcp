@@ -96,13 +96,20 @@ describe("DesktopNotifier", () => {
       expect(calls[0].args.join(" ")).toContain("audio silent=");
     });
 
-    it("escapes single quotes in the XML (PowerShell literal safety)", async () => {
+    it("escapes XML-special characters in title/body before embedding", async () => {
       const { runner, calls } = makeRunner();
       const n = new DesktopNotifier({ platform: "win32", runner });
-      await n.notify({ title: "don't", body: "ok" });
-      // The XML is embedded in a single-quoted PS string; internal single
-      // quotes must be doubled. Our `don't` becomes `don''t` in the output.
-      expect(calls[0].args.join(" ")).toContain("don''t");
+      await n.notify({ title: "don't", body: "5 < 6 & 7 > 6" });
+      const out = calls[0].args.join(" ");
+      // XML escapes applied first (this is the defence against XML injection
+      // / entity expansion in ToastNotificationManager parsing).
+      expect(out).toContain("don&apos;t");
+      expect(out).toContain("5 &lt; 6 &amp; 7 &gt; 6");
+      // The wrapping single-quoted PS string still doubles any literal
+      // single quotes that come from the static XML template (the
+      // `template=''ToastGeneric''` attribute), confirming escPowerShell()
+      // is still applied to the assembled string.
+      expect(out).toContain("''ToastGeneric''");
     });
   });
 

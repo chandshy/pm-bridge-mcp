@@ -27,8 +27,9 @@
  *   caller's responsibility — this service exposes the raw CLI output.
  */
 
-import { spawn } from "child_process";
-import { appendFileSync } from "fs";
+import { spawn, spawnSync } from "child_process";
+import { appendFileSync, existsSync, statSync } from "fs";
+import { isAbsolute, sep } from "path";
 import { logger } from "../utils/logger.js";
 
 export interface PassItemSummary {
@@ -52,6 +53,46 @@ export interface PassItemDetail extends PassItemSummary {
 const DEFAULT_CLI_PATH = "pass-cli";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+/** Directory prefixes considered trusted when resolving pass-cli via PATH. */
+const TRUSTED_PREFIXES = [
+  "/usr/bin/",
+  "/usr/local/bin/",
+  "/opt/",
+  "/bin/",
+  // Homebrew on macOS Apple Silicon
+  "/opt/homebrew/bin/",
+];
+
+/**
+ * Resolve `cliPath` to an absolute, validated executable path. If the
+ * configured value contains a path separator we trust it as-is (the operator
+ * picked a specific binary). Otherwise we look it up via the shell `which`
+ * command and verify the result lives under one of TRUSTED_PREFIXES so that
+ * a directory in PATH writable by the agent (e.g. `~/.local/bin`) cannot
+ * shadow the real binary.
+ */
+function resolveCliPath(configured: string): string {
+  if (configured.includes(sep) || isAbsolute(configured)) return configured;
+  try {
+    const r = spawnSync("which", [configured], { encoding: "utf-8" });
+    if (r.status !== 0) return configured;
+    const resolved = (r.stdout ?? "").trim();
+    if (!resolved || !existsSync(resolved)) return configured;
+    const trusted = TRUSTED_PREFIXES.some(p => resolved.startsWith(p));
+    if (!trusted) {
+      logger.warn(
+        `Pass: refusing to use '${resolved}' — not in a trusted PATH prefix (${TRUSTED_PREFIXES.join(", ")}). ` +
+        `Set passCliPath in config to override.`,
+        "PassService",
+      );
+      return configured; // let ENOENT surface naturally
+    }
+    return resolved;
+  } catch {
+    return configured;
+  }
+}
+
 /** Thrown when `pass-cli` is not installed or the invocation times out. */
 export class PassCliUnavailableError extends Error {
   constructor(message: string) {
@@ -67,7 +108,7 @@ export class PassService {
 
   constructor(args: { personalAccessToken: string; cliPath?: string; auditLogPath: string }) {
     this.pat = args.personalAccessToken;
-    this.cliPath = args.cliPath ?? DEFAULT_CLI_PATH;
+    this.cliPath = resolveCliPath(args.cliPath ?? DEFAULT_CLI_PATH);
     this.auditPath = args.auditLogPath;
   }
 
@@ -90,10 +131,21 @@ export class PassService {
       let child: ReturnType<typeof spawn>;
       try {
         // The PAT is passed via env, matching pass-cli's documented flow.
-        // A child env keeps it out of parent process.env visibility.
+        // Restrict the child env to a minimal allowlist — passing
+        // ...process.env would hand a malicious or compromised pass-cli
+        // every credential the parent holds (OAuth admin password,
+        // SimpleLogin keys in tests, etc.).
         child = spawn(this.cliPath, ["--json", ...args], {
           stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env, PROTON_PASS_PAT: this.pat },
+          env: {
+            PATH: process.env.PATH ?? "",
+            HOME: process.env.HOME ?? "",
+            PROTON_PASS_PAT: this.pat,
+            // Locale/charset hints — pass-cli emits JSON; without these
+            // some libcs default to ASCII and mangle non-ASCII content.
+            LANG: process.env.LANG ?? "C.UTF-8",
+            LC_ALL: process.env.LC_ALL ?? "",
+          },
         });
       } catch (err: unknown) {
         reject(new PassCliUnavailableError(

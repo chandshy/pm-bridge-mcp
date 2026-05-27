@@ -37,14 +37,35 @@ export interface DesktopNotification {
   sound?: boolean | string;
 }
 
-/** Escape a string for inclusion in an AppleScript double-quoted literal. */
+/** Escape a string for inclusion in an AppleScript double-quoted literal.
+ *  AppleScript strings can carry literal newlines and other control chars
+ *  that — even when the outer quote-escape is correct — allow breaking out
+ *  of the `display notification "…" with title …` clause and injecting
+ *  e.g. a second `with title` or a `do shell script`. Strip every control
+ *  char up to ASCII 0x1F plus DEL (0x7F); they have no legitimate place in
+ *  a toast notification body. */
 function escAppleScript(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return s
+    .replace(/[\x00-\x1f\x7f]/g, " ")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
 }
 
 /** PowerShell single-quoted literal: double internal single quotes. */
 function escPowerShell(s: string): string {
   return s.replace(/'/g, "''");
+}
+
+/** HTML/XML escape for content embedded in the Windows toast XML. The toast
+ *  payload is parsed as XML by ToastNotificationManager; raw `<` `>` `&`
+ *  break the parse or expand entities. */
+function escXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 export interface DesktopNotifierDeps {
@@ -118,9 +139,9 @@ export class DesktopNotifier {
     // for a single mailpouch deployment.
     const xml =
       `<toast><visual><binding template='ToastGeneric'>` +
-      `<text>${n.title}</text>` +
-      (n.subtitle ? `<text>${n.subtitle}</text>` : "") +
-      `<text>${n.body}</text>` +
+      `<text>${escXml(n.title)}</text>` +
+      (n.subtitle ? `<text>${escXml(n.subtitle)}</text>` : "") +
+      `<text>${escXml(n.body)}</text>` +
       `</binding></visual>` +
       (n.sound === false ? `<audio silent='true'/>` : "") +
       `</toast>`;

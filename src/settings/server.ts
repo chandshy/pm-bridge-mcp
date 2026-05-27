@@ -4303,6 +4303,30 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (c.simpleloginBaseUrl !== undefined && !validUrl(c.simpleloginBaseUrl)) {
             json(res, 400, { error: "Invalid simpleloginBaseUrl: must be an http:// or https:// URL, or empty." }); return;
           }
+          // For binary paths (bridgePath / passCliPath): if a non-empty value
+          // is provided, normalise + require it points to an existing regular
+          // file. We deliberately do NOT enforce a directory allowlist (the
+          // operator may have a custom build location), but we refuse strings
+          // that don't resolve to a real file — silently saving garbage paths
+          // makes later spawn() failures opaque to the user.
+          const validBinaryPath = (raw: string): string | null => {
+            const cleaned = raw.trim().replace(/^["']|["']$/g, "");
+            if (cleaned === "") return ""; // explicit clear
+            const resolved = nodePath.resolve(cleaned);
+            if (!existsSync(resolved)) return null;
+            try { if (!statSync(resolved).isFile()) return null; } catch { return null; }
+            return resolved;
+          };
+          if (typeof c.bridgePath === "string" && c.bridgePath.trim() !== "") {
+            const v = validBinaryPath(c.bridgePath);
+            if (v === null) { json(res, 400, { error: "Invalid bridgePath: not an existing regular file." }); return; }
+            c.bridgePath = v;
+          }
+          if (typeof c.passCliPath === "string" && c.passCliPath.trim() !== "") {
+            const v = validBinaryPath(c.passCliPath);
+            if (v === null) { json(res, 400, { error: "Invalid passCliPath: not an existing regular file." }); return; }
+            c.passCliPath = v;
+          }
 
           current.connection = {
             ...current.connection,
