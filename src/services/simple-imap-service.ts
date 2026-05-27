@@ -1802,6 +1802,220 @@ export class SimpleIMAPService {
   }
 
   /**
+   * Bulk-toggle the \Seen flag on many emails using a single IMAP UID STORE
+   * per folder. Mirrors the bulkDeleteEmails / bulkMoveEmails pattern:
+   * group by cached folder, lock once, batch flag-set, fall back to per-UID
+   * on a batch error.
+   */
+  async bulkMarkRead(emailIds: string[], isRead: boolean = true): Promise<{ success: number; failed: number; errors: string[] }> {
+    const tags: SpanTags = { count: emailIds.length, isRead };
+    return tracer.span('imap.bulkMarkRead', tags, async () => {
+    logger.debug('Bulk marking read status', 'IMAPService', { count: emailIds.length, isRead });
+    if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
+
+    const results = { success: 0, failed: 0, errors: [] as string[] };
+    const grouped = new Map<string, string[]>();
+    for (const id of emailIds) {
+      try {
+        this.validateEmailId(id);
+        const folder = this.getCacheEntry(id)?.folder ?? 'INBOX';
+        if (!grouped.has(folder)) grouped.set(folder, []);
+        grouped.get(folder)!.push(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    for (const [folder, ids] of grouped.entries()) {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        const uidSet = ids.join(',');
+        try {
+          if (isRead) await this.client.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true });
+          else        await this.client.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true });
+          for (const id of ids) {
+            const c = this.getCacheEntry(id); if (c) c.isRead = isRead;
+            results.success++;
+          }
+        } catch (batchErr: unknown) {
+          logger.warn(`Batch mark-read failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchErr);
+          for (const id of ids) {
+            try {
+              if (isRead) await this.client.messageFlagsAdd(id, ['\\Seen'], { uid: true });
+              else        await this.client.messageFlagsRemove(id, ['\\Seen'], { uid: true });
+              const c = this.getCacheEntry(id); if (c) c.isRead = isRead;
+              results.success++;
+            } catch (e: unknown) {
+              results.failed++;
+              results.errors.push(`Failed to mark ${id}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+      } finally { lock.release(); }
+    }
+    tags.successCount = results.success; tags.failCount = results.failed;
+    logger.info(`Bulk mark-read completed: ${results.success}/${results.failed}`, 'IMAPService');
+    return results;
+    }); // end tracer.span('imap.bulkMarkRead')
+  }
+
+  /** Bulk-toggle the \Flagged (starred) flag on many emails. Same shape as bulkMarkRead. */
+  async bulkStar(emailIds: string[], isStarred: boolean = true): Promise<{ success: number; failed: number; errors: string[] }> {
+    const tags: SpanTags = { count: emailIds.length, isStarred };
+    return tracer.span('imap.bulkStar', tags, async () => {
+    logger.debug('Bulk starring', 'IMAPService', { count: emailIds.length, isStarred });
+    if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
+
+    const results = { success: 0, failed: 0, errors: [] as string[] };
+    const grouped = new Map<string, string[]>();
+    for (const id of emailIds) {
+      try {
+        this.validateEmailId(id);
+        const folder = this.getCacheEntry(id)?.folder ?? 'INBOX';
+        if (!grouped.has(folder)) grouped.set(folder, []);
+        grouped.get(folder)!.push(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    for (const [folder, ids] of grouped.entries()) {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        const uidSet = ids.join(',');
+        try {
+          if (isStarred) await this.client.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true });
+          else           await this.client.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true });
+          for (const id of ids) {
+            const c = this.getCacheEntry(id); if (c) c.isStarred = isStarred;
+            results.success++;
+          }
+        } catch (batchErr: unknown) {
+          logger.warn(`Batch star failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchErr);
+          for (const id of ids) {
+            try {
+              if (isStarred) await this.client.messageFlagsAdd(id, ['\\Flagged'], { uid: true });
+              else           await this.client.messageFlagsRemove(id, ['\\Flagged'], { uid: true });
+              const c = this.getCacheEntry(id); if (c) c.isStarred = isStarred;
+              results.success++;
+            } catch (e: unknown) {
+              results.failed++;
+              results.errors.push(`Failed to star ${id}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+      } finally { lock.release(); }
+    }
+    tags.successCount = results.success; tags.failCount = results.failed;
+    logger.info(`Bulk star completed: ${results.success}/${results.failed}`, 'IMAPService');
+    return results;
+    }); // end tracer.span('imap.bulkStar')
+  }
+
+  /** Copy many emails into `targetFolder` in a single IMAP UID COPY per source folder.
+   *  Used by bulk_move_to_label (the target is the Labels/<name> pseudo-folder). */
+  async bulkCopyToFolder(emailIds: string[], targetFolder: string): Promise<{ success: number; failed: number; errors: string[] }> {
+    this.validateFolderName(targetFolder);
+    const tags: SpanTags = { count: emailIds.length, targetFolder };
+    return tracer.span('imap.bulkCopyToFolder', tags, async () => {
+    logger.debug('Bulk copy to folder', 'IMAPService', { count: emailIds.length, targetFolder });
+    if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
+
+    const results = { success: 0, failed: 0, errors: [] as string[] };
+    const grouped = new Map<string, string[]>();
+    for (const id of emailIds) {
+      try {
+        this.validateEmailId(id);
+        const folder = this.getCacheEntry(id)?.folder ?? 'INBOX';
+        if (!grouped.has(folder)) grouped.set(folder, []);
+        grouped.get(folder)!.push(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    for (const [folder, ids] of grouped.entries()) {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        const uidSet = ids.join(',');
+        try {
+          await this.client.messageCopy(uidSet, targetFolder, { uid: true });
+          results.success += ids.length;
+        } catch (batchErr: unknown) {
+          logger.warn(`Batch copy failed from ${folder}→${targetFolder}, falling back to per-email`, 'IMAPService', batchErr);
+          for (const id of ids) {
+            try {
+              await this.client.messageCopy(id, targetFolder, { uid: true });
+              results.success++;
+            } catch (e: unknown) {
+              results.failed++;
+              results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+        }
+      } finally { lock.release(); }
+    }
+    tags.successCount = results.success; tags.failCount = results.failed;
+    logger.info(`Bulk copy completed: ${results.success}/${results.failed}`, 'IMAPService');
+    return results;
+    }); // end tracer.span('imap.bulkCopyToFolder')
+  }
+
+  /** Delete many emails from a SPECIFIC folder (label removal). Unlike
+   *  bulkDeleteEmails this targets a single folder rather than the
+   *  cached/INBOX-fallback folder per UID. UIDs are folder-scoped, so the
+   *  caller must pass UIDs known to live in `folder`. */
+  async bulkDeleteFromFolder(emailIds: string[], folder: string): Promise<{ success: number; failed: number; errors: string[] }> {
+    this.validateFolderName(folder);
+    const tags: SpanTags = { count: emailIds.length, folder };
+    return tracer.span('imap.bulkDeleteFromFolder', tags, async () => {
+    logger.debug('Bulk delete from folder', 'IMAPService', { count: emailIds.length, folder });
+    if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
+
+    const results = { success: 0, failed: 0, errors: [] as string[] };
+    const validIds: string[] = [];
+    for (const id of emailIds) {
+      try {
+        this.validateEmailId(id);
+        validIds.push(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (validIds.length === 0) return results;
+
+    const lock = await this.client.getMailboxLock(folder);
+    try {
+      const uidSet = validIds.join(',');
+      try {
+        await this.client.messageDelete(uidSet, { uid: true });
+        for (const id of validIds) { this.evictCacheEntry(id); results.success++; }
+      } catch (batchErr: unknown) {
+        logger.warn(`Batch delete-from-folder failed for ${folder}, falling back to per-email`, 'IMAPService', batchErr);
+        for (const id of validIds) {
+          try {
+            await this.client.messageDelete(id, { uid: true });
+            this.evictCacheEntry(id);
+            results.success++;
+          } catch (e: unknown) {
+            results.failed++;
+            results.errors.push(`Failed to delete ${id} from ${folder}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      }
+    } finally { lock.release(); }
+
+    tags.successCount = results.success; tags.failCount = results.failed;
+    logger.info(`Bulk delete-from-folder completed: ${results.success}/${results.failed}`, 'IMAPService');
+    return results;
+    }); // end tracer.span('imap.bulkDeleteFromFolder')
+  }
+
+  /**
    * Create a new folder
    */
   async createFolder(folderName: string): Promise<boolean> {
