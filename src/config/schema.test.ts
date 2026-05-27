@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   ALL_TOOLS,
   TOOL_CATEGORIES,
+  DESTRUCTIVE_TOOLS,
   CONFIG_VERSION,
   DEFAULT_RESPONSE_LIMITS,
   toolsForTier,
@@ -78,6 +79,28 @@ describe("TOOL_CATEGORIES", () => {
     expect(TOOL_CATEGORIES.deletion.risk).toBe("destructive");
     expect(TOOL_CATEGORIES.analytics.risk).toBe("safe");
     expect(TOOL_CATEGORIES.system.risk).toBe("safe");
+  });
+});
+
+describe("DESTRUCTIVE_TOOLS", () => {
+  it("includes deletion, trash, spam, alias_delete, pass_get, and server lifecycle tools", () => {
+    expect(DESTRUCTIVE_TOOLS.has("delete_email")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("bulk_delete")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("bulk_delete_emails")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("delete_folder")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("move_to_trash")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("move_to_spam")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("alias_delete")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("pass_get")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("shutdown_server")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("restart_server")).toBe(true);
+  });
+
+  it("every DESTRUCTIVE_TOOL is in ALL_TOOLS", () => {
+    const allSet = new Set<string>(ALL_TOOLS);
+    for (const tool of DESTRUCTIVE_TOOLS) {
+      expect(allSet.has(tool)).toBe(true);
+    }
   });
 });
 

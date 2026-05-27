@@ -62,7 +62,7 @@ export const defs: ToolDef[] = [
     name: "pass_get",
     title: "Get Proton Pass Item",
     description: "Retrieve a single Proton Pass item by ID, INCLUDING its decrypted secret fields (password, TOTP, note body). Every call is audit-logged. Prefer pass_list / pass_search for non-credential lookups.",
-    annotations: { readOnlyHint: true },
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       properties: {

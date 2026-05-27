@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.35] — 2026-05-27
+
+### Fixed
+- **`shutdown_server` / `restart_server` bypassed `requireDestructiveConfirm`** — both tools carry `destructiveHint: true` in their MCP annotations but were absent from `DESTRUCTIVE_TOOLS`. The CallTool gate checks that set, not the annotation, so when `requireDestructiveConfirm: true` was set these two operations silently skipped the `{ confirmed: true }` guard. Added to `DESTRUCTIVE_TOOLS`; also added a regression test.
+- **`pass_get` annotation contradicted its destructive gate** — the tool was correctly listed in `DESTRUCTIVE_TOOLS` (credential retrieval warrants the confirm guard) but its MCP annotation was `readOnlyHint: true`, telling clients it was safe and non-modifying. Changed to `destructiveHint: true` to match the gate.
+- **Stale tier-count comments** — `TOOL_CATEGORY_TIER` comments claimed "~26 / ~28" for core and "~50" for extended; actual cumulative counts are 27/29 and 64/66 respectively (aliases + pass were added to extended after the comments were written). Replaced the inline estimates with a precise breakdown table.
+- **README tool count stale** — three mentions of "69 tools" updated to "70 tools" following the addition of `get_server_version` in 3.0.34.
+
 ## [3.0.34] — 2026-05-27
 
 ### Added

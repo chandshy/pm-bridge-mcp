@@ -414,6 +414,8 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "move_to_spam",
   "alias_delete",
   "pass_get",
+  "shutdown_server",
+  "restart_server",
 ]);
 
 // ─── Tool Tiers ────────────────────────────────────────────────────────────────
@@ -428,7 +430,14 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
 
 export type ToolTier = "core" | "extended" | "complete";
 
-/** Where each category surfaces first. */
+/**
+ * Where each category surfaces first.
+ *
+ * Actual tool counts per tier (cumulative, including always-available escalation tools):
+ *   core     — 27 tools (reading 14 + sending 4 + analytics 4 + system 5)  + 2 escalation = 29 visible
+ *   extended — 64 tools (core 27 + drafts 9 + folders 5 + actions 14 + aliases 6 + pass 3) + 2 = 66 visible
+ *   complete — 70 tools (extended 64 + deletion 3 + bridge_control 3)                       + 2 = 72 visible
+ */
 export const TOOL_CATEGORY_TIER: Record<string, ToolTier> = {
   reading:        "core",     // reading is the 80 % use case
   sending:        "core",     // sending needs to be available in core too — common ask
