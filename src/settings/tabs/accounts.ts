@@ -17,8 +17,8 @@ export function buildAccountsHtml(p: AccountsParams): string {
       <div class="hint" style="text-align:center;padding:30px">Loading…</div>
     </div>
     <div style="margin-top:16px;display:flex;gap:8px">
-      <button class="btn btn-primary" onclick="openAccountForm('proton-bridge', null)">+ Add Proton Bridge account</button>
-      <button class="btn btn-primary" onclick="openAccountForm('imap', null)">+ Add IMAP account</button>
+      <button class="btn btn-primary" data-action="openAccountForm" data-provider-type="proton-bridge">+ Add Proton Bridge account</button>
+      <button class="btn btn-primary" data-action="openAccountForm" data-provider-type="imap">+ Add IMAP account</button>
     </div>
   </div>
 
@@ -59,23 +59,23 @@ export function buildAccountsHtml(p: AccountsParams): string {
         <label style="font-size:12px;color:var(--text2)">Password</label>
         <div class="pw-wrap" style="margin-top:4px">
           <input type="password" id="af-password" placeholder="Leave blank to keep existing" style="padding:6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm)">
-          <button type="button" class="eye-btn" onclick="togglePw('af-password')" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          <button type="button" class="eye-btn" data-action="togglePw" data-target="af-password" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
         </div>
       </div>
       <div class="field" style="margin-bottom:10px" id="af-cert-row">
         <label style="font-size:12px;color:var(--text2)">Bridge TLS cert path (Bridge accounts only)</label>
         <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
           <input type="text" id="af-cert" placeholder="${p.certBrowsePlaceholderAttr}" style="flex:1;padding:6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius-sm);box-sizing:border-box">
-          <button class="btn btn-ghost" type="button" onclick="detectCertPath('af-cert')" style="white-space:nowrap;padding:6px 10px" title="Scan home directory for cert.pem">Detect</button>
-          <button class="btn btn-ghost" type="button" onclick="document.getElementById('af-cert-file').click()" style="white-space:nowrap;padding:6px 10px" title="Choose a cert.pem file from your disk">📁 Browse</button>
-          <input type="file" id="af-cert-file" accept=".pem,.crt" style="display:none" onchange="uploadCert(event, 'af-cert')">
+          <button class="btn btn-ghost" type="button" data-action="detectCertPathAf" style="white-space:nowrap;padding:6px 10px" title="Scan home directory for cert.pem">Detect</button>
+          <button class="btn btn-ghost" type="button" data-action="uploadCertAf" style="white-space:nowrap;padding:6px 10px" title="Choose a cert.pem file from your disk">📁 Browse</button>
+          <input type="file" id="af-cert-file" accept=".pem,.crt" style="display:none" data-change="uploadCertChange" data-target="af-cert">
         </div>
       </div>
       <input type="hidden" id="af-id">
       <input type="hidden" id="af-provider">
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
-        <button class="btn btn-ghost" onclick="closeAccountForm()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveAccountForm()" id="af-save-btn">Save account</button>
+        <button class="btn btn-ghost" data-action="closeAccountForm">Cancel</button>
+        <button class="btn btn-primary" data-action="saveAccountForm" id="af-save-btn">Save account</button>
       </div>
     </div>
   </div>

@@ -109,9 +109,9 @@ export function buildWizardHtml(p: WizardParams): string {
         </div>
 
         <div class="wiz-actions">
-          <button class="wiz-skip" id="wiz-skip-btn" onclick="openSettingsView()" aria-label="Skip wizard and go to settings">Skip wizard</button>
+          <button class="wiz-skip" id="wiz-skip-btn" data-action="openSettingsView" aria-label="Skip wizard and go to settings">Skip wizard</button>
           <div class="spacer"></div>
-          <button class="btn btn-primary" onclick="wizGo(1)" aria-label="Start setup">Get Started →</button>
+          <button class="btn btn-primary" data-action="wizGo" data-step="1" aria-label="Start setup">Get Started →</button>
         </div>
       </div>
 
@@ -154,9 +154,9 @@ export function buildWizardHtml(p: WizardParams): string {
             <div style="display:flex;gap:8px;align-items:center">
               <input type="text" id="wiz-cert-path" placeholder="${p.certBrowsePlaceholderAttr}"
                 aria-label="Path to the exported cert.pem file" style="flex:1">
-              <button class="btn btn-ghost" type="button" onclick="wizDetectCert()" style="white-space:nowrap" title="Scan home directory for cert.pem">Detect</button>
-              <button class="btn btn-ghost" type="button" onclick="document.getElementById('wiz-cert-file').click()" style="white-space:nowrap" title="Choose a cert.pem file from your disk">📁 Browse</button>
-              <input type="file" id="wiz-cert-file" accept=".pem,.crt" style="display:none" onchange="wizUploadCert(event)">
+              <button class="btn btn-ghost" type="button" data-action="wizDetectCert" style="white-space:nowrap" title="Scan home directory for cert.pem">Detect</button>
+              <button class="btn btn-ghost" type="button" data-action="wizUploadCertClick" style="white-space:nowrap" title="Choose a cert.pem file from your disk">📁 Browse</button>
+              <input type="file" id="wiz-cert-file" accept=".pem,.crt" style="display:none" data-change="wizUploadCertChange">
             </div>
             <div class="hint">
               Export from Bridge → Help → Export TLS Certificate, then enter the path to <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">cert.pem</code>.<br>
@@ -171,7 +171,7 @@ export function buildWizardHtml(p: WizardParams): string {
             <div style="display:flex;gap:8px;align-items:center">
               <input type="text" id="wiz-bridge-path" placeholder="Auto-detect" style="flex:1"
                 aria-label="Path to the Proton Bridge executable">
-              <button class="btn btn-ghost" type="button" id="wiz-search-bridge-btn" onclick="wizSearchBridgePath()" style="white-space:nowrap">Search</button>
+              <button class="btn btn-ghost" type="button" id="wiz-search-bridge-btn" data-action="wizSearchBridgePath" style="white-space:nowrap">Search</button>
             </div>
             <div class="hint" id="wiz-bridge-path-hint">Click Search to auto-detect, or enter the path manually if not found.</div>
           </div>
@@ -188,12 +188,12 @@ export function buildWizardHtml(p: WizardParams): string {
         </div>
 
         <div class="wiz-actions">
-          <button class="btn btn-ghost" onclick="wizGo(0)" aria-label="Back to Welcome">← Back</button>
+          <button class="btn btn-ghost" data-action="wizGo" data-step="0" aria-label="Back to Welcome">← Back</button>
           <div class="spacer"></div>
-          <button class="btn btn-ghost" id="wiz-test-bridge-btn" onclick="wizTestBridge()" aria-label="Test bridge connection">
+          <button class="btn btn-ghost" id="wiz-test-bridge-btn" data-action="wizTestBridge" aria-label="Test bridge connection">
             Test Connection
           </button>
-          <button class="btn btn-primary" id="wiz-bridge-next" onclick="wizGo(2)" aria-label="Continue to Account">
+          <button class="btn btn-primary" id="wiz-bridge-next" data-action="wizGo" data-step="2" aria-label="Continue to Account">
             Continue →
           </button>
         </div>
@@ -211,7 +211,7 @@ export function buildWizardHtml(p: WizardParams): string {
           <label for="wiz-username">Proton Mail email address</label>
           <input type="email" id="wiz-username" placeholder="you@proton.me"
             autocomplete="username" aria-required="true"
-            oninput="wizClearError('wiz-username')">
+            data-input="wizClearErrorUsername">
           <div class="hint">Use your full Proton address (e.g. user@proton.me or user@protonmail.com). The @proton.me and @protonmail.com forms are not interchangeable — use the exact primary address shown in your Proton account.</div>
           <div class="hint" style="margin-top:4px">
             &#9432; Bridge runs in <strong>combined mode</strong> — all your Proton addresses share one inbox and one set of credentials.
@@ -228,8 +228,8 @@ export function buildWizardHtml(p: WizardParams): string {
           <div class="pw-wrap">
             <input type="password" id="wiz-password" placeholder="Bridge password"
               autocomplete="current-password" aria-required="true"
-              oninput="wizClearError('wiz-password')">
-            <button type="button" class="eye-btn" onclick="togglePw('wiz-password')" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              data-input="wizClearErrorPassword">
+            <button type="button" class="eye-btn" data-action="togglePw" data-target="wiz-password" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
           </div>
           <div class="hint">Bridge app → Settings → IMAP/SMTP → Password</div>
           <div class="err-msg" id="err-wiz-password">Please enter your Bridge password.</div>
@@ -240,7 +240,7 @@ export function buildWizardHtml(p: WizardParams): string {
           <div class="pw-wrap">
             <input type="password" id="wiz-smtp-token" placeholder="SMTP token from Bridge settings"
               autocomplete="off" aria-label="SMTP token">
-            <button type="button" class="eye-btn" onclick="togglePw('wiz-smtp-token')" aria-label="Show token" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button type="button" class="eye-btn" data-action="togglePw" data-target="wiz-smtp-token" aria-label="Show token" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
           </div>
           <div class="hint">Required for paid plans using direct smtp.protonmail.ch. Leave blank for Bridge.</div>
         </div>
@@ -256,9 +256,9 @@ export function buildWizardHtml(p: WizardParams): string {
         </div>
 
         <div class="wiz-actions">
-          <button class="btn btn-ghost" onclick="wizGo(1)" aria-label="Back to Bridge">← Back</button>
+          <button class="btn btn-ghost" data-action="wizGo" data-step="1" aria-label="Back to Bridge">← Back</button>
           <div class="spacer"></div>
-          <button class="btn btn-primary" onclick="wizSaveCreds()" id="wiz-save-creds-btn"
+          <button class="btn btn-primary" data-action="wizSaveCreds" id="wiz-save-creds-btn"
             aria-label="Save credentials and continue">
             Save &amp; Continue →
           </button>
@@ -321,9 +321,9 @@ export function buildWizardHtml(p: WizardParams): string {
         </div>
 
         <div class="wiz-actions">
-          <button class="btn btn-ghost" onclick="wizGo(2)" aria-label="Back to Account">← Back</button>
+          <button class="btn btn-ghost" data-action="wizGo" data-step="2" aria-label="Back to Account">← Back</button>
           <div class="spacer"></div>
-          <button class="btn btn-primary" onclick="wizSavePreset()" id="wiz-apply-preset-btn"
+          <button class="btn btn-primary" data-action="wizSavePreset" id="wiz-apply-preset-btn"
             aria-label="Apply preset and continue to review">
             Apply &amp; Continue →
           </button>
@@ -369,9 +369,9 @@ export function buildWizardHtml(p: WizardParams): string {
         </div>
 
         <div class="wiz-actions">
-          <button class="btn btn-ghost" onclick="wizGo(3)" aria-label="Back to Permissions">← Back</button>
+          <button class="btn btn-ghost" data-action="wizGo" data-step="3" aria-label="Back to Permissions">← Back</button>
           <div class="spacer"></div>
-          <button class="btn btn-primary" onclick="wizFinalSave()" id="wiz-final-save-btn"
+          <button class="btn btn-primary" data-action="wizFinalSave" id="wiz-final-save-btn"
             aria-label="Save configuration">
             Save Configuration
           </button>
@@ -393,7 +393,7 @@ export function buildWizardHtml(p: WizardParams): string {
               <div class="done-step-title">Add to your MCP host</div>
               <div class="done-step-desc">Copy this snippet into your MCP host's config under <code>mcpServers</code>.</div>
               <pre class="code-block" id="done-snippet" style="margin-top:10px;font-size:12px">Loading…</pre>
-              <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="wizCopySnippet()" aria-label="Copy MCP config snippet">Copy</button>
+              <button class="btn btn-ghost btn-sm" style="margin-top:6px" data-action="wizCopySnippet" aria-label="Copy MCP config snippet">Copy</button>
               <div id="copy-result" style="display:none"></div>
             </div>
           </div>
@@ -403,7 +403,7 @@ export function buildWizardHtml(p: WizardParams): string {
             <div class="done-step-body">
               <div class="done-step-title">Claude Desktop detected</div>
               <div class="done-step-desc">Claude Desktop was found on this machine. You can write the config directly — won't affect any other MCP servers.</div>
-              <button class="btn btn-primary" id="btn-write-claude" onclick="wizWriteClaudeDesktop()" aria-label="Write Claude Desktop config">
+              <button class="btn btn-primary" id="btn-write-claude" data-action="wizWriteClaudeDesktop" aria-label="Write Claude Desktop config">
                 Write to Claude Desktop →
               </button>
               <div id="write-result" style="display:none"></div>
@@ -416,10 +416,10 @@ export function buildWizardHtml(p: WizardParams): string {
               <div class="done-step-title">Restart Claude Desktop</div>
               <div class="done-step-desc">Claude Desktop loads MCP servers at startup. A restart picks up the new config.</div>
               <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
-                <button class="btn btn-primary" id="btn-restart-claude" onclick="wizRestartClaude()" aria-label="Restart Claude Desktop">
+                <button class="btn btn-primary" id="btn-restart-claude" data-action="wizRestartClaude" aria-label="Restart Claude Desktop">
                   Restart Claude Desktop
                 </button>
-                <button class="btn btn-ghost" onclick="wizSkipRestart()" aria-label="I will restart manually">
+                <button class="btn btn-ghost" data-action="wizSkipRestart" aria-label="I will restart manually">
                   I'll restart manually
                 </button>
               </div>
@@ -434,9 +434,9 @@ export function buildWizardHtml(p: WizardParams): string {
         </div>
 
         <div class="wiz-actions" style="margin-top:24px">
-          <button class="btn btn-ghost" onclick="wizGo(4)" aria-label="Back to Review">← Back</button>
+          <button class="btn btn-ghost" data-action="wizGo" data-step="4" aria-label="Back to Review">← Back</button>
           <div class="spacer"></div>
-          <button class="btn btn-ghost" onclick="openSettingsView()" aria-label="Open full settings">Open Settings</button>
+          <button class="btn btn-ghost" data-action="openSettingsView" aria-label="Open full settings">Open Settings</button>
         </div>
       </div>
 

@@ -8,11 +8,11 @@ export function buildPermissionsHtml(): string {
     <div class="card-title">Permission Presets</div>
     <div class="card-desc">Apply a preset to quickly configure access, then fine-tune individual tools below.</div>
     <div class="presets" id="preset-btns">
-      <button class="preset-btn" data-preset="full"       onclick="applyPreset('full')">Full Access</button>
-      <button class="preset-btn" data-preset="supervised" onclick="applyPreset('supervised')">Supervised</button>
-      <button class="preset-btn" data-preset="send_only"  onclick="applyPreset('send_only')">Send-Only</button>
-      <button class="preset-btn" data-preset="read_only"  onclick="applyPreset('read_only')">Read-Only</button>
-      <button class="preset-btn" data-preset="custom" id="custom-preset-btn" style="display:none" onclick="restoreCustom()">Custom</button>
+      <button class="preset-btn" data-preset="full"       data-action="applyPreset">Full Access</button>
+      <button class="preset-btn" data-preset="supervised" data-action="applyPreset">Supervised</button>
+      <button class="preset-btn" data-preset="send_only"  data-action="applyPreset">Send-Only</button>
+      <button class="preset-btn" data-preset="read_only"  data-action="applyPreset">Read-Only</button>
+      <button class="preset-btn" data-preset="custom" id="custom-preset-btn" style="display:none" data-action="restoreCustom">Custom</button>
     </div>
     <table style="font-size:12px;color:var(--muted);border-collapse:collapse;width:100%">
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Read-Only</td><td>Reading unlimited. Writing fully blocked.</td></tr>
@@ -25,7 +25,7 @@ export function buildPermissionsHtml(): string {
   <div id="categories"></div>
 
   <div class="actions">
-    <button class="btn btn-primary" onclick="savePermissions()">Save Permissions</button>
+    <button class="btn btn-primary" data-action="savePermissions">Save Permissions</button>
   </div>
   `;
 }

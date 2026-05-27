@@ -20,8 +20,8 @@ export function buildSetupHtml(p: SetupParams): string {
     <div class="card-title">Connection Mode</div>
     <div class="card-desc">Most users run via Proton Bridge (localhost). Direct SMTP requires a paid plan and SMTP token.</div>
     <div class="mode-btns">
-      <button class="mode-btn active" id="mode-bridge" onclick="setMode('bridge')">Proton Bridge (localhost)</button>
-      <button class="mode-btn" id="mode-direct" onclick="setMode('direct')">Direct smtp.protonmail.ch</button>
+      <button class="mode-btn active" id="mode-bridge" data-action="setMode" data-mode="bridge">Proton Bridge (localhost)</button>
+      <button class="mode-btn" id="mode-direct" data-action="setMode" data-mode="direct">Direct smtp.protonmail.ch</button>
     </div>
   </div>
 
@@ -43,7 +43,7 @@ export function buildSetupHtml(p: SetupParams): string {
             <label for="password">Bridge password <span style="color:var(--muted);font-weight:400">(from Bridge app)</span></label>
             <div class="pw-wrap">
               <input type="password" id="password" placeholder="Enter new password" autocomplete="current-password">
-              <button type="button" class="eye-btn" onclick="togglePw('password')" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              <button type="button" class="eye-btn" data-action="togglePw" data-target="password" aria-label="Show password" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
             </div>
             <div class="hint">Leave blank to keep the saved value.</div>
           </div>
@@ -57,10 +57,10 @@ export function buildSetupHtml(p: SetupParams): string {
         <div class="row-3">
           <div class="field">
             <label for="smtp-host">Host</label>
-            <input type="text" id="smtp-host" placeholder="localhost" oninput="updateSmtpTokenVisibility()">
+            <input type="text" id="smtp-host" placeholder="localhost" data-input="updateSmtpTokenVisibility">
           </div>
           <div class="field">
-            <label for="smtp-port" style="display:flex;justify-content:space-between;align-items:center">SMTP Port <a href="#" style="font-size:0.75em;font-weight:normal;color:var(--primary)" onclick="event.preventDefault();document.getElementById('smtp-port').value='1025'">Reset to 1025</a></label>
+            <label for="smtp-port" style="display:flex;justify-content:space-between;align-items:center">SMTP Port <a href="#" style="font-size:0.75em;font-weight:normal;color:var(--primary)" data-action="resetPort" data-field="smtp-port" data-value="1025">Reset to 1025</a></label>
             <input type="number" id="smtp-port" min="1" max="65535" placeholder="1025">
           </div>
         </div>
@@ -77,7 +77,7 @@ export function buildSetupHtml(p: SetupParams): string {
             <label for="smtp-token">SMTP token <span style="color:var(--muted);font-weight:400">(required for direct)</span></label>
             <div class="pw-wrap">
               <input type="password" id="smtp-token" placeholder="Generated in Bridge Settings → IMAP/SMTP">
-              <button type="button" class="eye-btn" onclick="togglePw('smtp-token')" aria-label="Show token" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              <button type="button" class="eye-btn" data-action="togglePw" data-target="smtp-token" aria-label="Show token" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
             </div>
             <div class="hint">Leave blank to keep the saved value.</div>
           </div>
@@ -94,7 +94,7 @@ export function buildSetupHtml(p: SetupParams): string {
             <input type="text" id="imap-host" placeholder="localhost">
           </div>
           <div class="field">
-            <label for="imap-port" style="display:flex;justify-content:space-between;align-items:center">IMAP Port <a href="#" style="font-size:0.75em;font-weight:normal;color:var(--primary)" onclick="event.preventDefault();document.getElementById('imap-port').value='1143'">Reset to 1143</a></label>
+            <label for="imap-port" style="display:flex;justify-content:space-between;align-items:center">IMAP Port <a href="#" style="font-size:0.75em;font-weight:normal;color:var(--primary)" data-action="resetPort" data-field="imap-port" data-value="1143">Reset to 1143</a></label>
             <input type="number" id="imap-port" min="1" max="65535" placeholder="1143">
           </div>
           <div class="field"></div>
@@ -109,9 +109,9 @@ export function buildSetupHtml(p: SetupParams): string {
           <label for="bridge-cert">Path to the exported cert.pem file</label>
           <div style="display:flex;gap:8px;align-items:center">
             <input type="text" id="bridge-cert" placeholder="${p.certBrowsePlaceholderAttr}" style="flex:1">
-            <button class="btn btn-ghost" type="button" onclick="detectCertPath()" style="white-space:nowrap" title="Scan home directory for cert.pem">Detect</button>
-            <button class="btn btn-ghost" type="button" onclick="document.getElementById('bridge-cert-file').click()" style="white-space:nowrap" title="Choose a cert.pem file from your disk">📁 Browse</button>
-            <input type="file" id="bridge-cert-file" accept=".pem,.crt" style="display:none" onchange="uploadCert(event, 'bridge-cert')">
+            <button class="btn btn-ghost" type="button" data-action="detectCertPath" style="white-space:nowrap" title="Scan home directory for cert.pem">Detect</button>
+            <button class="btn btn-ghost" type="button" data-action="uploadCertBridge" style="white-space:nowrap" title="Choose a cert.pem file from your disk">📁 Browse</button>
+            <input type="file" id="bridge-cert-file" accept=".pem,.crt" style="display:none" data-change="uploadCertChange" data-target="bridge-cert">
           </div>
           <div class="hint">
             Export from Bridge → Help → Export TLS Certificate, then click Browse to pick the file (or Detect to auto-scan your home directory).<br>
@@ -122,7 +122,7 @@ export function buildSetupHtml(p: SetupParams): string {
           <label for="bridge-path">Proton Bridge executable path <span style="color:var(--muted);font-weight:400">(optional — leave blank to auto-detect)</span></label>
           <div style="display:flex;gap:8px;align-items:center">
             <input type="text" id="bridge-path" placeholder="Auto-detect" style="flex:1">
-            <button class="btn btn-ghost" type="button" id="search-bridge-btn" onclick="searchBridgePath()" style="white-space:nowrap">Search</button>
+            <button class="btn btn-ghost" type="button" id="search-bridge-btn" data-action="searchBridgePath" style="white-space:nowrap">Search</button>
           </div>
           <div class="hint" id="bridge-path-hint">Used when auto-start is enabled. Click Search to detect automatically, or enter the path manually.</div>
         </div>
@@ -175,7 +175,7 @@ export function buildSetupHtml(p: SetupParams): string {
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
           <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px"
-            oninput="checkPortMismatch()">
+            data-input="checkPortMismatch">
           <div class="hint">Port the settings web UI listens on. Takes effect on the next launch. Default: 8765.</div>
           <div id="port-mismatch-warn" style="display:none;margin-top:4px;font-size:12px;color:var(--warn,#f59e0b)">
             ⚠ Currently running on port ${p.runningPort}. Save and restart settings for the new port to take effect.
@@ -215,8 +215,8 @@ export function buildSetupHtml(p: SetupParams): string {
     </div>
 
     <div class="actions">
-      <button class="btn btn-primary" onclick="saveSetup()" id="save-btn">Save Configuration</button>
-      <button class="btn btn-ghost"   onclick="testConnections()" id="test-btn">Test Connections</button>
+      <button class="btn btn-primary" data-action="saveSetup" id="save-btn">Save Configuration</button>
+      <button class="btn btn-ghost"   data-action="testConnections" id="test-btn">Test Connections</button>
       <span id="test-result" style="align-self:center;font-size:13px;color:var(--muted)"></span>
     </div>
   </form>

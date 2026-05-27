@@ -588,9 +588,12 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         res.writeHead(200, {
           "Content-Type":             "text/html; charset=utf-8",
           // CSP3 behaviour note:
-          // - script-src: nonce gates <script> block execution; 'unsafe-inline'
-          //   is ignored for <script> elements when a nonce is present but still
-          //   covers inline onclick="..." event handlers (browser carve-out).
+          // - script-src: nonce gates <script> block execution. When ANY nonce
+          //   appears in script-src, CSP3 completely ignores 'unsafe-inline' for
+          //   ALL inline scripts — including onclick/oninput/onchange event handlers.
+          //   All event wiring therefore uses data-action/data-tab/data-change/
+          //   data-input attributes dispatched by a delegated listener inside the
+          //   nonce-protected <script> block.
           // - style-src: NO nonce here. When a nonce is present in style-src,
           //   CSP3 browsers completely ignore 'unsafe-inline', blocking all
           //   element.style.* JS assignments and style="" HTML attributes.

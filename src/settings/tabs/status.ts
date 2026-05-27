@@ -27,7 +27,7 @@ export function buildStatusHtml(p: StatusParams): string {
     <div class="card-desc">Paste this into your MCP host's config under <code>mcpServers</code>.</div>
     <pre class="code-block" id="claude-snippet">Loading…</pre>
     <div class="copy-row">
-      <button class="btn btn-ghost btn-sm" onclick="copySnippet()">Copy</button>
+      <button class="btn btn-ghost btn-sm" data-action="copySnippet">Copy</button>
     </div>
   </div>
 
@@ -35,7 +35,7 @@ export function buildStatusHtml(p: StatusParams): string {
     <div class="card-title">Connection Check</div>
     <div class="card-desc">Checks whether SMTP and IMAP ports are reachable from this machine.</div>
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <button class="btn btn-ghost" onclick="runStatusCheck()" id="status-check-btn">Check Now</button>
+      <button class="btn btn-ghost" data-action="runStatusCheck" id="status-check-btn">Check Now</button>
       <div id="status-check-result" style="font-size:13px;color:var(--muted)"></div>
     </div>
     <div id="connectivity-results" style="margin-top:14px;display:none">
@@ -61,8 +61,8 @@ export function buildStatusHtml(p: StatusParams): string {
       <tr><td>Status</td><td id="update-status" style="color:var(--muted)">Not checked</td></tr>
     </table>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <button class="btn btn-ghost" id="check-update-btn" onclick="checkForUpdates()">Check for Updates</button>
-      <button class="btn btn-primary" id="install-update-btn" onclick="installUpdate()" style="display:none">Install Update</button>
+      <button class="btn btn-ghost" id="check-update-btn" data-action="checkForUpdates">Check for Updates</button>
+      <button class="btn btn-primary" id="install-update-btn" data-action="installUpdate" style="display:none">Install Update</button>
       <span id="update-action-status" style="font-size:13px;color:var(--muted)"></span>
     </div>
     <pre id="update-output" style="display:none;margin-top:14px;background:var(--surface2);padding:12px;border-radius:6px;font-size:12px;overflow-x:auto;white-space:pre-wrap;max-height:200px;overflow-y:auto"></pre>
@@ -72,7 +72,7 @@ export function buildStatusHtml(p: StatusParams): string {
     <div class="card-title">Reset</div>
     <div class="card-desc">Delete the config file and clear all saved settings.</div>
     <div class="actions" style="margin-top:0">
-      <button class="btn btn-danger" onclick="resetConfig()">Reset to Defaults</button>
+      <button class="btn btn-danger" data-action="resetConfig">Reset to Defaults</button>
     </div>
   </div>
 

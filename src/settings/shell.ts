@@ -64,20 +64,20 @@ ${buildStyles(cspNonce)}
      title="Integration reference for AI agents — share this URL with your agent so it has a copy-paste-ready guide to connect">
     For your Agent ↗
   </a>
-  <button class="btn-shutdown" id="shutdown-btn" onclick="shutdownServer()" title="Stop the settings server">⏹ Shutdown</button>
+  <button class="btn-shutdown" id="shutdown-btn" data-action="shutdownServer" title="Stop the settings server">⏹ Shutdown</button>
 </header>
 
 <!-- ══ POST-SETUP NAV (hidden until config saved) ══ -->
 <nav id="main-nav" style="display:none">
-  <button class="active" onclick="showTab('setup',this)">Setup</button>
-  <button onclick="showTab('accounts',this)">Accounts</button>
-  <button onclick="showTab('permissions',this)">Permissions</button>
-  <button onclick="showTab('agents',this)">
+  <button class="active" data-tab="setup">Setup</button>
+  <button data-tab="accounts">Accounts</button>
+  <button data-tab="permissions">Permissions</button>
+  <button data-tab="agents">
     Agents
     <span id="agents-pending-badge" style="display:none;background:#ef4444;color:#fff;border-radius:10px;padding:2px 7px;margin-left:6px;font-size:11px;font-weight:700">0</span>
   </button>
-  <button onclick="showTab('status',this)">Status</button>
-  <button id="logs-tab-btn" style="display:none" onclick="showTab('logs',this)">Logs</button>
+  <button data-tab="status">Status</button>
+  <button id="logs-tab-btn" style="display:none" data-tab="logs">Logs</button>
 </nav>
 
 <!-- ══ ESCALATION BANNER (shown on all views when pending) ══ -->
@@ -114,7 +114,7 @@ ${buildStyles(cspNonce)}
   // ── Constants ─────────────────────────────────────────────────────────────
   const ALL_TOOLS  = ${toolsJson};
   const CATEGORIES = ${categoriesJson};
-  window.__distIndexPath = ${distIndexPath};
+  const __distIndexPath = ${distIndexPath};
   const PKG_VERSION   = ${pkgVersionJson};
   const PKG_NAME      = ${pkgNameJson};
   const RUNNING_PORT  = ${runningPortJson};
@@ -124,6 +124,8 @@ ${buildStyles(cspNonce)}
   let toolEnabled    = {};
   let toolRate       = {};
   let customSnapshot = null; // saved custom tool state, keyed by tool name
+  let _accountsById  = {};
+  let __mpReloading  = false;
 
   // Wizard in-progress state
   const W = {
@@ -151,12 +153,12 @@ ${buildStyles(cspNonce)}
     const originalFetch = window.fetch.bind(window);
     window.fetch = async function(...args) {
       const response = await originalFetch(...args);
-      if (response.status === 403 && !window.__mpReloading) {
+      if (response.status === 403 && !__mpReloading) {
         try {
           const clone = response.clone();
           const body = await clone.json();
           if (body && body.code === 'session_expired') {
-            window.__mpReloading = true;
+            __mpReloading = true;
             try { window.location.reload(); } catch (_) { /* ignore */ }
           }
         } catch (_) { /* not JSON — not ours */ }
@@ -164,6 +166,112 @@ ${buildStyles(cspNonce)}
       return response;
     };
   })();
+
+  // ── Central event delegation ───────────────────────────────────────────────
+  // CSP3: when a nonce is present in script-src, 'unsafe-inline' is completely
+  // ignored for ALL inline scripts including event handlers. All button wiring
+  // must go through these delegated listeners — no onclick= attributes anywhere.
+  document.addEventListener('click', function(e) {
+    // Prevent category toggle when clicking the All checkbox label inside the header
+    if (e.target.closest('.category-header .toggle-wrap')) return;
+    const tabEl = e.target.closest('[data-tab]');
+    if (tabEl && !tabEl.disabled) { e.preventDefault(); showTab(tabEl.dataset.tab, tabEl); return; }
+    const el = e.target.closest('[data-action]');
+    if (el && !el.disabled) { e.preventDefault(); _dispatch(el.dataset.action, el); }
+  });
+  document.addEventListener('input', function(e) {
+    const el = e.target.closest('[data-input]');
+    if (el) _dispatch(el.dataset.input, el);
+  });
+  document.addEventListener('change', function(e) {
+    // Grant modal duration radio buttons don't use data-change — handle directly
+    if (e.target.name === 'gm-dur') {
+      document.getElementById('gm-custom-expiry').style.display = (e.target.value === 'custom') ? '' : 'none';
+    }
+    const el = e.target.closest('[data-change]');
+    if (el) _dispatch(el.dataset.change, el);
+  });
+
+  function _dispatch(action, el) {
+    switch (action) {
+      // Shell / view
+      case 'shutdownServer':            return shutdownServer();
+      case 'openSettingsView':          return openSettingsView();
+      // Setup tab
+      case 'saveSetup':                 return saveSetup();
+      case 'testConnections':           return testConnections();
+      case 'detectCertPath':            return detectCertPath();
+      case 'searchBridgePath':          return searchBridgePath();
+      case 'togglePw':                  return togglePw(el.dataset.target);
+      case 'uploadCertBridge':          return document.getElementById('bridge-cert-file').click();
+      case 'setMode':                   return setMode(el.dataset.mode);
+      case 'updateSmtpTokenVisibility': return updateSmtpTokenVisibility();
+      case 'checkPortMismatch':         return checkPortMismatch();
+      case 'resetPort':                 return void (document.getElementById(el.dataset.field).value = el.dataset.value);
+      // Permissions tab
+      case 'savePermissions':           return savePermissions();
+      case 'applyPreset':               return applyPreset(el.dataset.preset);
+      case 'restoreCustom':             return restoreCustom();
+      case 'toggleCategory':            return toggleCategory(el);
+      case 'toggleCategoryAll':         return toggleCategoryAll(el.dataset.cat, el.checked);
+      case 'onToolToggle':              return onToolToggle(el.dataset.tool, el.checked);
+      // Accounts tab
+      case 'openAccountForm':           return openAccountForm(el.dataset.providerType, null);
+      case 'editAccount':               return editAccount(el.dataset.id);
+      case 'deleteAccountConfirm':      return deleteAccountConfirm(el.dataset.id);
+      case 'activateAccount':           return activateAccount(el.dataset.id);
+      case 'closeAccountForm':          return closeAccountForm();
+      case 'saveAccountForm':           return saveAccountForm();
+      case 'detectCertPathAf':          return detectCertPath('af-cert');
+      case 'uploadCertAf':              return document.getElementById('af-cert-file').click();
+      // Agents tab
+      case 'switchAgentFilter':         return switchAgentFilter(el.dataset.filter);
+      case 'approveGrant':              return approveGrant(el.dataset.id, el.dataset.preset);
+      case 'denyGrant':                 return denyGrant(el.dataset.id);
+      case 'revokeGrant':               return revokeGrant(el.dataset.id);
+      case 'openGrantModal':            return openGrantModal(el.dataset.id, el.dataset.name, el.dataset.conds ? JSON.parse(el.dataset.conds) : null);
+      case 'closeGrantModal':           return closeGrantModal();
+      case 'submitGrantModal':          return submitGrantModal();
+      // Escalations
+      case 'approveEscalation':         return approveEscalation(el.dataset.id);
+      case 'denyEscalation':            return denyEscalation(el.dataset.id);
+      case 'confirmInput':              return onConfirmInput(el.dataset.id);
+      // Status tab
+      case 'runStatusCheck':            return runStatusCheck();
+      case 'checkForUpdates':           return checkForUpdates();
+      case 'installUpdate':             return installUpdate();
+      case 'resetConfig':               return resetConfig();
+      case 'copySnippet':               return copySnippet();
+      // Logs tab
+      case 'logGoFirst':                return logGoFirst();
+      case 'logGoPrev':                 return logGoPrev();
+      case 'logGoNext':                 return logGoNext();
+      case 'logGoLast':                 return logGoLast();
+      case 'logToggleFollow':           return logToggleFollow();
+      case 'logClear':                  return logClear();
+      case 'rlResetDefaults':           return rlResetDefaults();
+      case 'rlSave':                    return rlSave();
+      // Wizard
+      case 'wizGo':                     return wizGo(parseInt(el.dataset.step, 10));
+      case 'wizDetectCert':             return wizDetectCert();
+      case 'wizUploadCertClick':        return document.getElementById('wiz-cert-file').click();
+      case 'wizSearchBridgePath':       return wizSearchBridgePath();
+      case 'wizTestBridge':             return wizTestBridge();
+      case 'wizSaveCreds':              return wizSaveCreds();
+      case 'wizSavePreset':             return wizSavePreset();
+      case 'wizFinalSave':              return wizFinalSave();
+      case 'wizCopySnippet':            return wizCopySnippet();
+      case 'wizWriteClaudeDesktop':     return wizWriteClaudeDesktop();
+      case 'wizRestartClaude':          return wizRestartClaude();
+      case 'wizSkipRestart':            return wizSkipRestart();
+      // File input change events
+      case 'uploadCertChange':          return uploadCert(el, el.dataset.target);
+      case 'wizUploadCertChange':       return wizUploadCert(el);
+      // Input events
+      case 'wizClearErrorUsername':     return wizClearError('wiz-username');
+      case 'wizClearErrorPassword':     return wizClearError('wiz-password');
+    }
+  }
 
   // ── Tab lazy-loading ──────────────────────────────────────────────────────
   const _tabLoaded = new Set();
@@ -226,15 +334,15 @@ ${buildStyles(cspNonce)}
   }
 
   // ── View switching ─────────────────────────────────────────────────────────
-  window.openSettingsView = async function() {
+  async function openSettingsView() {
     document.getElementById('wizard-view').style.display = 'none';
     document.getElementById('settings-view').style.display = '';
     document.getElementById('main-nav').style.display = '';
     await ensureTabLoaded('setup');
     await refresh();
-  };
+  }
 
-  window.showTab = async function(id, btn) {
+  async function showTab(id, btn) {
     await ensureTabLoaded(id);
     document.querySelectorAll('#settings-view section').forEach(s => s.classList.remove('active'));
     document.querySelectorAll('#main-nav button').forEach(b => b.classList.remove('active'));
@@ -245,7 +353,7 @@ ${buildStyles(cspNonce)}
     if (id === 'accounts') { refreshAccounts(); }
     if (id === 'logs')     { logInit(); }
     else                   { logStopFollow(); }
-  };
+  }
 
   // ══ ACCOUNTS TAB LOGIC ═══════════════════════════════════════════════════
   async function refreshAccounts() {
@@ -262,9 +370,9 @@ ${buildStyles(cspNonce)}
     list.innerHTML = rows.map(a => {
       const active = a.id === activeId;
       const buttons =
-        (active ? '' : '<button class="btn btn-primary" onclick="activateAccount(\\'' + esc(a.id) + '\\')">Activate</button>') +
-        '<button class="btn btn-ghost" onclick="editAccount(\\'' + esc(a.id) + '\\')">Edit</button>' +
-        (!active ? '<button class="btn btn-ghost" onclick="deleteAccountConfirm(\\'' + esc(a.id) + '\\')">Delete</button>' : '');
+        (active ? '' : '<button class="btn btn-primary" data-action="activateAccount" data-id="' + esc(a.id) + '">Activate</button>') +
+        '<button class="btn btn-ghost" data-action="editAccount" data-id="' + esc(a.id) + '">Edit</button>' +
+        (!active ? '<button class="btn btn-ghost" data-action="deleteAccountConfirm" data-id="' + esc(a.id) + '">Delete</button>' : '');
       const last = a.lastCheckedAt ? ' · last check ' + new Date(a.lastCheckedAt).toLocaleString() + ' · ' + esc(a.lastCheckResult || '') : '';
       return (
         '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px;' + (active ? 'border-color:#6D4AFF' : '') + '">' +
@@ -281,19 +389,19 @@ ${buildStyles(cspNonce)}
         '</div>'
       );
     }).join('');
-    window._accountsById = {};
-    for (const a of rows) window._accountsById[a.id] = a;
+    _accountsById = {};
+    for (const a of rows) _accountsById[a.id] = a;
   }
 
-  window.openAccountForm = function(providerType, id) {
+  function openAccountForm(providerType, id) {
     const isEdit = !!id;
     document.getElementById('af-title').textContent = isEdit ? 'Edit account' : 'Add account';
     document.getElementById('af-id').value = id || '';
     document.getElementById('af-provider').value = providerType;
     document.getElementById('af-cert-row').style.display = providerType === 'proton-bridge' ? '' : 'none';
 
-    if (isEdit && window._accountsById && window._accountsById[id]) {
-      const a = window._accountsById[id];
+    if (isEdit && _accountsById && _accountsById[id]) {
+      const a = _accountsById[id];
       document.getElementById('af-name').value = a.name || '';
       document.getElementById('af-imap-host').value = a.imapHost || '';
       document.getElementById('af-imap-port').value = a.imapPort || '';
@@ -321,19 +429,19 @@ ${buildStyles(cspNonce)}
       }
     }
     document.getElementById('account-form-backdrop').style.display = 'block';
-  };
+  }
 
-  window.editAccount = function(id) {
-    const a = (window._accountsById || {})[id];
+  function editAccount(id) {
+    const a = (_accountsById || {})[id];
     if (!a) return;
     openAccountForm(a.providerType, id);
-  };
+  }
 
-  window.closeAccountForm = function() {
+  function closeAccountForm() {
     document.getElementById('account-form-backdrop').style.display = 'none';
-  };
+  }
 
-  window.saveAccountForm = async function() {
+  async function saveAccountForm() {
     const id = document.getElementById('af-id').value;
     const isEdit = !!id;
     const body = {
@@ -356,51 +464,51 @@ ${buildStyles(cspNonce)}
       body: JSON.stringify(body),
     });
     if (!r.ok) {
-      if (window.__mpReloading) return;
+      if (__mpReloading) return;
       const errBody = await r.json().catch(() => null);
       alert('Save failed: ' + (errBody?.error || r.status));
       return;
     }
     closeAccountForm();
     refreshAccounts();
-  };
+  }
 
-  window.activateAccount = async function(id) {
+  async function activateAccount(id) {
     if (!confirm('Switching the active account requires a server restart. Continue?')) return;
     const r = await fetch('/api/accounts/' + encodeURIComponent(id) + '/activate', {
       method: 'POST',
       headers: { 'X-CSRF-Token': CSRF },
     });
     if (!r.ok) {
-      if (window.__mpReloading) return;
+      if (__mpReloading) return;
       const errBody = await r.json().catch(() => null);
       alert('Activate failed: ' + (errBody?.error || r.status));
       return;
     }
     alert('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).');
     refreshAccounts();
-  };
+  }
 
-  window.deleteAccountConfirm = async function(id) {
-    if (!confirm('Delete this account? This removes the server’s ability to connect to it. Active account cannot be deleted.')) return;
+  async function deleteAccountConfirm(id) {
+    if (!confirm('Delete this account? This removes the server\\'s ability to connect to it. Active account cannot be deleted.')) return;
     const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
       method: 'DELETE',
       headers: { 'X-CSRF-Token': CSRF },
     });
     if (!r.ok) {
-      if (window.__mpReloading) return;
+      if (__mpReloading) return;
       const errBody = await r.json().catch(() => null);
       alert('Delete failed: ' + (errBody?.error || r.status));
       return;
     }
     refreshAccounts();
-  };
+  }
 
   // ══ AGENTS TAB LOGIC ══════════════════════════════════════════════════════
   let agentFilter = 'pending';
   let agentEventSource = null;
 
-  window.switchAgentFilter = function(which) {
+  function switchAgentFilter(which) {
     agentFilter = which;
     ['pending','active','revoked','audit'].forEach(f => {
       const b = document.getElementById('ag-filter-' + f);
@@ -409,7 +517,7 @@ ${buildStyles(cspNonce)}
     document.getElementById('agents-list').style.display = (which === 'audit') ? 'none' : '';
     document.getElementById('agents-audit').style.display = (which === 'audit') ? '' : 'none';
     refreshAgents();
-  };
+  }
 
   async function refreshAgents() {
     if (agentFilter === 'audit') { await loadAgentAudit(); return; }
@@ -455,17 +563,17 @@ ${buildStyles(cspNonce)}
       const lastCall = g.lastCallAt ? new Date(g.lastCallAt).toLocaleString() : 'never';
       const expiry = g.conditions && g.conditions.expiresAt
         ? 'expires ' + new Date(g.conditions.expiresAt).toLocaleString() : 'no expiry';
-      const cidEsc = esc(g.clientId);
+      const cidEsc  = esc(g.clientId);
       const nameEsc = esc(g.clientName);
-      const condArg = g.conditions ? JSON.stringify(g.conditions).replace(/'/g, "\\'") : 'null';
+      const condsJson = esc(JSON.stringify(g.conditions || null));
       const buttons = g.status === 'pending'
-        ? '<button class="btn btn-primary" onclick="approveGrant(\\'' + cidEsc + '\\',\\'read_only\\')">Approve read-only</button>' +
-          '<button class="btn btn-primary" onclick="approveGrant(\\'' + cidEsc + '\\',\\'supervised\\')">Approve supervised</button>' +
-          '<button class="btn btn-ghost"   onclick="openGrantModal(\\'' + cidEsc + '\\',\\'' + nameEsc + '\\',null)">Customize…</button>' +
-          '<button class="btn btn-ghost"   onclick="denyGrant(\\''    + cidEsc + '\\')">Deny</button>'
+        ? '<button class="btn btn-primary" data-action="approveGrant" data-id="' + cidEsc + '" data-preset="read_only">Approve read-only</button>' +
+          '<button class="btn btn-primary" data-action="approveGrant" data-id="' + cidEsc + '" data-preset="supervised">Approve supervised</button>' +
+          '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-conds="null">Customize…</button>' +
+          '<button class="btn btn-ghost"   data-action="denyGrant" data-id="' + cidEsc + '">Deny</button>'
         : g.status === 'active'
-        ? '<button class="btn btn-ghost"   onclick="openGrantModal(\\'' + cidEsc + '\\',\\'' + nameEsc + '\\',' + condArg + ')">Extend / modify…</button>' +
-          '<button class="btn btn-ghost"   onclick="revokeGrant(\\''  + cidEsc + '\\')">Revoke</button>'
+        ? '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-conds="' + condsJson + '">Extend / modify…</button>' +
+          '<button class="btn btn-ghost"   data-action="revokeGrant" data-id="' + cidEsc + '">Revoke</button>'
         : '';
       return (
         '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
@@ -508,7 +616,7 @@ ${buildStyles(cspNonce)}
     }).join('');
   }
 
-  window.approveGrant = async function(clientId, preset) {
+  async function approveGrant(clientId, preset) {
     const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
@@ -516,9 +624,9 @@ ${buildStyles(cspNonce)}
     });
     if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
     refreshAgents();
-  };
+  }
 
-  window.denyGrant = async function(clientId) {
+  async function denyGrant(clientId) {
     if (!confirm('Deny this agent? It will be unable to call any tools.')) return;
     const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/deny', {
       method: 'POST',
@@ -527,17 +635,17 @@ ${buildStyles(cspNonce)}
     });
     if (!r.ok) { alert('Deny failed: ' + (await r.text())); return; }
     refreshAgents();
-  };
+  }
 
-  window.revokeGrant = async function(clientId) {
-    if (!confirm('Revoke this agent’s access? Currently running tool calls finish; the next one will be denied.')) return;
+  async function revokeGrant(clientId) {
+    if (!confirm('Revoke this agent\\'s access? Currently running tool calls finish; the next one will be denied.')) return;
     const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/revoke', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
     });
     if (!r.ok) { alert('Revoke failed: ' + (await r.text())); return; }
     refreshAgents();
-  };
+  }
 
   // SSE subscription — live-update the Agents tab and the nav badge.
   function subscribeAgentEvents() {
@@ -593,10 +701,10 @@ ${buildStyles(cspNonce)}
     if (n === 5) wizBuildSnippet();
   }
 
-  window.wizGo = function(n) { wizShowStep(n); };
+  function wizGo(n) { wizShowStep(n); }
 
   // ── Step 2: Bridge test ───────────────────────────────────────────────────
-  window.wizTestBridge = async function() {
+  async function wizTestBridge() {
     const btn  = document.getElementById('wiz-test-bridge-btn');
     const hint = document.getElementById('bridge-hint');
     const smtpRow = document.getElementById('smtp-row');
@@ -670,10 +778,10 @@ ${buildStyles(cspNonce)}
     } finally {
       btn.disabled = false; btn.textContent = 'Test Connection';
     }
-  };
+  }
 
   // ── Step 3: Credential save ───────────────────────────────────────────────
-  window.wizSaveCreds = async function() {
+  async function wizSaveCreds() {
     const username = document.getElementById('wiz-username').value.trim();
     const password = document.getElementById('wiz-password').value;
     const smtpToken = document.getElementById('wiz-smtp-token').value;
@@ -722,13 +830,11 @@ ${buildStyles(cspNonce)}
     } finally {
       btn.disabled = false; btn.textContent = 'Save & Continue →';
     }
-  };
+  }
 
-  window.wizClearError = function(id) {
-    const inp = document.getElementById(id);
-    const errId = 'err-' + id;
-    setFieldError(id, errId, false);
-  };
+  function wizClearError(id) {
+    setFieldError(id, 'err-' + id, false);
+  }
 
   function setFieldError(inputId, errId, show) {
     const inp = document.getElementById(inputId);
@@ -738,7 +844,7 @@ ${buildStyles(cspNonce)}
   }
 
   // ── Step 4: Preset save ───────────────────────────────────────────────────
-  window.wizSavePreset = async function() {
+  async function wizSavePreset() {
     const radio = document.querySelector('input[name="wiz-preset"]:checked');
     const preset = radio ? radio.value : 'read_only';
     W.preset = preset;
@@ -761,7 +867,7 @@ ${buildStyles(cspNonce)}
     } finally {
       btn.disabled = false; btn.textContent = 'Apply & Continue →';
     }
-  };
+  }
 
   // ── Step 5: Review ────────────────────────────────────────────────────────
   function wizBuildReview() {
@@ -784,7 +890,7 @@ ${buildStyles(cspNonce)}
   }
 
   // ── Step 5: Final save ────────────────────────────────────────────────────
-  window.wizFinalSave = async function() {
+  async function wizFinalSave() {
     const btn = document.getElementById('wiz-final-save-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Saving…';
@@ -798,10 +904,10 @@ ${buildStyles(cspNonce)}
     } finally {
       btn.disabled = false; btn.textContent = 'Save Configuration';
     }
-  };
+  }
 
   // ── Step 6: Done ──────────────────────────────────────────────────────────
-  window.wizBuildSnippet = async function() {
+  async function wizBuildSnippet() {
     // Reset state
     document.getElementById('write-result').style.display = 'none';
     document.getElementById('restart-result').style.display = 'none';
@@ -817,7 +923,7 @@ ${buildStyles(cspNonce)}
     const snippet = {
       'mailpouch': {
         command: 'node',
-        args: [window.__distIndexPath || '/path/to/mailpouch/dist/index.js'],
+        args: [__distIndexPath || '/path/to/mailpouch/dist/index.js'],
       },
     };
     document.getElementById('done-snippet').textContent = JSON.stringify(snippet, null, 2);
@@ -831,9 +937,9 @@ ${buildStyles(cspNonce)}
         document.getElementById('restart-row').style.display = '';
       }
     } catch { /* ignore — Claude Desktop section stays hidden */ }
-  };
+  }
 
-  window.wizCopySnippet = function() {
+  function wizCopySnippet() {
     const text = document.getElementById('done-snippet').textContent;
     const resultEl = document.getElementById('copy-result');
     navigator.clipboard.writeText(text).then(() => {
@@ -841,9 +947,9 @@ ${buildStyles(cspNonce)}
       resultEl.innerHTML = '<div class="hint" style="color:var(--success);margin-top:6px">✓ Copied to clipboard</div>';
       setTimeout(() => { resultEl.style.display = 'none'; }, 2500);
     });
-  };
+  }
 
-  window.wizWriteClaudeDesktop = async function() {
+  async function wizWriteClaudeDesktop() {
     const btn = document.getElementById('btn-write-claude');
     const resultEl = document.getElementById('write-result');
     btn.disabled = true;
@@ -873,9 +979,9 @@ ${buildStyles(cspNonce)}
       resultEl.style.display = 'block';
       resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:8px">✗ Network error</div>';
     }
-  };
+  }
 
-  window.wizRestartClaude = async function() {
+  async function wizRestartClaude() {
     const btn = document.getElementById('btn-restart-claude');
     const resultEl = document.getElementById('restart-result');
     btn.disabled = true;
@@ -894,17 +1000,17 @@ ${buildStyles(cspNonce)}
       resultEl.style.display = 'block';
       resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:8px">✗ Could not restart automatically — please restart Claude Desktop manually.</div>';
     }
-  };
+  }
 
-  window.wizSkipRestart = function() {
+  function wizSkipRestart() {
     document.getElementById('done-write-section').style.display = 'none';
     document.getElementById('done-complete').style.display = 'flex';
     document.getElementById('done-complete').querySelector('strong').textContent = 'Done!';
     document.getElementById('done-complete').querySelector('strong').nextSibling.textContent = ' Restart Claude Desktop when you\\'re ready — Proton Mail tools will be available after it loads.';
-  };
+  }
 
   // ── Shutdown server ───────────────────────────────────────────────────────
-  window.shutdownServer = async function() {
+  async function shutdownServer() {
     if (!confirm('Stop the settings server? The browser tab will no longer work after this.')) return;
     const btn = document.getElementById('shutdown-btn');
     btn.disabled = true;
@@ -915,7 +1021,7 @@ ${buildStyles(cspNonce)}
     btn.textContent = '✓ Stopped';
     toast('Settings server stopped.', 'ok');
     setTimeout(() => { document.body.innerHTML = '<div style="font-family:sans-serif;color:#ccc;background:#0f0e1a;min-height:100vh;display:flex;align-items:center;justify-content:center;font-size:18px">Server stopped. Close this tab.</div>'; }, 1500);
-  };
+  }
 
   // ══ SETTINGS TAB LOGIC ════════════════════════════════════════════════════
 
@@ -967,7 +1073,8 @@ ${buildStyles(cspNonce)}
 
   var EYE_OPEN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
   var EYE_SLASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
-  window.togglePw = function(inputId) {
+
+  function togglePw(inputId) {
     var inp = document.getElementById(inputId);
     if (!inp) return;
     var btn = inp.parentElement && inp.parentElement.querySelector('.eye-btn');
@@ -977,9 +1084,9 @@ ${buildStyles(cspNonce)}
       btn.innerHTML = show ? EYE_SLASH : EYE_OPEN;
       btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
     }
-  };
+  }
 
-  window.setMode = function(mode) {
+  function setMode(mode) {
     const isBridge = mode === 'bridge';
     document.getElementById('mode-bridge').className = 'mode-btn' + (isBridge ? ' active' : '');
     document.getElementById('mode-direct').className = 'mode-btn' + (!isBridge ? ' active' : '');
@@ -991,23 +1098,22 @@ ${buildStyles(cspNonce)}
       set('smtp-host', 'smtp.protonmail.ch'); set('smtp-port', 587);
     }
     updateSmtpTokenVisibility();
-  };
+  }
 
-
-  window.checkPortMismatch = function() {
+  function checkPortMismatch() {
     const val  = parseInt(document.getElementById('settings-port').value, 10);
     const warn = document.getElementById('port-mismatch-warn');
     if (warn) warn.style.display = (!isNaN(val) && val !== RUNNING_PORT) ? '' : 'none';
-  };
+  }
 
-  window.updateSmtpTokenVisibility = function() {
+  function updateSmtpTokenVisibility() {
     var smtpHost = get('smtp-host').trim().toLowerCase();
     var isBridge = (smtpHost === 'localhost' || smtpHost === '127.0.0.1');
     var tokenRow = document.getElementById('smtp-token-row');
     if (tokenRow) tokenRow.style.display = isBridge ? 'none' : '';
-  };
+  }
 
-  window.saveSetup = async function() {
+  async function saveSetup() {
     const btn = document.getElementById('save-btn');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Saving…';
     try {
@@ -1050,7 +1156,7 @@ ${buildStyles(cspNonce)}
     } finally {
       btn.disabled = false; btn.textContent = 'Save Configuration';
     }
-  };
+  }
 
   // ── Bridge executable search ──────────────────────────────────────────────
   async function _doSearchBridge(inputId, hintId, btnId) {
@@ -1077,16 +1183,16 @@ ${buildStyles(cspNonce)}
     }
   }
 
-  window.searchBridgePath = function() {
+  function searchBridgePath() {
     return _doSearchBridge('bridge-path', 'bridge-path-hint', 'search-bridge-btn');
-  };
+  }
 
-  window.wizSearchBridgePath = function() {
+  function wizSearchBridgePath() {
     return _doSearchBridge('wiz-bridge-path', 'wiz-bridge-path-hint', 'wiz-search-bridge-btn');
-  };
+  }
 
   // ── Bridge TLS cert auto-detect + upload ──────────────────────────────────
-  window.detectCertPath = async function(inputId) {
+  async function detectCertPath(inputId) {
     inputId = inputId || 'bridge-cert';
     const input = document.getElementById(inputId);
     if (!input) return;
@@ -1102,15 +1208,17 @@ ${buildStyles(cspNonce)}
     } catch (e) {
       alert('Detection failed: ' + (e && e.message ? e.message : e));
     }
-  };
-  window.wizDetectCert = function() { return window.detectCertPath('wiz-cert-path'); };
+  }
 
-  window.uploadCert = async function(ev, targetInputId) {
-    const file = ev.target && ev.target.files && ev.target.files[0];
+  function wizDetectCert() { return detectCertPath('wiz-cert-path'); }
+
+  // uploadCert receives the <input type="file"> element directly (not a DOM Event)
+  async function uploadCert(el, targetInputId) {
+    const file = el.files && el.files[0];
     if (!file) return;
     if (file.size > 256 * 1024) {
       alert('File too large (max 256 KB for a PEM cert).');
-      ev.target.value = '';
+      el.value = '';
       return;
     }
     try {
@@ -1133,12 +1241,13 @@ ${buildStyles(cspNonce)}
     } catch (e) {
       alert('Upload error: ' + (e && e.message ? e.message : e));
     } finally {
-      ev.target.value = ''; // allow re-picking the same file
+      el.value = ''; // allow re-picking the same file
     }
-  };
-  window.wizUploadCert = function(ev) { return window.uploadCert(ev, 'wiz-cert-path'); };
+  }
 
-  window.testConnections = async function() {
+  function wizUploadCert(el) { return uploadCert(el, 'wiz-cert-path'); }
+
+  async function testConnections() {
     const btn = document.getElementById('test-btn');
     const res = document.getElementById('test-result');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
@@ -1186,7 +1295,7 @@ ${buildStyles(cspNonce)}
     } finally {
       btn.disabled = false; btn.textContent = 'Test Connections';
     }
-  };
+  }
 
   // ── Permissions tab ───────────────────────────────────────────────────────
   function buildCategoryUI() {
@@ -1196,16 +1305,16 @@ ${buildStyles(cspNonce)}
       const el = document.createElement('div');
       el.className = 'category';
       el.innerHTML =
-        '<div class="category-header" onclick="toggleCategory(this)">' +
+        '<div class="category-header" data-action="toggleCategory">' +
           '<span class="caret">▶</span>' +
           '<div class="category-info">' +
             '<div class="name">' + escHtml(cat.label) + '</div>' +
             '<div class="desc">' + escHtml(cat.description) + '</div>' +
           '</div>' +
           '<span class="risk-badge risk-' + escHtml(cat.risk) + '">' + escHtml(cat.risk) + '</span>' +
-          '<label class="toggle-wrap" onclick="event.stopPropagation()">' +
+          '<label class="toggle-wrap">' +
             '<span class="toggle"><input type="checkbox" id="cat-' + escHtml(catKey) + '" ' +
-              'onchange="toggleCategory_all(\\'' + escHtml(catKey) + '\\',this.checked)"><span class="slider"></span></span>' +
+              'data-change="toggleCategoryAll" data-cat="' + escHtml(catKey) + '"><span class="slider"></span></span>' +
             '<span style="font-size:12px;color:var(--muted)">All</span>' +
           '</label>' +
         '</div>' +
@@ -1234,7 +1343,7 @@ ${buildStyles(cspNonce)}
       '</div>' +
       '<label class="toggle-wrap">' +
         '<span class="toggle"><input type="checkbox" id="tool-' + escHtml(tool) + '" ' +
-          'onchange="onToolToggle(\\'' + escHtml(tool) + '\\',this.checked)"><span class="slider"></span></span>' +
+          'data-change="onToolToggle" data-tool="' + escHtml(tool) + '"><span class="slider"></span></span>' +
       '</label>' +
     '</div>';
   }
@@ -1261,7 +1370,7 @@ ${buildStyles(cspNonce)}
     for (const catKey of Object.keys(CATEGORIES)) { updateCategoryToggle(catKey); }
   }
 
-  window.onToolToggle = function(tool, enabled) {
+  function onToolToggle(tool, enabled) {
     toolEnabled[tool] = enabled;
     const rateEl = document.getElementById('rate-' + tool);
     const winEl  = document.getElementById('rate-window-' + tool);
@@ -1271,9 +1380,9 @@ ${buildStyles(cspNonce)}
       if (cat.tools.includes(tool)) { updateCategoryToggle(catKey); break; }
     }
     markCustomPreset();
-  };
+  }
 
-  window.toggleCategory_all = function(catKey, checked) {
+  function toggleCategoryAll(catKey, checked) {
     const cat = CATEGORIES[catKey];
     for (const tool of cat.tools) {
       const el = document.getElementById('tool-' + tool);
@@ -1282,12 +1391,12 @@ ${buildStyles(cspNonce)}
       if (re) re.disabled = !checked;
     }
     markCustomPreset();
-  };
+  }
 
-  window.toggleCategory = function(header) {
+  function toggleCategory(header) {
     header.classList.toggle('open');
     header.nextElementSibling.classList.toggle('open');
-  };
+  }
 
   function updateCategoryToggle(catKey) {
     const cat = CATEGORIES[catKey];
@@ -1315,7 +1424,7 @@ ${buildStyles(cspNonce)}
     return snap;
   }
 
-  window.restoreCustom = function() {
+  function restoreCustom() {
     if (!customSnapshot) return;
     for (const tool of ALL_TOOLS) {
       const perm  = customSnapshot[tool] || { enabled: true, rateLimit: null, rateLimitWindow: 'hour' };
@@ -1328,9 +1437,9 @@ ${buildStyles(cspNonce)}
     }
     for (const catKey of Object.keys(CATEGORIES)) { updateCategoryToggle(catKey); }
     markCustomPreset();
-  };
+  }
 
-  window.applyPreset = async function(preset) {
+  async function applyPreset(preset) {
     if (cfg && cfg.permissions && cfg.permissions.preset === 'custom') {
       customSnapshot = captureToolState();
     }
@@ -1349,7 +1458,7 @@ ${buildStyles(cspNonce)}
       customBtn.style.display = 'none';
     }
     toast('Preset "' + preset + '" applied.', 'ok');
-  };
+  }
 
   function markCustomPreset() {
     document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
@@ -1357,7 +1466,7 @@ ${buildStyles(cspNonce)}
     btn.style.display = ''; btn.classList.add('active');
   }
 
-  window.savePermissions = async function() {
+  async function savePermissions() {
     const tools = {};
     for (const tool of ALL_TOOLS) {
       const cbEl  = document.getElementById('tool-' + tool);
@@ -1380,7 +1489,7 @@ ${buildStyles(cspNonce)}
     });
     if (r.ok) { toast('Permissions saved. Changes take effect within 15 s.', 'ok'); await refresh(); }
     else       { toast('Save failed.', 'err'); }
-  };
+  }
 
   // ── Status tab ────────────────────────────────────────────────────────────
   function populateStatus(c) {
@@ -1409,23 +1518,23 @@ ${buildStyles(cspNonce)}
     const snippet = {
       'mailpouch': {
         command: 'node',
-        args: [window.__distIndexPath || '/path/to/mailpouch/dist/index.js'],
+        args: [__distIndexPath || '/path/to/mailpouch/dist/index.js'],
       },
     };
     document.getElementById('claude-snippet').textContent = JSON.stringify(snippet, null, 2);
   }
 
-  window.copySnippet = function() {
+  function copySnippet() {
     const text = document.getElementById('claude-snippet').textContent;
     navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard.', 'ok'));
-  };
+  }
 
   // ══ UPDATES ═══════════════════════════════════════════════════════════════
 
   // Seed installed version immediately from injected constant
   document.getElementById('update-current') && (document.getElementById('update-current').textContent = PKG_VERSION);
 
-  window.checkForUpdates = async function() {
+  async function checkForUpdates() {
     const btn    = document.getElementById('check-update-btn');
     const status = document.getElementById('update-status');
     const installBtn = document.getElementById('install-update-btn');
@@ -1459,9 +1568,9 @@ ${buildStyles(cspNonce)}
       btn.disabled = false;
       btn.textContent = 'Check for Updates';
     }
-  };
+  }
 
-  window.installUpdate = async function() {
+  async function installUpdate() {
     const installBtn   = document.getElementById('install-update-btn');
     const actionStatus = document.getElementById('update-action-status');
     const output       = document.getElementById('update-output');
@@ -1515,7 +1624,7 @@ ${buildStyles(cspNonce)}
       installBtn.disabled = false;
       installBtn.textContent = 'Retry Install';
     }
-  };
+  }
 
   // Auto-check for updates when the Status tab is first opened
   (function() {
@@ -1606,22 +1715,22 @@ ${buildStyles(cspNonce)}
     logUpdateToolbar();
   }
 
-  window.logGoFirst = function() { logStopFollow(); logFetch(1); };
-  window.logGoPrev  = function() { logStopFollow(); logFetch(Math.max(1, LOG.page - 1)); };
-  window.logGoNext  = function() { logStopFollow(); logFetch(Math.min(LOG.pages, LOG.page + 1)); };
-  window.logGoLast  = async function() {
+  function logGoFirst() { logStopFollow(); logFetch(1); }
+  function logGoPrev()  { logStopFollow(); logFetch(Math.max(1, LOG.page - 1)); }
+  function logGoNext()  { logStopFollow(); logFetch(Math.min(LOG.pages, LOG.page + 1)); }
+  async function logGoLast() {
     await logFetch(9999);
     logStartFollow();
-  };
-  window.logToggleFollow = function() {
-    if (LOG.following) { logStopFollow(); } else { window.logGoLast(); }
-  };
-  window.logClear = async function() {
+  }
+  function logToggleFollow() {
+    if (LOG.following) { logStopFollow(); } else { logGoLast(); }
+  }
+  async function logClear() {
     if (!confirm('Clear the log file?')) return;
     await fetch('/api/logs/clear', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
     LOG.page = 1; LOG.pages = 1; LOG.total = 0;
     logFetch(1);
-  };
+  }
 
   // ── Response Limits ───────────────────────────────────────────────────────
   const RL_DEFAULTS = { maxResponseBytes: 921600, maxEmailBodyChars: 500000, maxEmailListResults: 50, maxAttachmentBytes: 600000, warnOnLargeResponse: true };
@@ -1645,12 +1754,12 @@ ${buildStyles(cspNonce)}
     };
   }
 
-  window.rlResetDefaults = function() {
+  function rlResetDefaults() {
     populateResponseLimits({ responseLimits: RL_DEFAULTS });
     document.getElementById('rl-status').textContent = 'Reset to defaults (not saved yet).';
-  };
+  }
 
-  window.rlSave = async function() {
+  async function rlSave() {
     const statusEl = document.getElementById('rl-status');
     statusEl.textContent = 'Saving…';
     try {
@@ -1671,9 +1780,9 @@ ${buildStyles(cspNonce)}
       statusEl.textContent = 'Network error.';
       statusEl.style.color = 'var(--danger)';
     }
-  };
+  }
 
-  window.runStatusCheck = async function() {
+  async function runStatusCheck() {
     const btn     = document.getElementById('status-check-btn');
     const res     = document.getElementById('status-check-result');
     const results = document.getElementById('connectivity-results');
@@ -1700,14 +1809,14 @@ ${buildStyles(cspNonce)}
     } finally {
       btn.disabled = false; btn.textContent = 'Check Now';
     }
-  };
+  }
 
-  window.resetConfig = async function() {
+  async function resetConfig() {
     if (!confirm('Reset the config file to defaults? Current settings will be lost.')) return;
     const r = await fetch('/api/reset', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
     if (r.ok) { toast('Config reset.', 'ok'); await refresh(); }
     else       { toast('Reset failed.', 'err'); }
-  };
+  }
 
   // ── Escalation management ─────────────────────────────────────────────────
   async function loadEscalations() {
@@ -1753,12 +1862,12 @@ ${buildStyles(cspNonce)}
           '<label>Type APPROVE to enable the button</label>' +
           '<input class="escalation-confirm-input" type="text" id="conf-' + escHtml(e.id) + '" ' +
             'placeholder="APPROVE" autocomplete="off" spellcheck="false" ' +
-            'oninput="onConfirmInput(\\'' + escHtml(e.id) + '\\')">' +
+            'data-input="confirmInput" data-id="' + escHtml(e.id) + '">' +
         '</div>' +
         '<div class="escalation-actions">' +
-          '<button class="btn btn-deny" onclick="denyEscalation(\\'' + escHtml(e.id) + '\\')">✗ Deny</button>' +
+          '<button class="btn btn-deny" data-action="denyEscalation" data-id="' + escHtml(e.id) + '">✗ Deny</button>' +
           '<button class="btn btn-approve" id="approve-' + escHtml(e.id) + '" disabled ' +
-            'onclick="approveEscalation(\\'' + escHtml(e.id) + '\\')">✓ Approve</button>' +
+            'data-action="approveEscalation" data-id="' + escHtml(e.id) + '">✓ Approve</button>' +
           '<span class="escalation-countdown" id="cd-' + escHtml(e.id) + '">' +
             formatCountdown(e.expiresAt) + '</span>' +
         '</div></div>';
@@ -1805,13 +1914,13 @@ ${buildStyles(cspNonce)}
     }, 1000);
   }
 
-  window.onConfirmInput = function(id) {
+  function onConfirmInput(id) {
     const input = document.getElementById('conf-' + id);
     const btn   = document.getElementById('approve-' + id);
     if (input && btn) btn.disabled = input.value !== 'APPROVE';
-  };
+  }
 
-  window.approveEscalation = async function(id) {
+  async function approveEscalation(id) {
     const input = document.getElementById('conf-' + id);
     if (!input || input.value !== 'APPROVE') return;
     try {
@@ -1830,9 +1939,9 @@ ${buildStyles(cspNonce)}
     } catch(e) {
       toast('Network error: ' + e.message, 'err');
     }
-  };
+  }
 
-  window.denyEscalation = async function(id) {
+  async function denyEscalation(id) {
     try {
       const r = await fetch('/api/escalations/' + id + '/deny', {
         method: 'POST', headers: { 'X-CSRF-Token': CSRF },
@@ -1847,7 +1956,83 @@ ${buildStyles(cspNonce)}
     } catch(e) {
       toast('Network error: ' + e.message, 'err');
     }
-  };
+  }
+
+  // ── Grant modal (merged from second IIFE) ─────────────────────────────────
+  let currentClientId = null;
+
+  function openGrantModal(clientId, clientName, currentConditions) {
+    currentClientId = clientId;
+    document.getElementById('gm-subtitle').textContent = clientName + ' (' + clientId + ')';
+    document.getElementById('gm-preset').value = 'supervised';
+    document.getElementById('gm-folders').value = '';
+    document.getElementById('gm-ip').value = '';
+    document.getElementById('gm-note').value = '';
+    document.getElementById('gm-deny-delete').checked = false;
+    document.getElementById('gm-deny-send').checked = false;
+    (document.querySelector('input[name="gm-dur"][value="1h"]') || {}).checked = true;
+    if (currentConditions && currentConditions.folderAllowlist) {
+      document.getElementById('gm-folders').value = (currentConditions.folderAllowlist || []).join(', ');
+    }
+    if (currentConditions && currentConditions.ipPins) {
+      document.getElementById('gm-ip').value = (currentConditions.ipPins || []).join(', ');
+    }
+    document.getElementById('grant-modal-backdrop').style.display = 'block';
+  }
+
+  function closeGrantModal() {
+    document.getElementById('grant-modal-backdrop').style.display = 'none';
+    currentClientId = null;
+  }
+
+  async function submitGrantModal() {
+    if (!currentClientId) return;
+    const preset = document.getElementById('gm-preset').value;
+    const dur = (document.querySelector('input[name="gm-dur"]:checked') || {}).value || 'never';
+    let expiresAt;
+    if (dur === '1h')   expiresAt = new Date(Date.now() + 60*60*1000).toISOString();
+    else if (dur === '24h') expiresAt = new Date(Date.now() + 24*60*60*1000).toISOString();
+    else if (dur === '7d')  expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+    else if (dur === 'custom') {
+      const v = document.getElementById('gm-custom-expiry').value;
+      if (v) expiresAt = new Date(v).toISOString();
+    }
+    const foldersRaw = document.getElementById('gm-folders').value.trim();
+    const folderAllowlist = foldersRaw ? foldersRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const ipRaw = document.getElementById('gm-ip').value.trim();
+    const ipPins = ipRaw ? ipRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const toolOverrides = {};
+    if (document.getElementById('gm-deny-delete').checked) {
+      toolOverrides.delete_email = false;
+      toolOverrides.bulk_delete = false;
+      toolOverrides.bulk_delete_emails = false;
+    }
+    if (document.getElementById('gm-deny-send').checked) {
+      toolOverrides.send_email = false;
+      toolOverrides.reply_to_email = false;
+      toolOverrides.forward_email = false;
+    }
+    const note = document.getElementById('gm-note').value.trim() || undefined;
+    const body = {
+      preset,
+      conditions: (expiresAt || folderAllowlist || ipPins) ? { expiresAt, folderAllowlist, ipPins } : undefined,
+      toolOverrides: Object.keys(toolOverrides).length > 0 ? toolOverrides : undefined,
+      note,
+    };
+    const r = await fetch('/api/agents/' + encodeURIComponent(currentClientId) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      if (__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Approve failed: ' + (errBody?.error || r.status));
+      return;
+    }
+    closeGrantModal();
+    refreshAgents();
+  }
 
   // ── Utilities ─────────────────────────────────────────────────────────────
   function get(id) { return document.getElementById(id)?.value ?? ''; }
@@ -1916,93 +2101,11 @@ ${buildStyles(cspNonce)}
       <input type="text" id="gm-note" maxlength="240" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn btn-ghost" onclick="closeGrantModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="submitGrantModal()">Save and approve</button>
+      <button class="btn btn-ghost" data-action="closeGrantModal">Cancel</button>
+      <button class="btn btn-primary" data-action="submitGrantModal">Save and approve</button>
     </div>
   </div>
 </div>
-<script nonce="${cspNonce}">
-(function() {
-  let currentClientId = null;
-  document.addEventListener('change', (e) => {
-    const t = e.target;
-    if (t && t.name === 'gm-dur') {
-      document.getElementById('gm-custom-expiry').style.display = (t.value === 'custom') ? '' : 'none';
-    }
-  });
-  window.openGrantModal = function(clientId, clientName, currentConditions) {
-    currentClientId = clientId;
-    document.getElementById('gm-subtitle').textContent = clientName + ' (' + clientId + ')';
-    document.getElementById('gm-preset').value = 'supervised';
-    document.getElementById('gm-folders').value = '';
-    document.getElementById('gm-ip').value = '';
-    document.getElementById('gm-note').value = '';
-    document.getElementById('gm-deny-delete').checked = false;
-    document.getElementById('gm-deny-send').checked = false;
-    (document.querySelector('input[name="gm-dur"][value="1h"]') || {}).checked = true;
-    if (currentConditions && currentConditions.folderAllowlist) {
-      document.getElementById('gm-folders').value = (currentConditions.folderAllowlist || []).join(', ');
-    }
-    if (currentConditions && currentConditions.ipPins) {
-      document.getElementById('gm-ip').value = (currentConditions.ipPins || []).join(', ');
-    }
-    document.getElementById('grant-modal-backdrop').style.display = 'block';
-  };
-  window.closeGrantModal = function() {
-    document.getElementById('grant-modal-backdrop').style.display = 'none';
-    currentClientId = null;
-  };
-  window.submitGrantModal = async function() {
-    if (!currentClientId) return;
-    const preset = document.getElementById('gm-preset').value;
-    const dur = (document.querySelector('input[name="gm-dur"]:checked') || {}).value || 'never';
-    let expiresAt;
-    if (dur === '1h')   expiresAt = new Date(Date.now() + 60*60*1000).toISOString();
-    else if (dur === '24h') expiresAt = new Date(Date.now() + 24*60*60*1000).toISOString();
-    else if (dur === '7d')  expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
-    else if (dur === 'custom') {
-      const v = document.getElementById('gm-custom-expiry').value;
-      if (v) expiresAt = new Date(v).toISOString();
-    }
-    const foldersRaw = document.getElementById('gm-folders').value.trim();
-    const folderAllowlist = foldersRaw ? foldersRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
-    const ipRaw = document.getElementById('gm-ip').value.trim();
-    const ipPins = ipRaw ? ipRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
-    const toolOverrides = {};
-    if (document.getElementById('gm-deny-delete').checked) {
-      toolOverrides.delete_email = false;
-      toolOverrides.bulk_delete = false;
-      toolOverrides.bulk_delete_emails = false;
-    }
-    if (document.getElementById('gm-deny-send').checked) {
-      toolOverrides.send_email = false;
-      toolOverrides.reply_to_email = false;
-      toolOverrides.forward_email = false;
-    }
-    const note = document.getElementById('gm-note').value.trim() || undefined;
-    const body = {
-      preset,
-      conditions: (expiresAt || folderAllowlist || ipPins) ? { expiresAt, folderAllowlist, ipPins } : undefined,
-      toolOverrides: Object.keys(toolOverrides).length > 0 ? toolOverrides : undefined,
-      note,
-    };
-    const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
-    const r = await fetch('/api/agents/' + encodeURIComponent(currentClientId) + '/approve', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      if (window.__mpReloading) return;
-      const errBody = await r.json().catch(() => null);
-      alert('Approve failed: ' + (errBody?.error || r.status));
-      return;
-    }
-    closeGrantModal();
-    if (typeof refreshAgents === 'function') refreshAgents();
-  };
-})();
-</script>
 </body>
 </html>`;
 }

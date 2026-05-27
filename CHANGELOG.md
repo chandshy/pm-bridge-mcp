@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.38] — 2026-05-27
+
+### Fixed
+- **Settings UI: all buttons and tabs unresponsive** — CSP3 spec: when any nonce appears in `script-src`, `'unsafe-inline'` is completely ignored for ALL inline scripts in that directive — including `onclick=`, `oninput=`, and `onchange=` event handlers. Every interactive element in the settings UI used inline handlers, so nothing worked. Fixed by replacing all inline event handlers across `shell.ts` and all 7 tab files with `data-action`/`data-tab`/`data-change`/`data-input` attributes dispatched by a central delegated listener inside the nonce-protected `<script>` block. Also corrected the false code comment in `server.ts` that claimed `'unsafe-inline'` "still covers inline onclick handlers (browser carve-out)".
+
 ## [3.0.37] — 2026-05-27
 
 ### Fixed

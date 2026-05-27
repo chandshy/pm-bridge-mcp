@@ -9,12 +9,12 @@ export function buildLogsHtml(): string {
     <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap">
       <span style="font-size:12px;color:var(--muted)" id="log-page-info">—</span>
       <div style="flex:1"></div>
-      <button class="btn btn-ghost btn-sm" id="log-btn-first"  onclick="logGoFirst()"  title="First page">«</button>
-      <button class="btn btn-ghost btn-sm" id="log-btn-prev"   onclick="logGoPrev()"   title="Previous page">‹</button>
-      <button class="btn btn-ghost btn-sm" id="log-btn-next"   onclick="logGoNext()"   title="Next page">›</button>
-      <button class="btn btn-ghost btn-sm" id="log-btn-last"   onclick="logGoLast()"   title="Last page — follow">»</button>
-      <button class="btn btn-ghost btn-sm" id="log-btn-follow" onclick="logToggleFollow()" title="Auto-follow latest" style="min-width:80px">Follow ●</button>
-      <button class="btn btn-ghost btn-sm" onclick="logClear()" title="Clear log file">Clear</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-first"  data-action="logGoFirst"       title="First page">«</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-prev"   data-action="logGoPrev"        title="Previous page">‹</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-next"   data-action="logGoNext"        title="Next page">›</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-last"   data-action="logGoLast"        title="Last page — follow">»</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-follow" data-action="logToggleFollow"  title="Auto-follow latest" style="min-width:80px">Follow ●</button>
+      <button class="btn btn-ghost btn-sm" data-action="logClear" title="Clear log file">Clear</button>
     </div>
     <!-- output -->
     <pre id="log-output" style="margin:0;padding:14px;font-size:11px;line-height:1.55;min-height:300px;max-height:60vh;overflow-y:auto;background:var(--bg);border-radius:0;white-space:pre-wrap;word-break:break-all">Loading…</pre>
@@ -55,8 +55,8 @@ export function buildLogsHtml(): string {
       </label>
     </div>
     <div style="margin-top:12px;display:flex;gap:8px">
-      <button class="btn btn-ghost btn-sm" onclick="rlResetDefaults()">Reset Defaults</button>
-      <button class="btn btn-primary btn-sm" onclick="rlSave()">Save Limits</button>
+      <button class="btn btn-ghost btn-sm" data-action="rlResetDefaults">Reset Defaults</button>
+      <button class="btn btn-primary btn-sm" data-action="rlSave">Save Limits</button>
     </div>
     <div id="rl-status" style="font-size:12px;margin-top:8px;color:var(--muted)"></div>
   </div>
