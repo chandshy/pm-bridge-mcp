@@ -104,7 +104,7 @@ Every tool call is blocked unless the active preset allows it. Change the preset
 
 ### Require destructive confirmation
 
-On by default. Every `delete_email`, `move_to_trash`, `move_to_spam`, `bulk_delete*`, and `alias_delete` call must carry `{ confirmed: true }`. MCP-elicitation-capable clients prompt you inline before the call executes; others require the agent to explicitly confirm.
+On by default. Every `delete_email`, `move_to_trash`, `move_to_spam`, `bulk_delete*`, `alias_delete`, `pass_get`, `shutdown_server`, and `restart_server` call must carry `{ confirmed: true }`. MCP-elicitation-capable clients prompt you inline before the call executes; others require the agent to explicitly confirm.
 
 ---
 
@@ -197,6 +197,12 @@ remind_if_no_reply(emailId: "...", days: 3, note: "Follow up on contract")
 - `check_reminders` — manually check which reminders are due (also runs automatically on the minute tick)
 - `list_pending_reminders` — see all active reminders
 - `cancel_reminder` — remove a reminder by ID
+
+### MCP Prompts
+
+mailpouch ships built-in MCP prompts that guide Claude through common workflows:
+
+- **`draft_in_my_voice`** — Draft an email in your own voice by sampling your recent sent mail for tone. Args: `recipient` (required), `intent` (required), `sampleCount` (optional, default 5, max 20).
 
 ---
 

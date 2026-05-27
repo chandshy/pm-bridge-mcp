@@ -9,12 +9,12 @@ The pitch in one line: if you picked Proton Mail because you didn't want a third
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, or a static bearer token if you'd rather. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
 [![CI](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v3.0.27-blue.svg)](https://www.npmjs.com/package/mailpouch)
+[![npm version](https://img.shields.io/badge/npm-v3.0.35-blue.svg)](https://www.npmjs.com/package/mailpouch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-1%2C649%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-1%2C611%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -55,7 +55,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Human-gated escalation** — agents request elevated permissions, you approve via browser UI or terminal; the agent cannot approve its own requests.
 - **Browser-based settings UI** at `localhost:8765` — auto-starts with the daemon; setup wizard, live connection test, per-tool toggles, escalation approval panel, OAuth admin password.
 - **Native system tray icon** — always visible, clickable menu opens the settings UI or quits. Rendered via a bundled Rust (napi-rs) binding around the `tauri-apps/tray-icon` crate — the same one Tauri ships in production — so the tray behaves correctly on modern GNOME (where the legacy Go-binary library shows a generic placeholder), NSStatusBar on macOS, and Shell_NotifyIcon on Windows. Prebuilts for linux-x64/arm64, darwin-arm64, win32-x64/arm64 ship inside the main package; darwin-x64 (Intel Mac) falls back to the legacy Go backend cleanly.
-- **5 MCP prompts** — triage inbox, compose reply, daily briefing, find subscriptions, thread summary.
+- **6 MCP prompts** — triage inbox, compose reply, daily briefing, find subscriptions, thread summary, draft in my voice.
 - **MCP Resources** — individual emails and folders addressable via `email://` and `folder://` URIs.
 - **Scheduled email delivery** — queue emails for future sending; survives server restarts. Plus `remind_if_no_reply` for outbound follow-ups gated on inbox replies.
 - **Optional companion services** — SimpleLogin alias management (6 tools, requires API key), Proton Pass via pass-cli (3 tools, requires PAT), local FTS5 full-text index (3 tools, requires `better-sqlite3`).
@@ -63,7 +63,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **1,649 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
+- **1,611 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
 
 **Documentation:** [HELP.md](HELP.md) (task-oriented how-tos) · [README_FIRST_AI.md](README_FIRST_AI.md) (agent API reference) · [docs/index.md](docs/index.md) (full index)
 
@@ -340,6 +340,7 @@ Pre-built prompt templates for common tasks:
 | `daily_briefing` | Summarize today's inbox: unread, key senders, action items | — |
 | `find_subscriptions` | Identify mailing lists / newsletters; offer to archive or unsubscribe | `folder` (default: INBOX) |
 | `thread_summary` | Fetch all messages in a thread; produce a concise summary with open action items | `emailId` (required) |
+| `draft_in_my_voice` | Draft a new email to a specific recipient in the user's own voice, using a handful of recent sent emails as tone samples. Infers style (formality, greeting/sign-off habits, typical length) from the samples. | `recipient` (required), `intent` (required), `sampleCount` (optional, default 5, max 20) |
 
 ---
 
@@ -547,7 +548,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 1,649 tests)
+npm run test           # run test suite (Vitest, 1,611 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)

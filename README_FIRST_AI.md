@@ -260,6 +260,12 @@ issues. Returns the last N log lines with timestamp, level, and message.
 Clear the in-memory email and analytics cache. Useful if you suspect stale
 data. The next `sync_emails` will rebuild from scratch.
 
+#### `get_server_version`
+Return the running mailpouch server version. Use to confirm which version
+is active. No input args.
+
+Returns `{ version: string }`.
+
 ---
 
 ### Sending — requires `supervised`, `send_only`, or `full`
@@ -777,9 +783,10 @@ on failure. Common patterns:
 3. **Never loop on rate-limited errors.** If you receive a rate-limit error,
    stop and inform the user rather than retrying repeatedly.
 
-4. **Confirm before deleting.** Deletion is permanent. Always confirm with the
-   user before calling `delete_email`, `delete_folder`, or `bulk_delete_emails`, even
-   if they asked for it — mistakes are not recoverable.
+4. **Confirm before deleting or stopping the server.** Deletion is permanent. Always confirm with the
+   user before calling `delete_email`, `delete_folder`, `bulk_delete_emails`,
+   `shutdown_server`, or `restart_server`, even if they asked for it — mistakes
+   are not recoverable and server shutdown terminates your connection.
 
 5. **Be transparent about escalation.** When calling `request_escalation`,
    give the human a specific, honest reason. After submitting, clearly tell
@@ -822,6 +829,7 @@ tool (`get_email_by_id` / `get_folders`).
 - **`daily_briefing`** — Summarize today's inbox: unread count, key senders, action items, deadline mentions. No arguments.
 - **`find_subscriptions`** — Identify mailing list subscriptions. Optional `folder` (default: INBOX).
 - **`thread_summary`** — Summarise an email thread and list open action items. Requires `emailId`.
+- **`draft_in_my_voice`** ("Draft Email in My Voice") — Draft a new email to a specific recipient in the user's own voice, using a handful of recent sent emails as tone samples. Infers style (formality, greeting/sign-off habits, typical length) from the samples. Required args: `recipient`, `intent`. Optional: `sampleCount` (default 5, max 20).
 
 ---
 

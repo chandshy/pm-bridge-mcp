@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.36] — 2026-05-27
+
+### Documentation
+- **`draft_in_my_voice` prompt documented** — the 6th built-in MCP prompt was registered in code but absent from all user-facing docs. Added to `README.md` (Key Features + MCP Prompts table), `README_FIRST_AI.md` (MCP Prompts section), and `HELP.md` (new MCP Prompts subsection).
+- **`get_server_version` tool documented** — added to the System tools section in `README_FIRST_AI.md` (5th system tool, core tier).
+- **Destructive tools lists updated** — `shutdown_server` and `restart_server` (added to `DESTRUCTIVE_TOOLS` in 3.0.35) were missing from agent and user docs. Added to: `llms.txt` key facts, `README_FIRST_AI.md` operating guidelines, `HELP.md` destructive-confirmation section.
+- **Stale counts corrected** — `llms.txt` claimed 71 tools (→ 70); `README.md` claimed 5 MCP prompts (→ 6) and 1,649 tests (→ 1,611); `llms.txt` core tier claimed ~26 tools (→ ~27). npm version badge in `README.md` updated (3.0.27 → 3.0.35).
+
 ## [3.0.35] — 2026-05-27
 
 ### Fixed
