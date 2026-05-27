@@ -1,0 +1,2008 @@
+// src/settings/shell.ts
+import os from "os";
+import nodePath from "path";
+import { fileURLToPath } from "url";
+import { readFileSync } from "fs";
+import { ALL_TOOLS, TOOL_CATEGORIES } from "../config/schema.js";
+import { buildStyles } from "./styles.js";
+
+const _moduleDir = nodePath.dirname(fileURLToPath(import.meta.url));
+const _pkgJsonPath = nodePath.resolve(_moduleDir, "../../package.json");
+
+export function buildShellHtml(configPath: string, csrfToken: string, runningPort = 8765, cspNonce = ""): string {
+  const toolsJson = JSON.stringify(ALL_TOOLS);
+  const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
+  const distIndexPath = JSON.stringify(nodePath.resolve(_moduleDir, "../index.js"));
+
+  let pkgVersion = "unknown";
+  let pkgName = "mailpouch";
+  try {
+    const pkgJson = JSON.parse(readFileSync(_pkgJsonPath, "utf-8")) as { version?: string; name?: string };
+    if (pkgJson.version) pkgVersion = pkgJson.version;
+    if (pkgJson.name)    pkgName    = pkgJson.name;
+  } catch { /* use defaults */ }
+  const pkgVersionJson  = JSON.stringify(pkgVersion);
+  const pkgNameJson     = JSON.stringify(pkgName);
+  const runningPortJson = JSON.stringify(runningPort);
+
+  const escapeHtml = (s: string): string => s
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+  const safeConfigPath = escapeHtml(configPath);
+  void safeConfigPath; // used only in tab HTML, not in shell itself
+
+  return `<!DOCTYPE html>
+<!-- NEW WIZARD UI -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="csrf-token" content="${csrfToken}">
+<title>mailpouch — Settings</title>
+${buildStyles(cspNonce)}
+</head>
+<body>
+
+<header>
+  <div class="logo-wrap">
+    <div class="logo-icon">✉</div>
+    <div>
+      <div class="header-title">mailpouch</div>
+      <div class="header-subtitle">Settings</div>
+    </div>
+  </div>
+  <div class="header-spacer"></div>
+  <div class="status-pill" id="header-status">
+    <div class="dot" id="config-dot"></div>
+    <span id="config-status-text">Loading…</span>
+  </div>
+  <a href="/agent-setup"
+     target="_blank"
+     rel="noopener"
+     class="btn-agent-ref"
+     title="Integration reference for AI agents — share this URL with your agent so it has a copy-paste-ready guide to connect">
+    For your Agent ↗
+  </a>
+  <button class="btn-shutdown" id="shutdown-btn" onclick="shutdownServer()" title="Stop the settings server">⏹ Shutdown</button>
+</header>
+
+<!-- ══ POST-SETUP NAV (hidden until config saved) ══ -->
+<nav id="main-nav" style="display:none">
+  <button class="active" onclick="showTab('setup',this)">Setup</button>
+  <button onclick="showTab('accounts',this)">Accounts</button>
+  <button onclick="showTab('permissions',this)">Permissions</button>
+  <button onclick="showTab('agents',this)">
+    Agents
+    <span id="agents-pending-badge" style="display:none;background:#ef4444;color:#fff;border-radius:10px;padding:2px 7px;margin-left:6px;font-size:11px;font-weight:700">0</span>
+  </button>
+  <button onclick="showTab('status',this)">Status</button>
+  <button id="logs-tab-btn" style="display:none" onclick="showTab('logs',this)">Logs</button>
+</nav>
+
+<!-- ══ ESCALATION BANNER (shown on all views when pending) ══ -->
+<div id="escalation-banner">
+  <div class="escalation-banner-title">
+    <span>⚠</span>
+    <span>AI Permission Escalation Request — Human Approval Required</span>
+  </div>
+  <div id="escalation-cards"></div>
+</div>
+
+<!-- TLS warning banner -->
+<div id="tls-warning" style="display:none;background:#ff6b00;color:white;padding:8px 16px;font-size:0.9em">
+  &#9888; TLS certificate validation is disabled. Configure the Bridge Certificate Path in Settings &rarr; Connection to secure your connection.
+</div>
+
+<div id="wizard-view"></div>
+
+<div id="settings-view" style="display:none">
+<main>
+<section id="setup" class="active"></section>
+<section id="permissions"></section>
+<section id="accounts"></section>
+<section id="agents"></section>
+<section id="status"></section>
+<section id="logs"></section>
+</main>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script nonce="${cspNonce}">
+(function() {
+  // ── Constants ─────────────────────────────────────────────────────────────
+  const ALL_TOOLS  = ${toolsJson};
+  const CATEGORIES = ${categoriesJson};
+  window.__distIndexPath = ${distIndexPath};
+  const PKG_VERSION   = ${pkgVersionJson};
+  const PKG_NAME      = ${pkgNameJson};
+  const RUNNING_PORT  = ${runningPortJson};
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let cfg            = null;
+  let toolEnabled    = {};
+  let toolRate       = {};
+  let customSnapshot = null; // saved custom tool state, keyed by tool name
+
+  // Wizard in-progress state
+  const W = {
+    smtpHost: 'localhost', smtpPort: 1025,
+    imapHost: 'localhost', imapPort: 1143,
+    certPath: '',
+    username: '', debug: false,
+    preset: 'read_only',
+    bridgeTested: false,
+    credsSaved: false,
+    presetSaved: false,
+  };
+
+  // ── CSRF ──────────────────────────────────────────────────────────────────
+  const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
+
+  // Auto-recover from stale CSRF tokens. The server's CSRF token is minted
+  // per-process — when the daemon restarts (e.g. after install-update or a
+  // crash), any open settings tab holds a token the new process rejects with
+  // 403 { code: "session_expired" }. Without this wrapper the user sees a
+  // raw "Missing or invalid CSRF token" alert and has no idea what to do;
+  // with it, the page silently reloads and picks up the fresh token. Guarded
+  // by __mpReloading so concurrent mutations only trigger one reload.
+  (function installCsrfAutoReload() {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async function(...args) {
+      const response = await originalFetch(...args);
+      if (response.status === 403 && !window.__mpReloading) {
+        try {
+          const clone = response.clone();
+          const body = await clone.json();
+          if (body && body.code === 'session_expired') {
+            window.__mpReloading = true;
+            try { window.location.reload(); } catch (_) { /* ignore */ }
+          }
+        } catch (_) { /* not JSON — not ours */ }
+      }
+      return response;
+    };
+  })();
+
+  // ── Tab lazy-loading ──────────────────────────────────────────────────────
+  const _tabLoaded = new Set();
+  const _tabLoading = new Map(); // in-flight fetch promises — dedup concurrent clicks
+
+  async function ensureTabLoaded(id) {
+    if (_tabLoaded.has(id)) return;
+    if (_tabLoading.has(id)) { await _tabLoading.get(id); return; }
+    const targetEl = id === 'wizard'
+      ? document.getElementById('wizard-view')
+      : document.getElementById(id);
+    if (!targetEl) return;
+    targetEl.innerHTML = '<div class="hint" style="padding:30px;text-align:center">Loading…</div>';
+    const p = (async () => {
+      try {
+        const r = await fetch('/api/tab/' + id, { headers: { 'x-csrf-token': CSRF } });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const { html } = await r.json();
+        targetEl.innerHTML = html;
+        _tabLoaded.add(id);
+        if (id === 'permissions') { buildCategoryUI(); if (cfg) populatePermissions(cfg); }
+      } catch (e) {
+        targetEl.innerHTML = '<div class="alert alert-warn">Failed to load tab: ' + escHtml(String(e)) + '</div>';
+      } finally {
+        _tabLoading.delete(id);
+      }
+    })();
+    _tabLoading.set(id, p);
+    await p;
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', async () => {
+    let st;
+    try { st = await fetch('/api/status').then(r => r.json()); } catch { st = { hasConfig: false }; }
+    if (st.hasConfig) {
+      await openSettingsView();
+    } else {
+      await ensureTabLoaded('wizard');
+      document.getElementById('wizard-view').style.display = 'flex';
+      document.getElementById('settings-view').style.display = 'none';
+      wizShowStep(0);
+    }
+    loadEscalations();
+    loadAuditLog();
+    setInterval(loadEscalations, 15_000);
+  });
+
+  async function refresh() {
+    try {
+      const r = await fetch('/api/config');
+      cfg = await r.json();
+      if (_tabLoaded.has('setup'))       populateSetup(cfg);
+      if (_tabLoaded.has('permissions')) populatePermissions(cfg);
+      if (_tabLoaded.has('status'))      { populateStatus(cfg); populateResponseLimits(cfg); }
+      updateHeaderStatus(true);
+    } catch {
+      updateHeaderStatus(false);
+    }
+  }
+
+  // ── View switching ─────────────────────────────────────────────────────────
+  window.openSettingsView = async function() {
+    document.getElementById('wizard-view').style.display = 'none';
+    document.getElementById('settings-view').style.display = '';
+    document.getElementById('main-nav').style.display = '';
+    await ensureTabLoaded('setup');
+    await refresh();
+  };
+
+  window.showTab = async function(id, btn) {
+    await ensureTabLoaded(id);
+    document.querySelectorAll('#settings-view section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('#main-nav button').forEach(b => b.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    if (btn) btn.classList.add('active');
+    if (id === 'status')   { populateStatus(cfg); loadAuditLog(); }
+    if (id === 'agents')   { refreshAgents(); }
+    if (id === 'accounts') { refreshAccounts(); }
+    if (id === 'logs')     { logInit(); }
+    else                   { logStopFollow(); }
+  };
+
+  // ══ ACCOUNTS TAB LOGIC ═══════════════════════════════════════════════════
+  async function refreshAccounts() {
+    const r = await fetch('/api/accounts');
+    const body = await r.json();
+    const list = document.getElementById('accounts-list');
+    const rows = body.accounts || [];
+    const activeId = body.activeAccountId;
+    if (!rows.length) {
+      list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No accounts configured.</div>';
+      return;
+    }
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    list.innerHTML = rows.map(a => {
+      const active = a.id === activeId;
+      const buttons =
+        (active ? '' : '<button class="btn btn-primary" onclick="activateAccount(\\'' + esc(a.id) + '\\')">Activate</button>') +
+        '<button class="btn btn-ghost" onclick="editAccount(\\'' + esc(a.id) + '\\')">Edit</button>' +
+        (!active ? '<button class="btn btn-ghost" onclick="deleteAccountConfirm(\\'' + esc(a.id) + '\\')">Delete</button>' : '');
+      const last = a.lastCheckedAt ? ' · last check ' + new Date(a.lastCheckedAt).toLocaleString() + ' · ' + esc(a.lastCheckResult || '') : '';
+      return (
+        '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px;' + (active ? 'border-color:#6D4AFF' : '') + '">' +
+          '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
+            '<div>' +
+              '<div style="font-weight:600">' + (active ? '🟣 ' : '') + esc(a.name) + ' <span style="color:#888;font-size:12px">(' + esc(a.providerType) + ')</span></div>' +
+              '<div style="font-size:12px;color:#888;margin-top:4px">' +
+                'IMAP ' + esc(a.imapHost) + ':' + esc(a.imapPort) + ' · SMTP ' + esc(a.smtpHost) + ':' + esc(a.smtpPort) +
+                ' · ' + esc(a.username) + last +
+              '</div>' +
+            '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+    window._accountsById = {};
+    for (const a of rows) window._accountsById[a.id] = a;
+  }
+
+  window.openAccountForm = function(providerType, id) {
+    const isEdit = !!id;
+    document.getElementById('af-title').textContent = isEdit ? 'Edit account' : 'Add account';
+    document.getElementById('af-id').value = id || '';
+    document.getElementById('af-provider').value = providerType;
+    document.getElementById('af-cert-row').style.display = providerType === 'proton-bridge' ? '' : 'none';
+
+    if (isEdit && window._accountsById && window._accountsById[id]) {
+      const a = window._accountsById[id];
+      document.getElementById('af-name').value = a.name || '';
+      document.getElementById('af-imap-host').value = a.imapHost || '';
+      document.getElementById('af-imap-port').value = a.imapPort || '';
+      document.getElementById('af-smtp-host').value = a.smtpHost || '';
+      document.getElementById('af-smtp-port').value = a.smtpPort || '';
+      document.getElementById('af-username').value = a.username || '';
+      document.getElementById('af-password').value = '';
+      document.getElementById('af-cert').value = a.bridgeCertPath || '';
+    } else {
+      // Pre-fill sensible defaults for the chosen provider.
+      document.getElementById('af-name').value = '';
+      document.getElementById('af-username').value = '';
+      document.getElementById('af-password').value = '';
+      document.getElementById('af-cert').value = '';
+      if (providerType === 'proton-bridge') {
+        document.getElementById('af-imap-host').value = '127.0.0.1';
+        document.getElementById('af-imap-port').value = '1143';
+        document.getElementById('af-smtp-host').value = '127.0.0.1';
+        document.getElementById('af-smtp-port').value = '1025';
+      } else {
+        document.getElementById('af-imap-host').value = '';
+        document.getElementById('af-imap-port').value = '993';
+        document.getElementById('af-smtp-host').value = '';
+        document.getElementById('af-smtp-port').value = '587';
+      }
+    }
+    document.getElementById('account-form-backdrop').style.display = 'block';
+  };
+
+  window.editAccount = function(id) {
+    const a = (window._accountsById || {})[id];
+    if (!a) return;
+    openAccountForm(a.providerType, id);
+  };
+
+  window.closeAccountForm = function() {
+    document.getElementById('account-form-backdrop').style.display = 'none';
+  };
+
+  window.saveAccountForm = async function() {
+    const id = document.getElementById('af-id').value;
+    const isEdit = !!id;
+    const body = {
+      name: document.getElementById('af-name').value.trim(),
+      providerType: document.getElementById('af-provider').value,
+      imapHost: document.getElementById('af-imap-host').value.trim(),
+      imapPort: parseInt(document.getElementById('af-imap-port').value, 10) || 0,
+      smtpHost: document.getElementById('af-smtp-host').value.trim(),
+      smtpPort: parseInt(document.getElementById('af-smtp-port').value, 10) || 0,
+      username: document.getElementById('af-username').value.trim(),
+      password: document.getElementById('af-password').value,
+      bridgeCertPath: document.getElementById('af-cert').value.trim() || undefined,
+    };
+    if (!body.name) { alert('Name is required.'); return; }
+    const url = isEdit ? '/api/accounts/' + encodeURIComponent(id) : '/api/accounts';
+    const method = isEdit ? 'PATCH' : 'POST';
+    const r = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Save failed: ' + (errBody?.error || r.status));
+      return;
+    }
+    closeAccountForm();
+    refreshAccounts();
+  };
+
+  window.activateAccount = async function(id) {
+    if (!confirm('Switching the active account requires a server restart. Continue?')) return;
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id) + '/activate', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': CSRF },
+    });
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Activate failed: ' + (errBody?.error || r.status));
+      return;
+    }
+    alert('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).');
+    refreshAccounts();
+  };
+
+  window.deleteAccountConfirm = async function(id) {
+    if (!confirm('Delete this account? This removes the server’s ability to connect to it. Active account cannot be deleted.')) return;
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': CSRF },
+    });
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Delete failed: ' + (errBody?.error || r.status));
+      return;
+    }
+    refreshAccounts();
+  };
+
+  // ══ AGENTS TAB LOGIC ══════════════════════════════════════════════════════
+  let agentFilter = 'pending';
+  let agentEventSource = null;
+
+  window.switchAgentFilter = function(which) {
+    agentFilter = which;
+    ['pending','active','revoked','audit'].forEach(f => {
+      const b = document.getElementById('ag-filter-' + f);
+      if (b) b.style.fontWeight = (f === which ? '700' : '500');
+    });
+    document.getElementById('agents-list').style.display = (which === 'audit') ? 'none' : '';
+    document.getElementById('agents-audit').style.display = (which === 'audit') ? '' : 'none';
+    refreshAgents();
+  };
+
+  async function refreshAgents() {
+    if (agentFilter === 'audit') { await loadAgentAudit(); return; }
+    const r = await fetch('/api/agents?status=' + encodeURIComponent(agentFilter));
+    const body = await r.json();
+    renderAgents(body.grants || []);
+    // Also update the counts on the filter buttons.
+    for (const s of ['pending','active','revoked']) {
+      const rr = await fetch('/api/agents?status=' + s);
+      const bb = await rr.json();
+      const el = document.getElementById('ag-count-' + s);
+      if (el) el.textContent = '(' + (bb.grants ? bb.grants.length : 0) + ')';
+    }
+    updatePendingBadge();
+  }
+
+  async function updatePendingBadge() {
+    const r = await fetch('/api/agents?status=pending');
+    const b = await r.json();
+    const n = (b.grants || []).length;
+    const badge = document.getElementById('agents-pending-badge');
+    if (!badge) return;
+    if (n > 0) {
+      badge.textContent = String(n);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function renderAgents(grants) {
+    const list = document.getElementById('agents-list');
+    if (!grants.length) {
+      list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No grants in this view.</div>';
+      return;
+    }
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    list.innerHTML = grants.map(g => {
+      const badge = g.status === 'pending' ? '🔴 pending'
+                  : g.status === 'active'  ? '🟢 active'
+                  : g.status === 'revoked' ? '⚪ revoked'
+                  : g.status === 'expired' ? '🟡 expired' : g.status;
+      const lastCall = g.lastCallAt ? new Date(g.lastCallAt).toLocaleString() : 'never';
+      const expiry = g.conditions && g.conditions.expiresAt
+        ? 'expires ' + new Date(g.conditions.expiresAt).toLocaleString() : 'no expiry';
+      const cidEsc = esc(g.clientId);
+      const nameEsc = esc(g.clientName);
+      const condArg = g.conditions ? JSON.stringify(g.conditions).replace(/'/g, "\\'") : 'null';
+      const buttons = g.status === 'pending'
+        ? '<button class="btn btn-primary" onclick="approveGrant(\\'' + cidEsc + '\\',\\'read_only\\')">Approve read-only</button>' +
+          '<button class="btn btn-primary" onclick="approveGrant(\\'' + cidEsc + '\\',\\'supervised\\')">Approve supervised</button>' +
+          '<button class="btn btn-ghost"   onclick="openGrantModal(\\'' + cidEsc + '\\',\\'' + nameEsc + '\\',null)">Customize…</button>' +
+          '<button class="btn btn-ghost"   onclick="denyGrant(\\''    + cidEsc + '\\')">Deny</button>'
+        : g.status === 'active'
+        ? '<button class="btn btn-ghost"   onclick="openGrantModal(\\'' + cidEsc + '\\',\\'' + nameEsc + '\\',' + condArg + ')">Extend / modify…</button>' +
+          '<button class="btn btn-ghost"   onclick="revokeGrant(\\''  + cidEsc + '\\')">Revoke</button>'
+        : '';
+      return (
+        '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
+            '<div>' +
+              '<div style="font-weight:600">' + esc(g.clientName) + ' <span style="color:#888;font-size:12px">(' + esc(g.clientId) + ')</span></div>' +
+              '<div style="font-size:12px;color:#888;margin-top:4px">' +
+                badge + ' · preset ' + esc(g.preset) + ' · ' + esc(expiry) + ' · ' + g.totalCalls + ' calls · last ' + esc(lastCall) +
+              '</div>' +
+              (g.note ? '<div style="font-size:12px;color:#aaa;margin-top:4px;font-style:italic">' + esc(g.note) + '</div>' : '') +
+            '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  async function loadAgentAudit() {
+    const r = await fetch('/api/agents/audit?limit=200');
+    const body = await r.json();
+    const rows = body.rows || [];
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    const tbody = document.getElementById('agents-audit-body');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:30px;color:#888">No calls logged yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.slice().reverse().map(r => {
+      const d = new Date(r.ts);
+      const when = d.toLocaleString('en-US', { timeZone: 'America/New_York' });
+      const ok = r.ok ? '<span style="color:#10b981">ok</span>' : '<span style="color:#ef4444">blocked: ' + esc(r.blockedReason || '?') + '</span>';
+      return '<tr>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + esc(when) + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + esc(r.clientName || r.clientId) + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222"><code>' + esc(r.tool) + '</code></td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + ok + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222;text-align:right">' + esc(r.durMs) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  window.approveGrant = async function(clientId, preset) {
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify({ preset })
+    });
+    if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  window.denyGrant = async function(clientId) {
+    if (!confirm('Deny this agent? It will be unable to call any tools.')) return;
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/deny', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: '{}'
+    });
+    if (!r.ok) { alert('Deny failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  window.revokeGrant = async function(clientId) {
+    if (!confirm('Revoke this agent’s access? Currently running tool calls finish; the next one will be denied.')) return;
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
+    });
+    if (!r.ok) { alert('Revoke failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  // SSE subscription — live-update the Agents tab and the nav badge.
+  function subscribeAgentEvents() {
+    if (agentEventSource) return;
+    try {
+      agentEventSource = new EventSource('/api/notifications');
+      agentEventSource.onerror = () => { /* swallow — browser auto-reconnects */ };
+      const refresh = () => { updatePendingBadge(); if (document.getElementById('agents').classList.contains('active')) refreshAgents(); };
+      for (const kind of ['grant-created','grant-approved','grant-denied','grant-revoked','grant-expired']) {
+        agentEventSource.addEventListener(kind, refresh);
+      }
+    } catch (e) { /* SSE unavailable — poll-on-tab-show still works */ }
+  }
+  subscribeAgentEvents();
+  updatePendingBadge();
+
+  // ── Header status ─────────────────────────────────────────────────────────
+  function updateHeaderStatus(ok) {
+    document.getElementById('config-dot').className        = 'dot ' + (ok ? 'ok' : 'err');
+    document.getElementById('config-status-text').textContent = ok ? 'Config loaded' : 'Not connected';
+  }
+
+  // ══ WIZARD LOGIC ══════════════════════════════════════════════════════════
+
+  const STEP_LABELS = ['Welcome','Bridge','Account','Permissions','Review','Done'];
+  const STEP_COUNT  = 6;
+
+  function wizShowStep(n) {
+    // Hide all panels
+    document.querySelectorAll('.wiz-panel').forEach((el, i) => {
+      el.classList.toggle('active', i === n);
+    });
+    // Update nodes
+    for (let i = 0; i < STEP_COUNT; i++) {
+      const node = document.getElementById('wnode-' + i);
+      if (!node) continue;
+      node.className = 'wiz-step-node' +
+        (i === n ? ' active' : i < n ? ' done' : '');
+      node.querySelector('.wiz-step-circle').textContent =
+        i < n ? '✓' : String(i + 1);
+    }
+    // Progress fill
+    const pct = n === 0 ? 0 : Math.round((n / (STEP_COUNT - 1)) * 100);
+    document.getElementById('wiz-progress-fill').style.width = pct + '%';
+    // Focus first focusable element
+    const panel = document.getElementById('wpanel-' + n);
+    if (panel) {
+      const first = panel.querySelector('input:not([disabled]),button:not([disabled])');
+      if (first) setTimeout(() => first.focus(), 80);
+    }
+    // Step-specific setup
+    if (n === 4) wizBuildReview();
+    if (n === 5) wizBuildSnippet();
+  }
+
+  window.wizGo = function(n) { wizShowStep(n); };
+
+  // ── Step 2: Bridge test ───────────────────────────────────────────────────
+  window.wizTestBridge = async function() {
+    const btn  = document.getElementById('wiz-test-bridge-btn');
+    const hint = document.getElementById('bridge-hint');
+    const smtpRow = document.getElementById('smtp-row');
+    const imapRow = document.getElementById('imap-row');
+    const smtpSt  = document.getElementById('smtp-conn-status');
+    const imapSt  = document.getElementById('imap-conn-status');
+    const nextBtn = document.getElementById('wiz-bridge-next');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Testing…';
+    smtpSt.className = 'conn-row-status idle'; smtpSt.textContent = 'Checking…';
+    imapSt.className = 'conn-row-status idle'; imapSt.textContent = 'Checking…';
+    smtpRow.className = 'conn-row'; imapRow.className = 'conn-row';
+
+    // Save cert path and bridge path
+    W.certPath   = document.getElementById('wiz-cert-path').value.trim();
+    W.bridgePath = document.getElementById('wiz-bridge-path').value.trim();
+
+    async function _wizRunTest() {
+      const r = await fetch('/api/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({
+          smtpHost: W.smtpHost, smtpPort: W.smtpPort,
+          imapHost: W.imapHost, imapPort: W.imapPort,
+        }),
+      });
+      return r.json();
+    }
+
+    try {
+      let d = await _wizRunTest();
+
+      // If not reachable, attempt to start Bridge then re-test
+      if (!d.smtp || !d.imap) {
+        smtpSt.textContent = imapSt.textContent = 'Starting Bridge…';
+        smtpSt.className = imapSt.className = 'conn-row-status idle';
+        btn.innerHTML = '<span class="spinner"></span> Starting Bridge…';
+
+        const startR = await fetch('/api/start-bridge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+          body: '{}',
+        });
+        const startD = await startR.json();
+
+        if (startD.error) {
+          hint.textContent = startD.error;
+          hint.style.display = '';
+        }
+
+        btn.innerHTML = '<span class="spinner"></span> Re-testing…';
+        d = await _wizRunTest();
+      }
+
+      smtpSt.textContent = d.smtp ? '✅ Reachable' : '❌ Unreachable';
+      smtpSt.className   = 'conn-row-status ' + (d.smtp ? 'ok' : 'fail');
+      imapSt.textContent = d.imap ? '✅ Reachable' : '❌ Unreachable';
+      imapSt.className   = 'conn-row-status ' + (d.imap ? 'ok' : 'fail');
+      smtpRow.className  = 'conn-row ' + (d.smtp ? 'ok' : 'fail');
+      imapRow.className  = 'conn-row ' + (d.imap ? 'ok' : 'fail');
+      const allOk = d.smtp && d.imap;
+      hint.style.display = allOk ? 'none' : '';
+      W.bridgeTested = allOk;
+      nextBtn.disabled = !allOk;
+      if (allOk) nextBtn.classList.add('btn-success');
+    } catch(e) {
+      smtpSt.textContent = imapSt.textContent = 'Error';
+      smtpSt.className = imapSt.className = 'conn-row-status fail';
+      hint.style.display = '';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Test Connection';
+    }
+  };
+
+  // ── Step 3: Credential save ───────────────────────────────────────────────
+  window.wizSaveCreds = async function() {
+    const username = document.getElementById('wiz-username').value.trim();
+    const password = document.getElementById('wiz-password').value;
+    const smtpToken = document.getElementById('wiz-smtp-token').value;
+    const debug     = document.getElementById('wiz-debug').checked;
+
+    let valid = true;
+    if (!username) {
+      setFieldError('wiz-username', 'err-wiz-username', true);
+      valid = false;
+    }
+    if (!password) {
+      setFieldError('wiz-password', 'err-wiz-password', true);
+      valid = false;
+    }
+    if (!valid) return;
+
+    const btn = document.getElementById('wiz-save-creds-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Saving…';
+
+    try {
+      const r = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({
+          connection: {
+            username,
+            password,
+            smtpHost: W.smtpHost, smtpPort: W.smtpPort,
+            imapHost: W.imapHost, imapPort: W.imapPort,
+            bridgeCertPath:  W.certPath,
+            bridgePath:      W.bridgePath || '',
+            smtpToken,
+            debug,
+            autoStartBridge: document.getElementById('wiz-auto-start-bridge')?.checked || false,
+          },
+        }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      W.username = username;
+      W.debug    = debug;
+      W.credsSaved = true;
+      wizShowStep(3);
+    } catch(e) {
+      toast('Could not save credentials: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save & Continue →';
+    }
+  };
+
+  window.wizClearError = function(id) {
+    const inp = document.getElementById(id);
+    const errId = 'err-' + id;
+    setFieldError(id, errId, false);
+  };
+
+  function setFieldError(inputId, errId, show) {
+    const inp = document.getElementById(inputId);
+    const err = document.getElementById(errId);
+    if (inp) inp.classList.toggle('invalid', show);
+    if (err) err.style.display = show ? 'block' : 'none';
+  }
+
+  // ── Step 4: Preset save ───────────────────────────────────────────────────
+  window.wizSavePreset = async function() {
+    const radio = document.querySelector('input[name="wiz-preset"]:checked');
+    const preset = radio ? radio.value : 'read_only';
+    W.preset = preset;
+
+    const btn = document.getElementById('wiz-apply-preset-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Applying…';
+
+    try {
+      const r = await fetch('/api/preset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({ preset }),
+      });
+      if (!r.ok) throw new Error('Save failed');
+      W.presetSaved = true;
+      wizShowStep(4);
+    } catch(e) {
+      toast('Could not apply preset: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Apply & Continue →';
+    }
+  };
+
+  // ── Step 5: Review ────────────────────────────────────────────────────────
+  function wizBuildReview() {
+    const radio  = document.querySelector('input[name="wiz-preset"]:checked');
+    const preset = radio ? radio.value : W.preset;
+    const username = document.getElementById('wiz-username')?.value.trim() || W.username || '—';
+    const connLabel = W.smtpHost === 'localhost'
+      ? 'Proton Bridge (localhost:' + W.smtpPort + ' / ' + W.imapPort + ')'
+      : 'Direct (smtp.protonmail.ch:' + W.smtpPort + ')';
+
+    document.getElementById('review-connection').textContent = connLabel;
+    document.getElementById('review-account').textContent    = username;
+    document.getElementById('review-preset').textContent     = formatPreset(preset);
+    document.getElementById('review-storage').textContent    = 'Config file (mode 0600)';
+  }
+
+  function formatPreset(p) {
+    return { full:'Full Access', read_only:'Read-Only', supervised:'Supervised',
+             send_only:'Send-Only', custom:'Custom' }[p] || p;
+  }
+
+  // ── Step 5: Final save ────────────────────────────────────────────────────
+  window.wizFinalSave = async function() {
+    const btn = document.getElementById('wiz-final-save-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Saving…';
+    try {
+      // Config was already saved in steps 3 & 4.
+      // Just advance to Done.
+      toast('Configuration saved.', 'ok');
+      wizShowStep(5);
+    } catch(e) {
+      toast('Save failed: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save Configuration';
+    }
+  };
+
+  // ── Step 6: Done ──────────────────────────────────────────────────────────
+  window.wizBuildSnippet = async function() {
+    // Reset state
+    document.getElementById('write-result').style.display = 'none';
+    document.getElementById('restart-result').style.display = 'none';
+    document.getElementById('copy-result').style.display = 'none';
+    document.getElementById('done-complete').style.display = 'none';
+    document.getElementById('done-write-section').style.display = '';
+    document.getElementById('claude-write-row').style.display = 'none';
+    document.getElementById('restart-row').style.display = 'none';
+    const writeBtn = document.getElementById('btn-write-claude');
+    if (writeBtn) { writeBtn.disabled = false; writeBtn.textContent = 'Write to Claude Desktop →'; }
+
+    // Build snippet from wizard state
+    const snippet = {
+      'mailpouch': {
+        command: 'node',
+        args: [window.__distIndexPath || '/path/to/mailpouch/dist/index.js'],
+      },
+    };
+    document.getElementById('done-snippet').textContent = JSON.stringify(snippet, null, 2);
+
+    // Detect Claude Desktop
+    try {
+      const r = await fetch('/api/claude-desktop-status');
+      const data = await r.json();
+      if (data.found) {
+        document.getElementById('claude-write-row').style.display = '';
+        document.getElementById('restart-row').style.display = '';
+      }
+    } catch { /* ignore — Claude Desktop section stays hidden */ }
+  };
+
+  window.wizCopySnippet = function() {
+    const text = document.getElementById('done-snippet').textContent;
+    const resultEl = document.getElementById('copy-result');
+    navigator.clipboard.writeText(text).then(() => {
+      resultEl.style.display = 'block';
+      resultEl.innerHTML = '<div class="hint" style="color:var(--success);margin-top:6px">✓ Copied to clipboard</div>';
+      setTimeout(() => { resultEl.style.display = 'none'; }, 2500);
+    });
+  };
+
+  window.wizWriteClaudeDesktop = async function() {
+    const btn = document.getElementById('btn-write-claude');
+    const resultEl = document.getElementById('write-result');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Writing…';
+    resultEl.style.display = 'none';
+    try {
+      const r = await fetch('/api/write-claude-desktop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({})
+      });
+      const data = await r.json();
+      if (data.ok) {
+        btn.textContent = '✓ Written';
+        btn.className = 'btn btn-success';
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = '<div class="hint" style="color:var(--success);margin-top:8px">✓ Saved to <code>' + escHtml(data.configPath) + '</code></div>';
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Write to Claude Desktop →';
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:8px">✗ ' + escHtml(data.error || 'Failed') + '</div>';
+      }
+    } catch(e) {
+      btn.disabled = false;
+      btn.textContent = 'Write to Claude Desktop →';
+      resultEl.style.display = 'block';
+      resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:8px">✗ Network error</div>';
+    }
+  };
+
+  window.wizRestartClaude = async function() {
+    const btn = document.getElementById('btn-restart-claude');
+    const resultEl = document.getElementById('restart-result');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Restarting…';
+    try {
+      await fetch('/api/restart-claude-desktop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({})
+      });
+      document.getElementById('done-write-section').style.display = 'none';
+      document.getElementById('done-complete').style.display = 'flex';
+    } catch(e) {
+      btn.disabled = false;
+      btn.textContent = 'Restart Claude Desktop';
+      resultEl.style.display = 'block';
+      resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:8px">✗ Could not restart automatically — please restart Claude Desktop manually.</div>';
+    }
+  };
+
+  window.wizSkipRestart = function() {
+    document.getElementById('done-write-section').style.display = 'none';
+    document.getElementById('done-complete').style.display = 'flex';
+    document.getElementById('done-complete').querySelector('strong').textContent = 'Done!';
+    document.getElementById('done-complete').querySelector('strong').nextSibling.textContent = ' Restart Claude Desktop when you\\'re ready — Proton Mail tools will be available after it loads.';
+  };
+
+  // ── Shutdown server ───────────────────────────────────────────────────────
+  window.shutdownServer = async function() {
+    if (!confirm('Stop the settings server? The browser tab will no longer work after this.')) return;
+    const btn = document.getElementById('shutdown-btn');
+    btn.disabled = true;
+    btn.textContent = 'Shutting down…';
+    try {
+      await fetch('/api/shutdown', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+    } catch { /* expected — server closes the connection */ }
+    btn.textContent = '✓ Stopped';
+    toast('Settings server stopped.', 'ok');
+    setTimeout(() => { document.body.innerHTML = '<div style="font-family:sans-serif;color:#ccc;background:#0f0e1a;min-height:100vh;display:flex;align-items:center;justify-content:center;font-size:18px">Server stopped. Close this tab.</div>'; }, 1500);
+  };
+
+  // ══ SETTINGS TAB LOGIC ════════════════════════════════════════════════════
+
+  function populateSetup(c) {
+    if (!c) return;
+    const cn = c.connection || {};
+    set('username',    cn.username || '');
+    set('smtp-host',   cn.smtpHost || 'localhost');
+    set('smtp-port',   cn.smtpPort || 1025);
+    set('imap-host',   cn.imapHost || 'localhost');
+    set('imap-port',   cn.imapPort || 1143);
+    set('bridge-cert', cn.bridgeCertPath || '');
+    set('bridge-path', cn.bridgePath || '');
+    document.getElementById('debug-mode').checked = !!cn.debug;
+    document.getElementById('auto-start-bridge').checked = !!cn.autoStartBridge;
+    var insecureEl = document.getElementById('allow-insecure-bridge');
+    if (insecureEl) insecureEl.checked = !!cn.allowInsecureBridge;
+    var confirmEl = document.getElementById('require-destructive-confirm');
+    if (confirmEl) confirmEl.checked = c.requireDestructiveConfirm !== false;
+    var desktopNotifEl = document.getElementById('desktop-notifications');
+    if (desktopNotifEl) desktopNotifEl.checked = c.desktopNotificationsEnabled !== false;
+    set('sl-api-key',        cn.simpleloginApiKey  ? '••••••••' : '');
+    set('sl-base-url',       cn.simpleloginBaseUrl || '');
+    set('pass-access-token', cn.passAccessToken    ? '••••••••' : '');
+    set('pass-cli-path',     cn.passCliPath        || '');
+    set('settings-port', c.settingsPort || 8765);
+    checkPortMismatch();
+    const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
+    const isDirect = (cn.smtpHost || '').includes('protonmail');
+    setMode(isDirect ? 'direct' : 'bridge');
+
+    // TLS mode select
+    var tlsModeEl = document.getElementById('tls-mode');
+    if (tlsModeEl) tlsModeEl.value = cn.tlsMode || 'starttls';
+
+    // SMTP token visibility
+    updateSmtpTokenVisibility();
+
+    // TLS warning banner
+    var tlsWarn = document.getElementById('tls-warning');
+    if (tlsWarn) tlsWarn.style.display = (!cn.bridgeCertPath) ? '' : 'none';
+
+    // Credential storage row in status tab
+    var credStorageEl = document.getElementById('info-credential-storage');
+    if (credStorageEl) {
+      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : c.credentialStorage === 'encrypted-file' ? 'Encrypted file' : 'Config file (plaintext)';
+    }
+  }
+
+  var EYE_OPEN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  var EYE_SLASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  window.togglePw = function(inputId) {
+    var inp = document.getElementById(inputId);
+    if (!inp) return;
+    var btn = inp.parentElement && inp.parentElement.querySelector('.eye-btn');
+    var show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    if (btn) {
+      btn.innerHTML = show ? EYE_SLASH : EYE_OPEN;
+      btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    }
+  };
+
+  window.setMode = function(mode) {
+    const isBridge = mode === 'bridge';
+    document.getElementById('mode-bridge').className = 'mode-btn' + (isBridge ? ' active' : '');
+    document.getElementById('mode-direct').className = 'mode-btn' + (!isBridge ? ' active' : '');
+    document.getElementById('setup-smtp-token-field').style.display = isBridge ? 'none' : '';
+    if (isBridge) {
+      set('smtp-host', 'localhost'); set('smtp-port', 1025);
+      set('imap-host', 'localhost'); set('imap-port', 1143);
+    } else {
+      set('smtp-host', 'smtp.protonmail.ch'); set('smtp-port', 587);
+    }
+    updateSmtpTokenVisibility();
+  };
+
+
+  window.checkPortMismatch = function() {
+    const val  = parseInt(document.getElementById('settings-port').value, 10);
+    const warn = document.getElementById('port-mismatch-warn');
+    if (warn) warn.style.display = (!isNaN(val) && val !== RUNNING_PORT) ? '' : 'none';
+  };
+
+  window.updateSmtpTokenVisibility = function() {
+    var smtpHost = get('smtp-host').trim().toLowerCase();
+    var isBridge = (smtpHost === 'localhost' || smtpHost === '127.0.0.1');
+    var tokenRow = document.getElementById('smtp-token-row');
+    if (tokenRow) tokenRow.style.display = isBridge ? 'none' : '';
+  };
+
+  window.saveSetup = async function() {
+    const btn = document.getElementById('save-btn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Saving…';
+    try {
+      var tlsModeEl = document.getElementById('tls-mode');
+      var tlsModeVal = tlsModeEl ? tlsModeEl.value : 'starttls';
+      const body = {
+        connection: {
+          username:       get('username'),
+          password:       get('password'),
+          smtpHost:       get('smtp-host'),
+          smtpPort:       parseInt(get('smtp-port'), 10),
+          imapHost:       get('imap-host'),
+          imapPort:       parseInt(get('imap-port'), 10),
+          smtpToken:      get('smtp-token'),
+          bridgeCertPath: get('bridge-cert'),
+          bridgePath:       get('bridge-path'),
+          tlsMode:          tlsModeVal,
+          debug:            document.getElementById('debug-mode').checked,
+          autoStartBridge:  document.getElementById('auto-start-bridge').checked,
+          allowInsecureBridge: !!(document.getElementById('allow-insecure-bridge') && document.getElementById('allow-insecure-bridge').checked),
+          simpleloginApiKey:  get('sl-api-key'),
+          simpleloginBaseUrl: get('sl-base-url'),
+          passAccessToken:    get('pass-access-token'),
+          passCliPath:        get('pass-cli-path'),
+        },
+        requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
+        desktopNotificationsEnabled: !!(document.getElementById('desktop-notifications') && document.getElementById('desktop-notifications').checked),
+        settingsPort: (function(){ var p = parseInt(get('settings-port'), 10); return isNaN(p) ? 8765 : p; })(),
+      };
+      const r = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      toast('Configuration saved.', 'ok');
+      await refresh();
+    } catch(e) {
+      toast('Save failed: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save Configuration';
+    }
+  };
+
+  // ── Bridge executable search ──────────────────────────────────────────────
+  async function _doSearchBridge(inputId, hintId, btnId) {
+    const btn  = document.getElementById(btnId);
+    const hint = document.getElementById(hintId);
+    btn.disabled = true; btn.textContent = 'Searching…';
+    try {
+      const r = await fetch('/api/search-bridge', { headers: { 'X-CSRF-Token': CSRF } });
+      const d = await r.json();
+      if (d.found) {
+        set(inputId, d.path);
+        hint.textContent = 'Found: ' + d.path;
+        hint.style.color = 'var(--ok, #22c55e)';
+      } else {
+        set(inputId, '');
+        hint.textContent = 'Not found in common locations. Enter the path manually.';
+        hint.style.color = 'var(--warn, #f59e0b)';
+      }
+    } catch(e) {
+      hint.textContent = 'Search failed: ' + e.message;
+      hint.style.color = 'var(--err, #ef4444)';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Search';
+    }
+  }
+
+  window.searchBridgePath = function() {
+    return _doSearchBridge('bridge-path', 'bridge-path-hint', 'search-bridge-btn');
+  };
+
+  window.wizSearchBridgePath = function() {
+    return _doSearchBridge('wiz-bridge-path', 'wiz-bridge-path-hint', 'wiz-search-bridge-btn');
+  };
+
+  // ── Bridge TLS cert auto-detect + upload ──────────────────────────────────
+  window.detectCertPath = async function(inputId) {
+    inputId = inputId || 'bridge-cert';
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    try {
+      const r = await fetch('/api/find-bridge-cert', { headers: { 'X-CSRF-Token': CSRF } });
+      const d = await r.json();
+      if (d.found) {
+        input.value = d.path;
+        input.dispatchEvent(new Event('change'));
+      } else {
+        alert('No cert.pem found under your home directory. Click Browse to pick one manually, or export a cert via Bridge → Help → Export TLS Certificate.');
+      }
+    } catch (e) {
+      alert('Detection failed: ' + (e && e.message ? e.message : e));
+    }
+  };
+  window.wizDetectCert = function() { return window.detectCertPath('wiz-cert-path'); };
+
+  window.uploadCert = async function(ev, targetInputId) {
+    const file = ev.target && ev.target.files && ev.target.files[0];
+    if (!file) return;
+    if (file.size > 256 * 1024) {
+      alert('File too large (max 256 KB for a PEM cert).');
+      ev.target.value = '';
+      return;
+    }
+    try {
+      const text = await file.text();
+      const r = await fetch('/api/upload-bridge-cert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-pem-file', 'X-CSRF-Token': CSRF },
+        body: text,
+      });
+      const d = await r.json();
+      if (r.ok && d.path) {
+        const input = document.getElementById(targetInputId);
+        if (input) {
+          input.value = d.path;
+          input.dispatchEvent(new Event('change'));
+        }
+      } else {
+        alert('Upload failed: ' + (d.error || ('HTTP ' + r.status)));
+      }
+    } catch (e) {
+      alert('Upload error: ' + (e && e.message ? e.message : e));
+    } finally {
+      ev.target.value = ''; // allow re-picking the same file
+    }
+  };
+  window.wizUploadCert = function(ev) { return window.uploadCert(ev, 'wiz-cert-path'); };
+
+  window.testConnections = async function() {
+    const btn = document.getElementById('test-btn');
+    const res = document.getElementById('test-result');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+    res.textContent = 'Testing…';
+
+    async function _runTest() {
+      const r = await fetch('/api/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({
+          smtpHost: get('smtp-host'), smtpPort: parseInt(get('smtp-port'), 10),
+          imapHost: get('imap-host'), imapPort: parseInt(get('imap-port'), 10),
+        }),
+      });
+      return r.json();
+    }
+
+    try {
+      let data = await _runTest();
+
+      // If not reachable, try to start Bridge then re-test
+      if (!data.smtp || !data.imap) {
+        res.textContent = 'Bridge not running — starting…';
+        res.style.color = 'var(--muted)';
+        const startR = await fetch('/api/start-bridge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+          body: '{}',
+        });
+        const startD = await startR.json();
+        if (startD.error) {
+          res.textContent = '⚠️ ' + startD.error;
+          res.style.color = 'var(--danger)';
+          return;
+        }
+        res.textContent = 'Re-testing…';
+        data = await _runTest();
+      }
+
+      res.textContent = (data.smtp ? '✅ SMTP' : '❌ SMTP') + '  ' + (data.imap ? '✅ IMAP' : '❌ IMAP');
+      res.style.color = (data.smtp && data.imap) ? 'var(--success)' : 'var(--danger)';
+    } catch(e) {
+      res.textContent = 'Error: ' + e.message;
+      res.style.color = 'var(--danger)';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Test Connections';
+    }
+  };
+
+  // ── Permissions tab ───────────────────────────────────────────────────────
+  function buildCategoryUI() {
+    const container = document.getElementById('categories');
+    if (!container) return;
+    for (const [catKey, cat] of Object.entries(CATEGORIES)) {
+      const el = document.createElement('div');
+      el.className = 'category';
+      el.innerHTML =
+        '<div class="category-header" onclick="toggleCategory(this)">' +
+          '<span class="caret">▶</span>' +
+          '<div class="category-info">' +
+            '<div class="name">' + escHtml(cat.label) + '</div>' +
+            '<div class="desc">' + escHtml(cat.description) + '</div>' +
+          '</div>' +
+          '<span class="risk-badge risk-' + escHtml(cat.risk) + '">' + escHtml(cat.risk) + '</span>' +
+          '<label class="toggle-wrap" onclick="event.stopPropagation()">' +
+            '<span class="toggle"><input type="checkbox" id="cat-' + escHtml(catKey) + '" ' +
+              'onchange="toggleCategory_all(\\'' + escHtml(catKey) + '\\',this.checked)"><span class="slider"></span></span>' +
+            '<span style="font-size:12px;color:var(--muted)">All</span>' +
+          '</label>' +
+        '</div>' +
+        '<div class="category-body" id="body-' + escHtml(catKey) + '">' +
+          cat.tools.map(t => toolRow(t)).join('') +
+        '</div>';
+      container.appendChild(el);
+    }
+  }
+
+  function toolRow(tool) {
+    const label = tool.replace(/_/g,'  ').replace(/\\b\\w/g, c => c.toUpperCase());
+    return '<div class="tool-row">' +
+      '<span class="tool-name">' + escHtml(tool) + '</span>' +
+      '<span style="font-size:12px;color:var(--muted);flex:1">' + escHtml(label) + '</span>' +
+      '<div class="rate-wrap">' +
+        '<label>Limit</label>' +
+        '<input class="rate-input" type="number" min="1" max="9999" placeholder="∞" ' +
+          'id="rate-' + escHtml(tool) + '" title="Max calls per window (blank = unlimited)">' +
+        '<select class="rate-window" id="rate-window-' + escHtml(tool) + '" title="Rate limit time window">' +
+          '<option value="second">/sec</option>' +
+          '<option value="minute">/min</option>' +
+          '<option value="hour" selected>/hr</option>' +
+          '<option value="day">/day</option>' +
+        '</select>' +
+      '</div>' +
+      '<label class="toggle-wrap">' +
+        '<span class="toggle"><input type="checkbox" id="tool-' + escHtml(tool) + '" ' +
+          'onchange="onToolToggle(\\'' + escHtml(tool) + '\\',this.checked)"><span class="slider"></span></span>' +
+      '</label>' +
+    '</div>';
+  }
+
+  function populatePermissions(c) {
+    if (!c) return;
+    const perms = c.permissions || {};
+    const tools = perms.tools || {};
+    document.querySelectorAll('.preset-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.preset === perms.preset);
+    });
+    if (perms.preset === 'custom') {
+      document.getElementById('custom-preset-btn').style.display = '';
+    }
+    for (const tool of ALL_TOOLS) {
+      const perm  = tools[tool] || { enabled: true, rateLimit: null };
+      const cbEl  = document.getElementById('tool-' + tool);
+      const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
+      if (cbEl)   { cbEl.checked = perm.enabled !== false; toolEnabled[tool] = cbEl.checked; }
+      if (rateEl) { rateEl.value = perm.rateLimit != null ? perm.rateLimit : ''; rateEl.disabled = !perm.enabled; toolRate[tool] = perm.rateLimit; }
+      if (winEl)  { winEl.value = perm.rateLimitWindow || 'hour'; winEl.disabled = !perm.enabled; }
+    }
+    for (const catKey of Object.keys(CATEGORIES)) { updateCategoryToggle(catKey); }
+  }
+
+  window.onToolToggle = function(tool, enabled) {
+    toolEnabled[tool] = enabled;
+    const rateEl = document.getElementById('rate-' + tool);
+    const winEl  = document.getElementById('rate-window-' + tool);
+    if (rateEl) rateEl.disabled = !enabled;
+    if (winEl)  winEl.disabled  = !enabled;
+    for (const [catKey, cat] of Object.entries(CATEGORIES)) {
+      if (cat.tools.includes(tool)) { updateCategoryToggle(catKey); break; }
+    }
+    markCustomPreset();
+  };
+
+  window.toggleCategory_all = function(catKey, checked) {
+    const cat = CATEGORIES[catKey];
+    for (const tool of cat.tools) {
+      const el = document.getElementById('tool-' + tool);
+      if (el) { el.checked = checked; toolEnabled[tool] = checked; }
+      const re = document.getElementById('rate-' + tool);
+      if (re) re.disabled = !checked;
+    }
+    markCustomPreset();
+  };
+
+  window.toggleCategory = function(header) {
+    header.classList.toggle('open');
+    header.nextElementSibling.classList.toggle('open');
+  };
+
+  function updateCategoryToggle(catKey) {
+    const cat = CATEGORIES[catKey];
+    const allEnabled = cat.tools.every(t => {
+      const el = document.getElementById('tool-' + t);
+      return el ? el.checked : true;
+    });
+    const catEl = document.getElementById('cat-' + catKey);
+    if (catEl) catEl.checked = allEnabled;
+  }
+
+  function captureToolState() {
+    const snap = {};
+    for (const tool of ALL_TOOLS) {
+      const cbEl  = document.getElementById('tool-' + tool);
+      const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
+      const rateVal = rateEl && rateEl.value.trim() !== '' ? parseInt(rateEl.value, 10) : null;
+      snap[tool] = {
+        enabled:         cbEl ? cbEl.checked : true,
+        rateLimit:       rateVal && rateVal > 0 ? rateVal : null,
+        rateLimitWindow: winEl ? winEl.value : 'hour',
+      };
+    }
+    return snap;
+  }
+
+  window.restoreCustom = function() {
+    if (!customSnapshot) return;
+    for (const tool of ALL_TOOLS) {
+      const perm  = customSnapshot[tool] || { enabled: true, rateLimit: null, rateLimitWindow: 'hour' };
+      const cbEl  = document.getElementById('tool-' + tool);
+      const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
+      if (cbEl)   { cbEl.checked = perm.enabled !== false; toolEnabled[tool] = cbEl.checked; }
+      if (rateEl) { rateEl.value = perm.rateLimit != null ? perm.rateLimit : ''; rateEl.disabled = !perm.enabled; toolRate[tool] = perm.rateLimit; }
+      if (winEl)  { winEl.value = perm.rateLimitWindow || 'hour'; winEl.disabled = !perm.enabled; }
+    }
+    for (const catKey of Object.keys(CATEGORIES)) { updateCategoryToggle(catKey); }
+    markCustomPreset();
+  };
+
+  window.applyPreset = async function(preset) {
+    if (cfg && cfg.permissions && cfg.permissions.preset === 'custom') {
+      customSnapshot = captureToolState();
+    }
+    const r = await fetch('/api/preset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify({ preset }),
+    });
+    if (!r.ok) { toast('Failed to apply preset', 'err'); return; }
+    await refresh();
+    const customBtn = document.getElementById('custom-preset-btn');
+    if (customSnapshot) {
+      customBtn.style.display = '';
+      customBtn.classList.remove('active');
+    } else {
+      customBtn.style.display = 'none';
+    }
+    toast('Preset "' + preset + '" applied.', 'ok');
+  };
+
+  function markCustomPreset() {
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    const btn = document.getElementById('custom-preset-btn');
+    btn.style.display = ''; btn.classList.add('active');
+  }
+
+  window.savePermissions = async function() {
+    const tools = {};
+    for (const tool of ALL_TOOLS) {
+      const cbEl  = document.getElementById('tool-' + tool);
+      const rateEl= document.getElementById('rate-' + tool);
+      const winEl = document.getElementById('rate-window-' + tool);
+      const enabled  = cbEl ? cbEl.checked : true;
+      const rateVal  = rateEl && rateEl.value.trim() !== '' ? parseInt(rateEl.value, 10) : null;
+      const rateLimit = rateVal && rateVal > 0 ? rateVal : null;
+      const rateLimitWindow = winEl ? winEl.value : 'hour';
+      tools[tool] = { enabled, rateLimit, ...(rateLimit ? { rateLimitWindow } : {}) };
+    }
+    let preset = 'custom';
+    document.querySelectorAll('.preset-btn').forEach(b => {
+      if (b.classList.contains('active') && b.dataset.preset !== 'custom') preset = b.dataset.preset;
+    });
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify({ permissions: { preset, tools } }),
+    });
+    if (r.ok) { toast('Permissions saved. Changes take effect within 15 s.', 'ok'); await refresh(); }
+    else       { toast('Save failed.', 'err'); }
+  };
+
+  // ── Status tab ────────────────────────────────────────────────────────────
+  function populateStatus(c) {
+    if (!c) return;
+    const perms = c.permissions || {};
+    const tools = perms.tools || {};
+    document.getElementById('info-config-exists').textContent = 'Yes';
+    document.getElementById('info-preset').textContent = perms.preset || '—';
+    const disabled = ALL_TOOLS.filter(t => tools[t] && !tools[t].enabled);
+    document.getElementById('info-disabled').textContent = disabled.length ? disabled.join(', ') : 'None';
+    const limited = ALL_TOOLS.filter(t => tools[t] && tools[t].rateLimit != null);
+    document.getElementById('info-rate-limited').textContent =
+      limited.length ? limited.map(t => {
+        const w = tools[t].rateLimitWindow || 'hour';
+        const wLabel = w === 'second' ? 'sec' : w === 'minute' ? 'min' : w === 'day' ? 'day' : 'hr';
+        return t + ' (' + tools[t].rateLimit + '/' + wLabel + ')';
+      }).join(', ') : 'None';
+    var credStorageEl = document.getElementById('info-credential-storage');
+    if (credStorageEl) {
+      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : c.credentialStorage === 'encrypted-file' ? 'Encrypted file' : 'Config file (plaintext)';
+    }
+    buildClaudeSnippet(c.connection || {});
+  }
+
+  function buildClaudeSnippet(cn) {
+    const snippet = {
+      'mailpouch': {
+        command: 'node',
+        args: [window.__distIndexPath || '/path/to/mailpouch/dist/index.js'],
+      },
+    };
+    document.getElementById('claude-snippet').textContent = JSON.stringify(snippet, null, 2);
+  }
+
+  window.copySnippet = function() {
+    const text = document.getElementById('claude-snippet').textContent;
+    navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard.', 'ok'));
+  };
+
+  // ══ UPDATES ═══════════════════════════════════════════════════════════════
+
+  // Seed installed version immediately from injected constant
+  document.getElementById('update-current') && (document.getElementById('update-current').textContent = PKG_VERSION);
+
+  window.checkForUpdates = async function() {
+    const btn    = document.getElementById('check-update-btn');
+    const status = document.getElementById('update-status');
+    const installBtn = document.getElementById('install-update-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Checking…';
+    status.textContent = 'Checking npm registry…';
+    status.style.color = 'var(--muted)';
+    installBtn.style.display = 'none';
+    try {
+      const r = await fetch('/api/check-update');
+      const d = await r.json();
+      if (d.error) {
+        status.textContent = '⚠️ ' + d.error;
+        status.style.color = 'var(--danger)';
+        return;
+      }
+      document.getElementById('update-current').textContent = d.current;
+      document.getElementById('update-latest').textContent  = d.latest;
+      if (d.updateAvailable) {
+        status.textContent = '🆕 Update available!';
+        status.style.color = 'var(--success, #22c55e)';
+        installBtn.style.display = '';
+      } else {
+        status.textContent = '✅ Up to date';
+        status.style.color = 'var(--success, #22c55e)';
+      }
+    } catch(e) {
+      status.textContent = '⚠️ Check failed: ' + e.message;
+      status.style.color = 'var(--danger)';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Check for Updates';
+    }
+  };
+
+  window.installUpdate = async function() {
+    const installBtn   = document.getElementById('install-update-btn');
+    const actionStatus = document.getElementById('update-action-status');
+    const output       = document.getElementById('update-output');
+    installBtn.disabled = true;
+    installBtn.innerHTML = '<span class="spinner"></span> Installing…';
+    actionStatus.textContent = 'Running npm install -g …';
+    actionStatus.style.color = 'var(--muted)';
+    output.style.display = 'none';
+    output.textContent  = '';
+    try {
+      const r = await fetch('/api/install-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: '{}',
+      });
+      const d = await r.json();
+      output.textContent  = d.output || d.error || '';
+      output.style.display = '';
+      if (d.ok) {
+        installBtn.style.display = 'none';
+        if (d.restarting) {
+          actionStatus.textContent = '✅ Update installed — server is restarting…';
+          actionStatus.style.color = 'var(--success, #22c55e)';
+          var _pollAttempts = 0;
+          var _poll = setInterval(function() {
+            _pollAttempts++;
+            fetch('/api/status').then(function() {
+              clearInterval(_poll);
+              window.location.reload();
+            }).catch(function() {
+              if (_pollAttempts >= 15) {
+                clearInterval(_poll);
+                actionStatus.textContent = '✅ Update installed — reload this page once the server restarts.';
+              }
+            });
+          }, 2000);
+        } else {
+          actionStatus.textContent = '✅ Update installed. Restart the MCP server to use the new version.';
+          actionStatus.style.color = 'var(--success, #22c55e)';
+          await checkForUpdates();
+        }
+      } else {
+        actionStatus.textContent = '❌ Install failed — see output below.';
+        actionStatus.style.color = 'var(--danger)';
+        installBtn.disabled = false;
+        installBtn.textContent = 'Retry Install';
+      }
+    } catch(e) {
+      actionStatus.textContent = '❌ ' + e.message;
+      actionStatus.style.color = 'var(--danger)';
+      installBtn.disabled = false;
+      installBtn.textContent = 'Retry Install';
+    }
+  };
+
+  // Auto-check for updates when the Status tab is first opened
+  (function() {
+    let checked = false;
+    const observer = new MutationObserver(() => {
+      const statusSection = document.getElementById('status');
+      if (!checked && statusSection && statusSection.style.display !== 'none' && statusSection.offsetParent !== null) {
+        checked = true;
+        checkForUpdates();
+      }
+    });
+    observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['style', 'class'] });
+  })();
+
+  // ══ LOGS TAB ══════════════════════════════════════════════════════════════
+
+  const LOG = {
+    page: 1,
+    pages: 1,
+    total: 0,
+    following: false,
+    pollTimer: null,
+  };
+
+  function logInit() {
+    logGoLast();
+  }
+
+  async function logFetch(page) {
+    try {
+      const r    = await fetch('/api/logs?page=' + page);
+      const data = await r.json();
+      LOG.page  = data.page;
+      LOG.pages = data.pages;
+      LOG.total = data.total;
+      logRender(data.lines);
+      logUpdateToolbar();
+    } catch(e) {
+      const outEl = document.getElementById('log-output'); if (outEl) outEl.textContent = 'Error loading logs: ' + (e && e.message ? e.message : String(e));
+    }
+  }
+
+  function logRender(lines) {
+    const out = document.getElementById('log-output');
+    if (!out) return;
+    if (lines.length === 0) { out.textContent = '(no log entries on this page)'; return; }
+    out.innerHTML = lines.map(function(l) {
+      const ts  = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : '';
+      const lvl = (l.level || 'info').toUpperCase().padEnd(5);
+      const ctx = (l.context || '').padEnd(12);
+      const msg = escHtml(l.message || '');
+      const cls = l.level === 'error' ? 'color:#f87171' :
+                  l.level === 'warn'  ? 'color:#fbbf24' :
+                  l.level === 'debug' ? 'color:#94a3b8' : 'color:var(--text)';
+      return '<span style="' + cls + '">' +
+        '<span style="color:var(--muted)">' + escHtml(ts) + ' </span>' +
+        '<b>' + escHtml(lvl) + '</b> ' +
+        '<span style="color:var(--muted)">[' + escHtml(ctx.trim()) + ']</span> ' +
+        msg + '</span>';
+    }).join('\\n');
+    if (LOG.following) out.scrollTop = out.scrollHeight;
+  }
+
+  function logUpdateToolbar() {
+    const info = document.getElementById('log-page-info');
+    if (info) info.textContent = 'Page ' + LOG.page + ' of ' + LOG.pages + '  (' + LOG.total + ' lines)';
+    const btnFirst = document.getElementById('log-btn-first'); if (btnFirst) btnFirst.disabled = LOG.page <= 1;
+    const btnPrev  = document.getElementById('log-btn-prev');  if (btnPrev)  btnPrev.disabled  = LOG.page <= 1;
+    const btnNext  = document.getElementById('log-btn-next');  if (btnNext)  btnNext.disabled  = LOG.page >= LOG.pages;
+    const btnLast  = document.getElementById('log-btn-last');  if (btnLast)  btnLast.disabled  = LOG.page >= LOG.pages;
+    const followBtn = document.getElementById('log-btn-follow');
+    if (followBtn) { followBtn.textContent = LOG.following ? 'Following ●' : 'Follow ○'; followBtn.style.color = LOG.following ? 'var(--success)' : ''; }
+  }
+
+  function logStartFollow() {
+    if (LOG.pollTimer) return;
+    LOG.following = true;
+    LOG.pollTimer = setInterval(async () => {
+      const logsSection = document.getElementById('logs'); if (!logsSection || !logsSection.classList.contains('active')) return;
+      await logFetch(LOG.pages);
+    }, 2000);
+    logUpdateToolbar();
+  }
+
+  function logStopFollow() {
+    LOG.following = false;
+    if (LOG.pollTimer) { clearInterval(LOG.pollTimer); LOG.pollTimer = null; }
+    logUpdateToolbar();
+  }
+
+  window.logGoFirst = function() { logStopFollow(); logFetch(1); };
+  window.logGoPrev  = function() { logStopFollow(); logFetch(Math.max(1, LOG.page - 1)); };
+  window.logGoNext  = function() { logStopFollow(); logFetch(Math.min(LOG.pages, LOG.page + 1)); };
+  window.logGoLast  = async function() {
+    await logFetch(9999);
+    logStartFollow();
+  };
+  window.logToggleFollow = function() {
+    if (LOG.following) { logStopFollow(); } else { window.logGoLast(); }
+  };
+  window.logClear = async function() {
+    if (!confirm('Clear the log file?')) return;
+    await fetch('/api/logs/clear', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+    LOG.page = 1; LOG.pages = 1; LOG.total = 0;
+    logFetch(1);
+  };
+
+  // ── Response Limits ───────────────────────────────────────────────────────
+  const RL_DEFAULTS = { maxResponseBytes: 921600, maxEmailBodyChars: 500000, maxEmailListResults: 50, maxAttachmentBytes: 600000, warnOnLargeResponse: true };
+
+  function populateResponseLimits(c) {
+    const rl = (c && c.responseLimits) || RL_DEFAULTS;
+    document.getElementById('rl-max-response').value = Math.round((rl.maxResponseBytes || RL_DEFAULTS.maxResponseBytes) / 1024);
+    document.getElementById('rl-max-body').value     = rl.maxEmailBodyChars  || RL_DEFAULTS.maxEmailBodyChars;
+    document.getElementById('rl-max-list').value      = rl.maxEmailListResults || RL_DEFAULTS.maxEmailListResults;
+    document.getElementById('rl-max-attach').value    = Math.round((rl.maxAttachmentBytes || RL_DEFAULTS.maxAttachmentBytes) / 1024);
+    document.getElementById('rl-warn-large').checked  = rl.warnOnLargeResponse !== false;
+  }
+
+  function gatherResponseLimits() {
+    return {
+      maxResponseBytes:    parseInt(document.getElementById('rl-max-response').value, 10) * 1024,
+      maxEmailBodyChars:   parseInt(document.getElementById('rl-max-body').value, 10),
+      maxEmailListResults: parseInt(document.getElementById('rl-max-list').value, 10),
+      maxAttachmentBytes:  parseInt(document.getElementById('rl-max-attach').value, 10) * 1024,
+      warnOnLargeResponse: document.getElementById('rl-warn-large').checked,
+    };
+  }
+
+  window.rlResetDefaults = function() {
+    populateResponseLimits({ responseLimits: RL_DEFAULTS });
+    document.getElementById('rl-status').textContent = 'Reset to defaults (not saved yet).';
+  };
+
+  window.rlSave = async function() {
+    const statusEl = document.getElementById('rl-status');
+    statusEl.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({ responseLimits: gatherResponseLimits() }),
+      });
+      if (r.ok) {
+        statusEl.textContent = 'Saved. Changes take effect within 15 seconds.';
+        statusEl.style.color = 'var(--success)';
+      } else {
+        const err = await r.json();
+        statusEl.textContent = 'Error: ' + (err.error || 'Unknown');
+        statusEl.style.color = 'var(--danger)';
+      }
+    } catch(e) {
+      statusEl.textContent = 'Network error.';
+      statusEl.style.color = 'var(--danger)';
+    }
+  };
+
+  window.runStatusCheck = async function() {
+    const btn     = document.getElementById('status-check-btn');
+    const res     = document.getElementById('status-check-result');
+    const results = document.getElementById('connectivity-results');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner-dark"></span>';
+    res.textContent = 'Checking…'; results.style.display = 'none';
+    try {
+      const c = (cfg && cfg.connection) || {};
+      const r = await fetch('/api/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({
+          smtpHost: c.smtpHost || 'localhost', smtpPort: c.smtpPort || 1025,
+          imapHost: c.imapHost || 'localhost', imapPort: c.imapPort || 1143,
+        }),
+      });
+      const data = await r.json();
+      document.getElementById('smtp-check-status').textContent = data.smtp ? '✅ Reachable' : '❌ Unreachable';
+      document.getElementById('smtp-check-status').style.color = data.smtp ? 'var(--success)' : 'var(--danger)';
+      document.getElementById('imap-check-status').textContent = data.imap ? '✅ Reachable' : '❌ Unreachable';
+      document.getElementById('imap-check-status').style.color = data.imap ? 'var(--success)' : 'var(--danger)';
+      results.style.display = ''; res.textContent = '';
+    } catch(e) {
+      res.textContent = 'Error: ' + e.message;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Check Now';
+    }
+  };
+
+  window.resetConfig = async function() {
+    if (!confirm('Reset the config file to defaults? Current settings will be lost.')) return;
+    const r = await fetch('/api/reset', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+    if (r.ok) { toast('Config reset.', 'ok'); await refresh(); }
+    else       { toast('Reset failed.', 'err'); }
+  };
+
+  // ── Escalation management ─────────────────────────────────────────────────
+  async function loadEscalations() {
+    try {
+      const r = await fetch('/api/escalations', { headers: { 'X-CSRF-Token': CSRF } });
+      const data = await r.json();
+      renderEscalations(data.pending || []);
+    } catch {}
+  }
+
+  async function loadAuditLog() {
+    try {
+      const r = await fetch('/api/audit', { headers: { 'X-CSRF-Token': CSRF } });
+      const data = await r.json();
+      renderAuditLog(data.entries || []);
+    } catch {}
+  }
+
+  function renderEscalations(list) {
+    const banner = document.getElementById('escalation-banner');
+    const cards  = document.getElementById('escalation-cards');
+    if (!list.length) { banner.style.display = 'none'; cards.innerHTML = ''; return; }
+    banner.style.display = '';
+    cards.innerHTML = list.map(e => {
+      const newTools = e.newTools || [];
+      const toolHtml = newTools.length
+        ? '<div class="tool-chips">' + newTools.map(t => '<span class="tool-chip-new">' + escHtml(t) + '</span>').join('') + '</div>'
+        : '<span style="color:var(--muted);font-size:12px">Rate-limit relaxation only — no new tool types.</span>';
+      const riskClass = { read_only:'safe', send_only:'moderate', supervised:'moderate', full:'high' }[e.targetPreset] || 'moderate';
+      return '<div class="escalation-card-body">' +
+        '<div class="escalation-meta">Challenge ID: <code>' + escHtml(e.id) + '</code> &nbsp;·&nbsp; ' +
+        'Requested: ' + new Date(e.requestedAt).toLocaleString() + '</div>' +
+        '<div class="escalation-field"><label>Agent\\'s reason</label>' +
+          '<div class="escalation-reason">' + escHtml(e.reason) + '</div></div>' +
+        '<div class="escalation-field"><label>Privilege change</label>' +
+          '<div class="escalation-preset-row">' +
+            '<span class="preset-badge safe">' + escHtml(e.currentPreset) + '</span>' +
+            '<span style="color:var(--muted)">→</span>' +
+            '<span class="preset-badge ' + escHtml(riskClass) + '">' + escHtml(e.targetPreset) + '</span>' +
+          '</div></div>' +
+        '<div class="escalation-field"><label>New tools (' + newTools.length + ')</label>' + toolHtml + '</div>' +
+        '<div class="escalation-confirm-wrap">' +
+          '<label>Type APPROVE to enable the button</label>' +
+          '<input class="escalation-confirm-input" type="text" id="conf-' + escHtml(e.id) + '" ' +
+            'placeholder="APPROVE" autocomplete="off" spellcheck="false" ' +
+            'oninput="onConfirmInput(\\'' + escHtml(e.id) + '\\')">' +
+        '</div>' +
+        '<div class="escalation-actions">' +
+          '<button class="btn btn-deny" onclick="denyEscalation(\\'' + escHtml(e.id) + '\\')">✗ Deny</button>' +
+          '<button class="btn btn-approve" id="approve-' + escHtml(e.id) + '" disabled ' +
+            'onclick="approveEscalation(\\'' + escHtml(e.id) + '\\')">✓ Approve</button>' +
+          '<span class="escalation-countdown" id="cd-' + escHtml(e.id) + '">' +
+            formatCountdown(e.expiresAt) + '</span>' +
+        '</div></div>';
+    }).join('<hr style="border-color:var(--border);margin:0">');
+    for (const e of list) { startCountdown(e.id, e.expiresAt); }
+  }
+
+  function renderAuditLog(entries) {
+    const tbody = document.getElementById('audit-log-body');
+    if (!tbody) return;
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);padding:12px 10px">No escalation events recorded yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map(e => {
+      const cls = 'audit-event-' + escHtml(e.event);
+      return '<tr>' +
+        '<td>' + new Date(e.time).toLocaleString() + '</td>' +
+        '<td class="' + cls + '">' + escHtml(e.event) + '</td>' +
+        '<td>' + escHtml(e.fromPreset) + '</td>' +
+        '<td>' + escHtml(e.toPreset) + '</td>' +
+        '<td>' + escHtml(e.via || '—') + '</td>' +
+        '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" ' +
+          'title="' + escHtml(e.reason || '') + '">' + escHtml((e.reason || '—').slice(0,60)) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  function formatCountdown(expiresAt) {
+    const secs = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
+    return 'Expires in ' + Math.floor(secs/60) + ':' + String(secs%60).padStart(2,'0');
+  }
+
+  const countdownIntervals = {};
+  function startCountdown(id, expiresAt) {
+    if (countdownIntervals[id]) clearInterval(countdownIntervals[id]);
+    countdownIntervals[id] = setInterval(() => {
+      const el = document.getElementById('cd-' + id);
+      if (!el) { clearInterval(countdownIntervals[id]); return; }
+      const secs = Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
+      el.textContent = 'Expires in ' + Math.floor(secs/60) + ':' + String(secs%60).padStart(2,'0');
+      el.classList.toggle('urgent', secs < 60);
+      if (secs === 0) { clearInterval(countdownIntervals[id]); loadEscalations(); }
+    }, 1000);
+  }
+
+  window.onConfirmInput = function(id) {
+    const input = document.getElementById('conf-' + id);
+    const btn   = document.getElementById('approve-' + id);
+    if (input && btn) btn.disabled = input.value !== 'APPROVE';
+  };
+
+  window.approveEscalation = async function(id) {
+    const input = document.getElementById('conf-' + id);
+    if (!input || input.value !== 'APPROVE') return;
+    try {
+      const r = await fetch('/api/escalations/' + id + '/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({ confirm: 'APPROVE' }),
+      });
+      const d = await r.json();
+      if (r.ok) {
+        toast('Escalation approved. New preset: ' + d.preset + '. Takes effect within 15 s.', 'ok');
+        await loadEscalations(); await loadAuditLog(); await refresh();
+      } else {
+        toast('Error: ' + (d.error || 'Unknown error'), 'err');
+      }
+    } catch(e) {
+      toast('Network error: ' + e.message, 'err');
+    }
+  };
+
+  window.denyEscalation = async function(id) {
+    try {
+      const r = await fetch('/api/escalations/' + id + '/deny', {
+        method: 'POST', headers: { 'X-CSRF-Token': CSRF },
+      });
+      if (r.ok) {
+        toast('Escalation denied.', 'ok');
+        await loadEscalations(); await loadAuditLog();
+      } else {
+        const d = await r.json();
+        toast('Error: ' + (d.error || 'Unknown error'), 'err');
+      }
+    } catch(e) {
+      toast('Network error: ' + e.message, 'err');
+    }
+  };
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+  function get(id) { return document.getElementById(id)?.value ?? ''; }
+  function set(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
+  let toastTimer;
+  function toast(msg, type) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'show ' + (type || '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.className = ''; }, 3500);
+  }
+
+})();
+</script>
+
+<!-- ══ APPROVE-WITH-CONDITIONS MODAL (Agents tab) ═════════════════════════ -->
+<div id="grant-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100">
+  <div id="grant-modal" style="max-width:520px;margin:8vh auto;background:var(--surface);border-radius:var(--radius);padding:22px;color:var(--text);font-family:system-ui,sans-serif">
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px">Approve with conditions</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:16px" id="gm-subtitle"></div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text2)">Preset</label>
+      <select id="gm-preset" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px">
+        <option value="read_only">read_only</option>
+        <option value="send_only">send_only</option>
+        <option value="supervised" selected>supervised</option>
+        <option value="full">full</option>
+      </select>
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text2)">Duration</label>
+      <div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">
+        <label><input type="radio" name="gm-dur" value="never"> never expires</label>
+        <label><input type="radio" name="gm-dur" value="1h" checked> 1 hour</label>
+        <label><input type="radio" name="gm-dur" value="24h"> 24 hours</label>
+        <label><input type="radio" name="gm-dur" value="7d"> 7 days</label>
+        <label><input type="radio" name="gm-dur" value="custom"> custom…</label>
+      </div>
+      <input type="datetime-local" id="gm-custom-expiry" style="display:none;margin-top:6px;padding:6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text2)">Folder allowlist (optional, comma-separated)</label>
+      <input type="text" id="gm-folders" placeholder="INBOX, Sent" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text2)">IP pin (optional)</label>
+      <input type="text" id="gm-ip" placeholder="e.g. 10.0.0.23" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--text2)">Advanced</label>
+      <div style="margin-top:4px;display:flex;flex-direction:column;gap:4px">
+        <label><input type="checkbox" id="gm-deny-delete"> Disable deletion tools (delete_email / bulk_delete*)</label>
+        <label><input type="checkbox" id="gm-deny-send"> Disable sending (send_email / reply_to_email / forward_email)</label>
+      </div>
+    </div>
+    <div class="field" style="margin-bottom:16px">
+      <label style="font-size:12px;color:var(--text2)">Note (optional)</label>
+      <input type="text" id="gm-note" maxlength="240" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost" onclick="closeGrantModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitGrantModal()">Save and approve</button>
+    </div>
+  </div>
+</div>
+<script nonce="${cspNonce}">
+(function() {
+  let currentClientId = null;
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t && t.name === 'gm-dur') {
+      document.getElementById('gm-custom-expiry').style.display = (t.value === 'custom') ? '' : 'none';
+    }
+  });
+  window.openGrantModal = function(clientId, clientName, currentConditions) {
+    currentClientId = clientId;
+    document.getElementById('gm-subtitle').textContent = clientName + ' (' + clientId + ')';
+    document.getElementById('gm-preset').value = 'supervised';
+    document.getElementById('gm-folders').value = '';
+    document.getElementById('gm-ip').value = '';
+    document.getElementById('gm-note').value = '';
+    document.getElementById('gm-deny-delete').checked = false;
+    document.getElementById('gm-deny-send').checked = false;
+    (document.querySelector('input[name="gm-dur"][value="1h"]') || {}).checked = true;
+    if (currentConditions && currentConditions.folderAllowlist) {
+      document.getElementById('gm-folders').value = (currentConditions.folderAllowlist || []).join(', ');
+    }
+    if (currentConditions && currentConditions.ipPins) {
+      document.getElementById('gm-ip').value = (currentConditions.ipPins || []).join(', ');
+    }
+    document.getElementById('grant-modal-backdrop').style.display = 'block';
+  };
+  window.closeGrantModal = function() {
+    document.getElementById('grant-modal-backdrop').style.display = 'none';
+    currentClientId = null;
+  };
+  window.submitGrantModal = async function() {
+    if (!currentClientId) return;
+    const preset = document.getElementById('gm-preset').value;
+    const dur = (document.querySelector('input[name="gm-dur"]:checked') || {}).value || 'never';
+    let expiresAt;
+    if (dur === '1h')   expiresAt = new Date(Date.now() + 60*60*1000).toISOString();
+    else if (dur === '24h') expiresAt = new Date(Date.now() + 24*60*60*1000).toISOString();
+    else if (dur === '7d')  expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+    else if (dur === 'custom') {
+      const v = document.getElementById('gm-custom-expiry').value;
+      if (v) expiresAt = new Date(v).toISOString();
+    }
+    const foldersRaw = document.getElementById('gm-folders').value.trim();
+    const folderAllowlist = foldersRaw ? foldersRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const ipRaw = document.getElementById('gm-ip').value.trim();
+    const ipPins = ipRaw ? ipRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const toolOverrides = {};
+    if (document.getElementById('gm-deny-delete').checked) {
+      toolOverrides.delete_email = false;
+      toolOverrides.bulk_delete = false;
+      toolOverrides.bulk_delete_emails = false;
+    }
+    if (document.getElementById('gm-deny-send').checked) {
+      toolOverrides.send_email = false;
+      toolOverrides.reply_to_email = false;
+      toolOverrides.forward_email = false;
+    }
+    const note = document.getElementById('gm-note').value.trim() || undefined;
+    const body = {
+      preset,
+      conditions: (expiresAt || folderAllowlist || ipPins) ? { expiresAt, folderAllowlist, ipPins } : undefined,
+      toolOverrides: Object.keys(toolOverrides).length > 0 ? toolOverrides : undefined,
+      note,
+    };
+    const CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';
+    const r = await fetch('/api/agents/' + encodeURIComponent(currentClientId) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      if (window.__mpReloading) return;
+      const errBody = await r.json().catch(() => null);
+      alert('Approve failed: ' + (errBody?.error || r.status));
+      return;
+    }
+    closeGrantModal();
+    if (typeof refreshAgents === 'function') refreshAgents();
+  };
+})();
+</script>
+</body>
+</html>`;
+}

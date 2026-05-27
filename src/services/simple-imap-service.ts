@@ -1929,7 +1929,9 @@ export class SimpleIMAPService {
     for (const id of emailIds) {
       try {
         this.validateEmailId(id);
-        const folder = this.findCacheEntryByUid(id)?.folder ?? 'INBOX';
+        const cached = this.findCacheEntryByUid(id);
+        const folder = cached?.folder ?? 'INBOX';
+        if (!cached) logger.warn(`bulkMarkRead: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
         if (!grouped.has(folder)) grouped.set(folder, []);
         grouped.get(folder)!.push(id);
       } catch (e: unknown) {
@@ -1983,7 +1985,9 @@ export class SimpleIMAPService {
     for (const id of emailIds) {
       try {
         this.validateEmailId(id);
-        const folder = this.findCacheEntryByUid(id)?.folder ?? 'INBOX';
+        const cached = this.findCacheEntryByUid(id);
+        const folder = cached?.folder ?? 'INBOX';
+        if (!cached) logger.warn(`bulkStar: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
         if (!grouped.has(folder)) grouped.set(folder, []);
         grouped.get(folder)!.push(id);
       } catch (e: unknown) {
@@ -2039,7 +2043,9 @@ export class SimpleIMAPService {
     for (const id of emailIds) {
       try {
         this.validateEmailId(id);
-        const folder = this.findCacheEntryByUid(id)?.folder ?? 'INBOX';
+        const cached = this.findCacheEntryByUid(id);
+        const folder = cached?.folder ?? 'INBOX';
+        if (!cached) logger.warn(`bulkCopyToFolder: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
         if (!grouped.has(folder)) grouped.set(folder, []);
         grouped.get(folder)!.push(id);
       } catch (e: unknown) {

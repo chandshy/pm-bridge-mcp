@@ -50,7 +50,8 @@ export function parseEmails(emailString: string): string[] {
     const trimmed = raw.trim();
     if (trimmed.length === 0) continue;
     // Support "Display Name <email@domain.com>" format by extracting the angle-bracket part.
-    const angleMatch = trimmed.match(/<([^>]+)>/);
+    // Anchored to reject multiple/nested brackets: "Name <<x>>" or "a> <b".
+    const angleMatch = trimmed.match(/^[^<>]*<([^<>]+)>$/);
     const candidate = angleMatch ? angleMatch[1].trim() : trimmed;
     if (isValidEmail(candidate)) {
       valid.push(candidate);
@@ -300,6 +301,9 @@ export function validateAttachments(attachments: unknown): string | null {
   }
   if (!Array.isArray(attachments)) {
     return "attachments must be an array.";
+  }
+  if (attachments.length > 50) {
+    return "attachments must not exceed 50 items.";
   }
   for (let i = 0; i < attachments.length; i++) {
     const att = attachments[i];
