@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.25] — 2026-05-26
+
+### Fixed
+- **Remaining bulk handlers — single batched IMAP per folder** — `bulk_mark_read`, `bulk_star`, `bulk_move_to_label`, and `bulk_remove_label` no longer loop over single-email IMAP calls. New `ImapService` methods `bulkMarkRead`, `bulkStar`, `bulkCopyToFolder`, and `bulkDeleteFromFolder` each issue a single `UID STORE` / `UID COPY` per source folder, with a per-folder fallback to per-UID commands on batch error. Closes the same class of regression as #120 for the four handlers that were left as follow-up because no batch service method existed yet.
+- **All bulk handlers post-filter guard** — all-invalid emailIds (after the `/^\d+$/` filter) now throws `InvalidParams` instead of silently returning `{success:0, failed:0, errors:[]}`.
+
 ## [3.0.24] — 2026-05-26
 
 ### Security
