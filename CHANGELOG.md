@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.31] — 2026-05-27
+
+### Changed
+- **Settings page tab lazy-loading** — the 5551-line `server.ts` monolith is split into focused modules: `shell.ts` (page shell + all JS), `styles.ts` (CSS), and `src/settings/tabs/{wizard,setup,permissions,accounts,agents,status,logs}.ts`. A new `GET /api/tab/:name` route serves each tab's HTML on first click; subsequent visits use the cached fragment. A broken tab shows an inline error without affecting other tabs. The route uses a `Set`-based allowlist to block prototype-pollution attempts (`__proto__`, `constructor`, etc.).
+- **Concurrent tab-click deduplication** — rapid double-clicks on a tab now await the same in-flight fetch via a `_tabLoading` Map rather than launching duplicate requests.
+- **Hardcoded colors replaced with CSS variables** — grant-approval modal and accounts modal no longer use literal `#1b1b1e`, `#222`, `#444`, etc.; all colors now reference `var(--surface)`, `var(--border)`, `var(--text)`, etc.
+
+### Fixed
+- **`validateAttachments` unbounded array** — `attachments` arrays are now capped at 50 items; previously an arbitrarily large array would pass validation and be forwarded to the MIME builder.
+- **Bulk-op silent INBOX fallback now logged** — `bulkMarkRead`, `bulkStar`, and `bulkCopyToFolder` emit a `warn`-level log entry when a UID is not in the email cache and the operation falls back to INBOX, making the pre-existing design limitation observable.
+
 ## [3.0.30] — 2026-05-27
 
 ### Fixed
