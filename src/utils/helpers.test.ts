@@ -45,6 +45,21 @@ describe('helpers', () => {
     it('should handle empty input', () => {
       expect(parseEmails('')).toEqual([]);
     });
+
+    it('should extract address from "Display Name <email>" format', () => {
+      expect(parseEmails('John Doe <john@example.com>')).toEqual(['john@example.com']);
+    });
+
+    it('should handle mixed bare and display-name addresses', () => {
+      expect(parseEmails('alice@example.com, Bob Smith <bob@example.com>')).toEqual([
+        'alice@example.com',
+        'bob@example.com',
+      ]);
+    });
+
+    it('should drop display-name entries with invalid inner address', () => {
+      expect(parseEmails('Bad Guy <not-an-email>')).toEqual([]);
+    });
   });
 
   describe('formatDate', () => {

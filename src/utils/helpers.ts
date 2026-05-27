@@ -49,8 +49,11 @@ export function parseEmails(emailString: string): string[] {
   for (const raw of emailString.split(",")) {
     const trimmed = raw.trim();
     if (trimmed.length === 0) continue;
-    if (isValidEmail(trimmed)) {
-      valid.push(trimmed);
+    // Support "Display Name <email@domain.com>" format by extracting the angle-bracket part.
+    const angleMatch = trimmed.match(/<([^>]+)>/);
+    const candidate = angleMatch ? angleMatch[1].trim() : trimmed;
+    if (isValidEmail(candidate)) {
+      valid.push(candidate);
     } else {
       logger.warn("parseEmails: dropping invalid address", "helpers", { address: sanitizeForLog(trimmed, 80) });
     }
