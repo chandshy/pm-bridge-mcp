@@ -137,6 +137,15 @@ The Bridge password (for local IMAP/SMTP) and refresh tokens are stored in the k
 - Bridge polls the Proton API every ~20 seconds for new events (it does NOT implement IMAP IDLE server-push natively — see IMAP docs)
 - Bridge requires a paid Proton Mail subscription; free accounts cannot use Bridge
 
+## Supported Bridge Versions
+
+mailpouch is tested and pinned against **Bridge v3.24.x (Nescio)** as the current supported baseline (latest stable v3.24.2, released 2026-04-20). The IMAP/SMTP protocol surface has been stable across the v3.20–v3.24 series, so older v3.20+ installs continue to work, but two recent Bridge-side behaviour changes are worth noting:
+
+- **IMAP connection limiting (added in v3.24.0, 2026-03-30)** — Bridge now supports capping concurrent IMAP sessions. mailpouch uses a single persistent connection per account plus IDLE, so the default limit is not expected to bite, but a future Bridge tightening of the default could surface as "too many connections" rejections on heavy concurrent usage.
+- **Label endpoint mapping (v3.23.0 → v3.24.1, March–April 2026)** — Bridge changed how it translates IMAP label-folder operations (`UID COPY` into `Labels/<name>`, `UID STORE \Deleted` against a label folder) into upstream Proton API calls. v3.23.0 stopped calling the unlabel endpoint when moving between folders; v3.24.1 added a feature flag that restores the prior behaviour. mailpouch's `move_to_label` / `remove_label` and the four `bulk_*_label` tools issue label operations at the IMAP layer only — Bridge's internal mapping should remain transparent — but sanity-test those tools when upgrading Bridge.
+
+If a user reports a Bridge version older than v3.20 it is worth checking the upstream changelog at <https://github.com/ProtonMail/proton-bridge/blob/master/Changelog.md> before debugging — some IMAP-side bugs (notably Drafts→Trash deletion, expunge-from-old-locations) were fixed in the v3.23–v3.24 window.
+
 ## Sources
 
 - https://proton.me/support/port-already-occupied-error
