@@ -134,7 +134,7 @@ const _pkgJsonPath = nodePath.resolve(_moduleDir, "../../package.json");
 
 // ─── Embedded HTML UI ─────────────────────────────────────────────────────────
 
-function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): string {
+function buildHtml(configPath: string, csrfToken: string, runningPort = 8765, cspNonce = ""): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
   const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
   const distIndexPath = JSON.stringify(nodePath.resolve(_moduleDir, "../index.js"));
@@ -192,7 +192,7 @@ function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): s
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="${csrfToken}">
 <title>mailpouch — Settings</title>
-<style>
+<style nonce="${cspNonce}">
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
@@ -1885,7 +1885,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<script>
+<script nonce="${cspNonce}">
 (function() {
   // ── Constants ─────────────────────────────────────────────────────────────
   const ALL_TOOLS  = ${toolsJson};
@@ -3682,7 +3682,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     </div>
   </div>
 </div>
-<script>
+<script nonce="${cspNonce}">
 (function() {
   let currentClientId = null;
   document.addEventListener('change', (e) => {
@@ -4177,7 +4177,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // Vary: Origin so caches do not serve the wrong ACAO value to other origins.
       res.setHeader("Vary", "Origin");
     }
-    res.setHeader("Strict-Transport-Security",    "max-age=31536000");
+    res.setHeader("Strict-Transport-Security",    "max-age=31536000; includeSubDomains; preload");
 
     // ── CORS preflight ──────────────────────────────────────────────────────
     if (method === "OPTIONS") {
@@ -4192,7 +4192,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     // devices on the network cannot read config or approve escalations.
     if (lan && accessToken && path !== "/") {
       if (!hasValidAccessToken(req, url, accessToken)) {
-        json(res, 401, { error: "Access denied. Include the X-Access-Token header or ?token= query param." });
+        json(res, 401, { error: "Access denied. Include the X-Access-Token header." });
         return;
       }
     }
@@ -4206,10 +4206,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     try {
       // ── Serve UI ────────────────────────────────────────────────────────
       if (method === "GET" && path === "/") {
-        const html = buildHtml(configPath, csrfToken, port);
+        // Per-response CSP nonce. Lets us drop 'unsafe-inline' for script
+        // and style: only the three inline blocks we ship can execute,
+        // because they carry the matching nonce attribute. Stops stored XSS
+        // from any future bug that reflects config into the page.
+        const cspNonce = randomBytes(16).toString("base64");
+        const html = buildHtml(configPath, csrfToken, port, cspNonce);
         res.writeHead(200, {
           "Content-Type":             "text/html; charset=utf-8",
-          "Content-Security-Policy":  "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+          "Content-Security-Policy":  `default-src 'self'; style-src 'nonce-${cspNonce}'; script-src 'nonce-${cspNonce}'`,
           "X-Content-Type-Options":   "nosniff",
           "X-Frame-Options":          "DENY",
           "Referrer-Policy":          "no-referrer",
@@ -4379,11 +4384,23 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (body.permissions && typeof body.permissions === "object") {
           const p = body.permissions as Record<string, unknown>;
           const validPresets = new Set<string>(PERMISSION_PRESETS as unknown as string[]);
+          // Filter incoming tool keys against ALL_TOOLS so an unknown name
+          // (typo, or a key for a tool that doesn't ship yet) is dropped
+          // instead of silently entering the persisted config. Matches the
+          // pattern config/loader.ts applies on load.
+          const knownTools = new Set<string>(ALL_TOOLS as unknown as string[]);
+          const incomingTools = typeof p.tools === "object" && p.tools !== null
+            ? p.tools as Record<string, unknown>
+            : {};
+          const filteredTools: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(incomingTools)) {
+            if (knownTools.has(k)) filteredTools[k] = v;
+          }
           current.permissions = {
             preset: typeof p.preset === "string" && validPresets.has(p.preset)
               ? (p.preset as PermissionPreset)
               : current.permissions.preset,
-            tools:  { ...current.permissions.tools, ...(typeof p.tools === "object" && p.tools !== null ? p.tools as Record<string, boolean> : {}) },
+            tools:  { ...current.permissions.tools, ...filteredTools as Record<string, boolean> },
           };
         }
 

@@ -100,10 +100,14 @@ export class GrantManager {
     const allow = grant.conditions?.folderAllowlist;
     if (!allow || allow.length === 0) return { allowed: true, effectivePreset: effective };
     const folder = extractFolderArg(ctx.args);
-    // If no folder is visible in args, skip the check — the tool might not
-    // be folder-scoped (e.g. get_email_stats), and the grant's folder
-    // allowlist is meaningful only when a folder is specified.
-    if (!folder) return { allowed: true, effectivePreset: effective };
+    if (!folder) {
+      // For folder-scoped tools, the absence of a recognized folder arg is
+      // suspicious: an attacker could tunnel folder intent through a
+      // non-standard arg name to escape the allowlist. Fail closed unless
+      // the tool is explicitly known to be folder-agnostic.
+      if (FOLDER_AGNOSTIC_TOOLS.has(ctx.tool)) return { allowed: true, effectivePreset: effective };
+      return { allowed: false, reason: `Tool '${ctx.tool}' has no recognized folder argument; the grant's folder allowlist requires a folder.` };
+    }
     const lower = folder.toLowerCase();
     if (!allow.some(a => a.toLowerCase() === lower)) {
       return { allowed: false, reason: `Folder '${folder}' is outside the grant's allowlist (${allow.join(", ")}).` };
@@ -141,6 +145,33 @@ function extractFolderArg(args: Record<string, unknown> | undefined): string | u
   }
   return undefined;
 }
+
+/** Tools that legitimately operate without a folder argument and therefore
+ *  should NOT trigger the fail-closed folder-allowlist check. Stats /
+ *  analytics / contacts roll up across all folders by design; system /
+ *  config / FTS-index management is folder-agnostic. */
+const FOLDER_AGNOSTIC_TOOLS = new Set<string>([
+  "get_email_stats", "get_email_analytics", "get_volume_trends",
+  "get_contacts", "get_correspondence_profile",
+  "list_labels", "get_folders", "sync_folders",
+  "get_connection_status", "get_unread_count", "get_email_stats",
+  "clear_cache", "get_logs", "start_bridge", "shutdown_server", "restart_server",
+  "fts_search", "fts_rebuild", "fts_status",
+  "list_scheduled_emails", "list_proton_scheduled", "cancel_scheduled_email",
+  "list_pending_reminders", "cancel_reminder", "check_reminders",
+  "remind_if_no_reply",
+  "alias_list", "alias_create_random", "alias_create_custom",
+  "alias_toggle", "alias_delete", "alias_get_activity",
+  "pass_list", "pass_search", "pass_get",
+  "extract_action_items", "extract_meeting",
+  "send_email", "send_test_email", "reply_to_email", "forward_email",
+  "save_draft", "schedule_email",
+  "request_permission_escalation", "check_escalation_status",
+  "sync_emails",
+  // Email-ID-scoped tools — folder is implied by the message UID, not by an arg.
+  "get_email_by_id", "get_thread", "mark_email_read", "star_email",
+  "delete_email", "download_attachment",
+]);
 
 /**
  * Intersect two presets — return the stricter of the two. Ordering is

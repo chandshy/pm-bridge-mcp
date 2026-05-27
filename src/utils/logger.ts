@@ -2,10 +2,17 @@
  * Logging utility for mailpouch
  */
 
-import { appendFile } from "fs";
+import { appendFile, statSync, chmodSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { LogEntry } from "../types/index.js";
+
+function statSyncSafe(p: string): import("fs").Stats | null {
+  try { return statSync(p); } catch { return null; }
+}
+function chmodSyncSafe(p: string, m: number): void {
+  try { chmodSync(p, m); } catch { /* ignore */ }
+}
 
 /**
  * Keys whose values must be redacted before being stored in log entries.
@@ -36,14 +43,19 @@ export class Logger {
   /**
    * Recursively sanitize data before storing in log entries.
    * Redacts sensitive keys and truncates long strings.
+   *
+   * Cap recursion at SANITIZE_MAX_DEPTH so adversary-supplied JSON nested
+   * thousands of levels deep can't blow the stack or burn the CPU during
+   * sanitisation.
    */
-  private sanitizeData(data: unknown, seen?: WeakSet<object>): unknown {
+  private sanitizeData(data: unknown, seen?: WeakSet<object>, depth = 0): unknown {
     if (data === null || data === undefined) return data;
     if (typeof data === "string") {
       const truncated = data.length > 200 ? data.substring(0, 200) + "…" : data;
       return truncated.replace(/[\x00-\x1f\x7f]/g, " ");
     }
     if (typeof data !== "object") return data;
+    if (depth > 100) return "[depth-limit]";
 
     // Prevent infinite recursion on circular references (e.g. socket/TLS error objects)
     const tracker = seen ?? new WeakSet();
@@ -51,11 +63,11 @@ export class Logger {
     tracker.add(data as object);
 
     if (Array.isArray(data)) {
-      return data.map((item) => this.sanitizeData(item, tracker));
+      return data.map((item) => this.sanitizeData(item, tracker, depth + 1));
     }
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-      result[key] = SENSITIVE_KEYS.test(key) ? "[redacted]" : this.sanitizeData(value, tracker);
+      result[key] = SENSITIVE_KEYS.test(key) ? "[redacted]" : this.sanitizeData(value, tracker, depth + 1);
     }
     return result;
   }
@@ -123,7 +135,17 @@ export class Logger {
     const shouldWriteFile = this.fileLogging &&
       (level !== "debug" || this.debugFileLogging);
     if (shouldWriteFile) {
-      appendFile(getLogFilePath(), JSON.stringify(entry) + "\n", "utf8", () => {
+      // Explicit mode 0o600 so debug entries (which may carry email-like
+      // context, even after redaction) are owner-readable only.
+      // appendFile creates the file if missing; otherwise the mode is
+      // ignored, so we also chmodSync if the file already exists with
+      // looser permissions (e.g. upgraded from an older mailpouch).
+      const path = getLogFilePath();
+      try {
+        const st = statSyncSafe(path);
+        if (st && (st.mode & 0o077) !== 0) chmodSyncSafe(path, 0o600);
+      } catch { /* ignore */ }
+      appendFile(path, JSON.stringify(entry) + "\n", { encoding: "utf8", mode: 0o600 }, () => {
         /* best-effort — never crash the server over a log write */
       });
     }

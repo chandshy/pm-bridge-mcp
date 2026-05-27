@@ -1782,7 +1782,7 @@ async function main() {
   const noSettingsUi = process.argv.includes("--no-settings-ui");
 
   // Clear log file from previous run so each session starts fresh
-  try { writeFileSync(getLogFilePath(), "", "utf8"); } catch { /* ignore */ }
+  try { writeFileSync(getLogFilePath(), "", { encoding: "utf8", mode: 0o600 }); } catch { /* ignore */ }
 
   logger.info(`Starting mailpouch v${_pkgVersion}`, "MCPServer");
 

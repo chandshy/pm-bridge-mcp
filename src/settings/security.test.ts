@@ -340,14 +340,16 @@ describe('hasValidAccessToken', () => {
     expect(hasValidAccessToken(req, makeURL(), token)).toBe(false);
   });
 
-  it('returns true when ?token= query param matches', () => {
+  it('returns false even when ?token= query param matches (header-only mode)', () => {
+    // Query-string tokens are no longer accepted — they leak into browser
+    // history, referer headers, and proxy logs. Header is the only path.
     const token = generateAccessToken();
     const req = mockReqWithHeaders({});
     const url = makeURL(`?token=${token.value}`);
-    expect(hasValidAccessToken(req, url, token)).toBe(true);
+    expect(hasValidAccessToken(req, url, token)).toBe(false);
   });
 
-  it('returns false when ?token= query param is wrong', () => {
+  it('returns false when ?token= query param is wrong (header-only mode)', () => {
     const token = generateAccessToken();
     const req = mockReqWithHeaders({});
     const url = makeURL('?token=badtoken');
