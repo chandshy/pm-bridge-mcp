@@ -49,6 +49,11 @@ export interface IssuedToken {
   resource?: string;
   /** ms since epoch. */
   expiresAt: number;
+  /** Client IP at issuance. When set, verifyToken() rejects requests from a
+   *  different IP — closes the "issue from loopback, replay from a non-pinned
+   *  remote" gap that bypassed per-agent ipPins on the MCP endpoint. Optional
+   *  for backwards compatibility with tokens issued before this field existed. */
+  issuedFromIp?: string;
 }
 
 export const OAUTH_CODE_TTL_MS = 60_000;                // RFC 6749 §4.1.2: MAX 10 min; we go short
@@ -71,11 +76,29 @@ export class OAuthStore {
   private clients = new Map<string, RegisteredClient>();
   private codes = new Map<string, PendingAuth>();
   private tokens = new Map<string, IssuedToken>();
+  /** Reverse index clientId → tokens, so revoking a grant can invalidate all
+   *  outstanding access tokens for that client immediately rather than waiting
+   *  for the 24 h TTL to expire. Kept consistent with `tokens` via the
+   *  issueToken / revokeToken / evict / sweep paths. */
+  private tokensByClient = new Map<string, Set<string>>();
 
   /** Drop the oldest entry from a Map (relies on Map's insertion-order iteration). */
   private evictOldest<K, V>(m: Map<K, V>): void {
     const first = m.keys().next();
     if (!first.done) m.delete(first.value);
+  }
+
+  private indexToken(rec: IssuedToken): void {
+    let set = this.tokensByClient.get(rec.clientId);
+    if (!set) { set = new Set(); this.tokensByClient.set(rec.clientId, set); }
+    set.add(rec.token);
+  }
+
+  private unindexToken(token: string, clientId: string): void {
+    const set = this.tokensByClient.get(clientId);
+    if (!set) return;
+    set.delete(token);
+    if (set.size === 0) this.tokensByClient.delete(clientId);
   }
 
   registerClient(client: Omit<RegisteredClient, "client_id" | "client_id_issued_at">): RegisteredClient {
@@ -113,7 +136,7 @@ export class OAuthStore {
     return rec;
   }
 
-  issueToken(args: { clientId: string; scopes: string[]; resource?: string }): IssuedToken {
+  issueToken(args: { clientId: string; scopes: string[]; resource?: string; issuedFromIp?: string }): IssuedToken {
     const token = randomBytes(32).toString("base64url");
     const rec: IssuedToken = {
       token,
@@ -121,9 +144,18 @@ export class OAuthStore {
       scopes: args.scopes,
       resource: args.resource,
       expiresAt: Date.now() + OAUTH_ACCESS_TOKEN_TTL_MS,
+      issuedFromIp: args.issuedFromIp,
     };
-    if (this.tokens.size >= OAUTH_MAX_TOKENS) this.evictOldest(this.tokens);
+    if (this.tokens.size >= OAUTH_MAX_TOKENS) {
+      const first = this.tokens.keys().next();
+      if (!first.done) {
+        const old = this.tokens.get(first.value);
+        this.tokens.delete(first.value);
+        if (old) this.unindexToken(first.value, old.clientId);
+      }
+    }
     this.tokens.set(token, rec);
+    this.indexToken(rec);
     return rec;
   }
 
@@ -132,13 +164,32 @@ export class OAuthStore {
     if (!rec) return null;
     if (Date.now() > rec.expiresAt) {
       this.tokens.delete(token);
+      this.unindexToken(token, rec.clientId);
       return null;
     }
     return rec;
   }
 
   revokeToken(token: string): boolean {
-    return this.tokens.delete(token);
+    const rec = this.tokens.get(token);
+    const removed = this.tokens.delete(token);
+    if (removed && rec) this.unindexToken(token, rec.clientId);
+    return removed;
+  }
+
+  /** Drop every outstanding access token for `clientId`. Returns the number
+   *  of tokens revoked. Called when a per-agent grant is denied / revoked /
+   *  expires so that ongoing requests holding the token can't continue past
+   *  the policy change. */
+  revokeTokensForClient(clientId: string): number {
+    const set = this.tokensByClient.get(clientId);
+    if (!set || set.size === 0) return 0;
+    let n = 0;
+    for (const token of set) {
+      if (this.tokens.delete(token)) n++;
+    }
+    this.tokensByClient.delete(clientId);
+    return n;
   }
 
   /**
@@ -157,6 +208,7 @@ export class OAuthStore {
     for (const [k, v] of this.tokens) {
       if (now > v.expiresAt) {
         this.tokens.delete(k);
+        this.unindexToken(k, v.clientId);
         tokens++;
       }
     }

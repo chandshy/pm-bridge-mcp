@@ -36,6 +36,7 @@ import { OAuthStore } from "./oauth-store.js";
 import { OAuthHandlers } from "./oauth-handlers.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
 import type { AgentGrantStore } from "../agents/grant-store.js";
+import { notifications } from "../agents/notifications.js";
 import { runWithCaller } from "../agents/caller-context.js";
 
 export interface HttpTransportOptions {
@@ -132,11 +133,15 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise
  */
 export function clientIp(req: IncomingMessage): string {
   const direct = req.socket.remoteAddress ?? "0.0.0.0";
+  // Only the exact loopback addresses qualify — earlier code accepted any
+  // 127.x.x.x or any ::ffff:127.x.x.x form, which on dual-stack/containerized
+  // setups let an attacker reaching the host from a non-loopback IPv6 address
+  // spoof X-Forwarded-For. Reject any IPv4-mapped-loopback variant other than
+  // ::ffff:127.0.0.1.
   const isLoopback =
     direct === "127.0.0.1" ||
     direct === "::1" ||
-    direct === "::ffff:127.0.0.1" ||
-    direct.startsWith("127.");
+    direct === "::ffff:127.0.0.1";
   if (!isLoopback) return direct;
   const h = req.headers["x-forwarded-for"];
   const raw = Array.isArray(h) ? h[0] : h;
@@ -175,6 +180,15 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   const derivedIssuer = `${scheme}://${host}:${opts.port}`;
   const issuer = opts.oauthIssuer ?? derivedIssuer;
   const oauthStore = new OAuthStore();
+  // Invalidate outstanding access tokens immediately when a grant transitions
+  // out of "active". Without this, a revoked agent's existing token stayed
+  // valid up to OAUTH_ACCESS_TOKEN_TTL_MS (24 h).
+  const unsubGrantChanges = notifications.subscribe((ev) => {
+    if (ev.kind === "grant-revoked" || ev.kind === "grant-denied" || ev.kind === "grant-expired") {
+      const n = oauthStore.revokeTokensForClient(ev.grant.clientId);
+      if (n > 0) logger.info(`Revoked ${n} OAuth token(s) for client ${ev.grant.clientId} after ${ev.kind}`, "HTTPTransport");
+    }
+  });
   const oauthHandlers = opts.oauthEnabled && opts.oauthAdminPassword
     ? new OAuthHandlers(
         oauthStore,
@@ -228,6 +242,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     }
 
     const token = extractBearer(req);
+    const caller = clientIp(req);
     let tokenKey: string | null = null;
     let ok = false;
     let callerClientId = "bearer:static";
@@ -245,6 +260,16 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         if (rec.resource && rec.resource !== expectedResource) {
           res.statusCode = 401;
           res.setHeader("WWW-Authenticate", `Bearer realm="mailpouch", error="invalid_token", error_description="token resource does not match endpoint"`);
+          res.end(JSON.stringify({ error: "invalid_token" }));
+          return;
+        }
+        // IP pinning at the token layer: if the token recorded its issuing
+        // IP, the request must come from the same IP. Closes the "issue from
+        // loopback, replay from remote" vector even when no per-agent grant
+        // has ipPins set.
+        if (rec.issuedFromIp && rec.issuedFromIp !== caller) {
+          res.statusCode = 401;
+          res.setHeader("WWW-Authenticate", `Bearer realm="mailpouch", error="invalid_token", error_description="token issued for a different client IP"`);
           res.end(JSON.stringify({ error: "invalid_token" }));
           return;
         }
@@ -326,6 +351,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     issuer: oauthHandlers ? issuer : undefined,
     close: async () => {
       clearInterval(sweep);
+      unsubGrantChanges();
       try { await transport.close(); } catch { /* best effort */ }
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

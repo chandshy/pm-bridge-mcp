@@ -14,8 +14,23 @@
  */
 
 import { createRequire } from "module";
-import { statSync } from "fs";
+import { statSync, chmodSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
+
+/** Tighten the FTS DB to 0600. The index contains decrypted email bodies,
+ *  subjects, and senders — must be owner-readable only. better-sqlite3 opens
+ *  files with the default umask (typically 0644 on Linux), so we chmod
+ *  every primary + sidecar file after open. */
+function chmodFtsFiles(dbPath: string): void {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    const p = dbPath + suffix;
+    if (!existsSync(p)) continue;
+    try {
+      const st = statSync(p);
+      if ((st.mode & 0o077) !== 0) chmodSync(p, 0o600);
+    } catch { /* best-effort */ }
+  }
+}
 
 const require = createRequire(import.meta.url);
 
@@ -227,6 +242,7 @@ export function openFtsIndex(dbPath: string): FtsIndexService {
   const Database = require("better-sqlite3") as unknown as DatabaseConstructor;
   try {
     const db = new Database(dbPath);
+    chmodFtsFiles(dbPath);
     return new FtsIndexService(db, dbPath);
   } catch (err) {
     throw new FtsUnavailableError(

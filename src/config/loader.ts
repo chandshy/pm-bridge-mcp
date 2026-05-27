@@ -284,14 +284,29 @@ export function loadConfig(): ServerConfig | null {
       if (sp >= 1 && sp <= 65535) preservedSettingsPort = sp;
     }
     // credentialStorage drives the settings UI's "where are my secrets
-    // kept?" badge — preserve it across load/save round-trips too; it was
-    // dropped by the same bug that hit settingsPort.
-    const preservedCredentialStorage =
+    // kept?" badge. Derive it from observed state rather than trusting the
+    // persisted value — an attacker editing the config file could otherwise
+    // set credentialStorage="keychain" while leaving plaintext passwords in
+    // the file, hiding the fact that credentials live in cleartext.
+    let preservedCredentialStorage: "keychain" | "encrypted-file" | "config" | undefined;
+    const hasEncryptedBlob =
+      CredentialEncryption.isValidEncrypted(mergedConnection.passwordEncrypted) ||
+      CredentialEncryption.isValidEncrypted(mergedConnection.smtpTokenEncrypted);
+    const hasPlaintext =
+      !!mergedConnection.password || !!mergedConnection.smtpToken;
+    if (hasEncryptedBlob) {
+      preservedCredentialStorage = "encrypted-file";
+    } else if (hasPlaintext) {
+      preservedCredentialStorage = "config";
+    } else if (
       parsed.credentialStorage === "keychain" ||
       parsed.credentialStorage === "encrypted-file" ||
       parsed.credentialStorage === "config"
-        ? parsed.credentialStorage
-        : undefined;
+    ) {
+      // No on-disk credentials at all → trust the saved hint (we expect this
+      // to be "keychain" for any installation that's gone through migration).
+      preservedCredentialStorage = parsed.credentialStorage;
+    }
 
     const result: ServerConfig = {
       configVersion: CONFIG_VERSION,

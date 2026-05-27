@@ -15,7 +15,7 @@
 
 import http from "http";
 import { spawnSync } from "child_process";
-import { mkdtempSync, readFileSync, existsSync } from "fs";
+import { mkdtempSync, readFileSync, existsSync, rmSync } from "fs";
 import { tmpdir, networkInterfaces } from "os";
 import { join } from "path";
 import { randomBytes, createHash, timingSafeEqual } from "crypto";
@@ -87,13 +87,22 @@ export class RateLimiter {
     times.push(now);
 
     // Enforce the per-instance key cap before inserting a brand-new key.
-    // Run eviction first to clear stale buckets, then check the cap.
+    // Run eviction first to clear stale buckets, then evict LRU rather than
+    // insertion-order: an attacker rotating fake keys faster than the
+    // window's eviction sweep would otherwise force out long-lived legitimate
+    // clients (DoS-of-DoS).
     if (!this.buckets.has(key)) {
       if (this.buckets.size >= MAX_RATE_LIMIT_BUCKETS) {
         this.evict();
       }
       if (this.buckets.size >= MAX_RATE_LIMIT_BUCKETS) {
-        const oldestKey = this.buckets.keys().next().value;
+        // Find the bucket whose most-recent activity is oldest.
+        let oldestKey: string | undefined;
+        let oldestT = Infinity;
+        for (const [k, ts] of this.buckets) {
+          const last = ts.length === 0 ? 0 : ts[ts.length - 1];
+          if (last < oldestT) { oldestT = last; oldestKey = k; }
+        }
         if (oldestKey !== undefined) this.buckets.delete(oldestKey);
       }
     }
@@ -215,6 +224,14 @@ export function isValidOrigin(
     const RFC1918_RE =
       /^https?:\/\/(?:192\.168\.\d{1,3}|10\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3})\.\d{1,3}(?::\d+)?(?:\/|$)/;
     if (RFC1918_RE.test(header)) return true;
+    // IPv6 equivalents of RFC-1918: ULA (fc00::/7 → fc00:– / fd00:–) and
+    // link-local (fe80::/10). Origin/referer URLs bracket the IPv6 address.
+    // We don't try to validate the full IPv6 grammar — just the leading
+    // prefix bytes, which is enough to admit private-range traffic without
+    // letting public IPv6 origins through.
+    const IPV6_PRIVATE_RE =
+      /^https?:\/\/\[(?:f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)[0-9a-f:]*\](?::\d+)?(?:\/|$)/i;
+    if (IPV6_PRIVATE_RE.test(header)) return true;
   }
 
   // Use exact match (for Origin headers, which carry no path) or require a
@@ -250,31 +267,24 @@ export function generateAccessToken(): AccessToken {
  * Check whether an incoming request carries the valid access token.
  * Uses `timingSafeEqual` to prevent timing-based enumeration.
  *
- * Checks (in order):
- *   1. `X-Access-Token` header   — preferred (not in URL logs)
- *   2. `?token=` query parameter — for direct mobile URL access
+ * Only the `X-Access-Token` header is accepted. Query-string tokens leak
+ * into browser history, referer headers to outbound links, proxy access
+ * logs, and devtools network tab; not worth the marginal UX benefit.
  */
 export function hasValidAccessToken(
   req:   http.IncomingMessage,
-  url:   URL,
+  _url:  URL,
   token: AccessToken,
 ): boolean {
   const expected = Buffer.from(token.value, "utf-8");
-
-  const tryCompare = (candidate: string | undefined): boolean => {
-    if (!candidate) return false;
-    if (candidate.length !== token.value.length) return false;
-    try {
-      return timingSafeEqual(Buffer.from(candidate, "utf-8"), expected);
-    } catch {
-      return false;
-    }
-  };
-
-  return (
-    tryCompare(req.headers["x-access-token"] as string | undefined) ||
-    tryCompare(url.searchParams.get("token") ?? undefined)
-  );
+  const candidate = req.headers["x-access-token"] as string | undefined;
+  if (!candidate) return false;
+  if (candidate.length !== token.value.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(candidate, "utf-8"), expected);
+  } catch {
+    return false;
+  }
 }
 
 // ─── TLS certificate generation ───────────────────────────────────────────────
@@ -296,8 +306,9 @@ export interface TlsCredentials {
  * The resulting credentials are suitable for `https.createServer()`.
  */
 export function tryGenerateSelfSignedCert(): TlsCredentials | null {
+  let dir: string | null = null;
   try {
-    const dir      = mkdtempSync(join(tmpdir(), "protonmcp-tls-"));
+    dir            = mkdtempSync(join(tmpdir(), "protonmcp-tls-"));
     const keyFile  = join(dir, "key.pem");
     const certFile = join(dir, "cert.pem");
 
@@ -335,6 +346,13 @@ export function tryGenerateSelfSignedCert(): TlsCredentials | null {
     return { key, cert, fingerprint };
   } catch {
     return null;
+  } finally {
+    // The cert + private key only ever needed to be read once — they're now
+    // in-memory buffers. Wipe the on-disk copy immediately so a crash or
+    // forensic capture of /tmp doesn't surface the private key.
+    if (dir) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
   }
 }
 

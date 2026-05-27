@@ -251,6 +251,10 @@ let bridgeRestartAttempts = 0;
 const BRIDGE_MAX_RESTARTS = 3;
 /** Handle returned by setInterval for the bridge watchdog (null when inactive). */
 let bridgeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+/** PID of the Bridge process this server launched. Used for clean shutdown so we
+ *  never fall back to `pkill -f proton-bridge`, which would kill any unrelated
+ *  process that happens to carry "proton-bridge" in its command line. */
+let launchedBridgePid: number | null = null;
 
 // ─── Shared mutable state ────────────────────────────────────────────────────
 // Referenced by both the tool handlers (via ToolCallContext.state) and
@@ -1271,8 +1275,11 @@ async function launchProtonBridge(): Promise<void> {
   if (config.bridgePath) {
     config.bridgePath = config.bridgePath.trim().replace(/^["']|["']$/g, "");
   }
-  // User-configured path takes top priority
-  if (config.bridgePath && existsSync(config.bridgePath)) {
+  // User-configured path takes top priority. Don't pre-check existsSync —
+  // that creates a TOCTOU window where an attacker with write access to the
+  // containing directory could swap the binary between check and spawn.
+  // spawn() itself will surface ENOENT via the 'error' event below.
+  if (config.bridgePath) {
     try {
       // Detach + unref lets Bridge outlive us, but an ENOENT (stale path
       // across platforms, missing perms) arrives as an async 'error' event.
@@ -1282,6 +1289,7 @@ async function launchProtonBridge(): Promise<void> {
       const bridgeProc = spawn(config.bridgePath, [], {
         stdio: "ignore", detached: true, shell: false,
       });
+      launchedBridgePid = bridgeProc.pid ?? null;
       bridgeProc.on("error", (err) => {
         logger.warn("Proton Bridge launch process emitted error", "MCPServer", err);
       });
@@ -1368,6 +1376,7 @@ async function launchProtonBridge(): Promise<void> {
     // Same async-error concern as the user-configured path above: attach a
     // listener before .unref() so a spawn failure can't crash the MCP server.
     const bridgeProc = spawn(cmd, args, { stdio: "ignore", detached: true, shell: false });
+    launchedBridgePid = bridgeProc.pid ?? null;
     bridgeProc.on("error", (err) => {
       logger.warn("Proton Bridge launch process emitted error", "MCPServer", err);
     });
@@ -1393,30 +1402,34 @@ async function launchProtonBridge(): Promise<void> {
   }
 }
 
-/** Terminate the Proton Bridge process launched by this server. */
+/** Terminate the Proton Bridge process launched by this server.
+ *
+ *  Prefer killing by PID we recorded at spawn — that's deterministic and can
+ *  never hit an unrelated process. The previous implementation used
+ *  `pkill -f proton-bridge`, which matches the full command line: any other
+ *  process whose argv happens to contain "proton-bridge" (a developer running
+ *  `vim --servername proton-bridge`, for example) would die.
+ *
+ *  If we never launched Bridge (PID is null — e.g., Bridge was already running
+ *  when we started), we do nothing. The user can stop it themselves; we should
+ *  not kill a process we didn't create. */
 async function killProtonBridge(): Promise<void> {
-  const platform = process.platform;
+  if (launchedBridgePid === null) {
+    logger.debug("Proton Bridge not launched by this server — skipping kill", "MCPServer");
+    return;
+  }
+  const pid = launchedBridgePid;
   try {
-    let killCmd: string;
-    let killArgs: string[];
-    if (platform === "win32") {
-      killCmd = "taskkill";
-      killArgs = ["/IM", "proton-bridge.exe", "/F"];
-    } else if (platform === "darwin") {
-      killCmd = "killall";
-      killArgs = ["Proton Mail Bridge"];
-    } else {
-      killCmd = "pkill";
-      killArgs = ["-f", "proton-bridge"];
-    }
-    await new Promise<void>((resolve) => {
-      const p = spawn(killCmd, killArgs, { stdio: "ignore" });
-      p.on("close", () => resolve());
-      p.on("error", () => resolve());
-    });
-    logger.info("Proton Bridge terminated", "MCPServer");
+    process.kill(pid, "SIGTERM");
+    // Give Bridge ~2 s to exit cleanly, then SIGKILL if still alive.
+    await new Promise<void>(r => setTimeout(r, 2000));
+    try { process.kill(pid, 0); } catch { launchedBridgePid = null; logger.info(`Proton Bridge (pid ${pid}) terminated`, "MCPServer"); return; }
+    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    logger.info(`Proton Bridge (pid ${pid}) force-killed`, "MCPServer");
   } catch (e: unknown) {
-    logger.debug("Could not terminate Proton Bridge", "MCPServer", e);
+    logger.debug(`Could not terminate Proton Bridge (pid ${pid})`, "MCPServer", e);
+  } finally {
+    launchedBridgePid = null;
   }
 }
 
@@ -1769,7 +1782,7 @@ async function main() {
   const noSettingsUi = process.argv.includes("--no-settings-ui");
 
   // Clear log file from previous run so each session starts fresh
-  try { writeFileSync(getLogFilePath(), "", "utf8"); } catch { /* ignore */ }
+  try { writeFileSync(getLogFilePath(), "", { encoding: "utf8", mode: 0o600 }); } catch { /* ignore */ }
 
   logger.info(`Starting mailpouch v${_pkgVersion}`, "MCPServer");
 
@@ -2012,13 +2025,20 @@ async function main() {
     // Claude Desktop spawns.
     const loadedCfg = loadConfig();
     const remoteCn = loadedCfg?.connection;
-    const hasBearer = !!remoteCn?.remoteBearerToken;
-    const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!remoteCn?.remoteOauthAdminPassword;
+    // Prefer keychain-stored remote secrets over the (legacy) plaintext
+    // config-file values. When both are present the keychain wins, matching
+    // the loadCredentialsFromKeychain priority chain for password/smtpToken.
+    const { loadRemoteSecrets } = await import("./security/keychain.js");
+    const remoteSecrets = await loadRemoteSecrets();
+    const effectiveBearer = remoteSecrets?.remoteBearerToken || remoteCn?.remoteBearerToken || "";
+    const effectiveAdminPassword = remoteSecrets?.remoteOauthAdminPassword || remoteCn?.remoteOauthAdminPassword || "";
+    const hasBearer = !!effectiveBearer;
+    const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!effectiveAdminPassword;
     if (remoteCn?.remoteMode) {
       if (!hasBearer && !hasOAuth) {
         logger.error(
           "remoteMode is set but no authentication is configured. " +
-          "Set remoteBearerToken OR both remoteOauthEnabled and remoteOauthAdminPassword in ~/.mailpouch.json. " +
+          "Set remoteBearerToken OR both remoteOauthEnabled and remoteOauthAdminPassword in ~/.mailpouch.json (or via keychain). " +
           "Refusing to start without auth — edit the config or remove remoteMode to use stdio.",
           "MCPServer"
         );
@@ -2030,11 +2050,11 @@ async function main() {
         host: remoteCn.remoteHost || "127.0.0.1",
         port: remoteCn.remotePort ?? 8788,
         path: remoteCn.remotePath || "/mcp",
-        bearerToken: remoteCn.remoteBearerToken || "",
+        bearerToken: effectiveBearer,
         tlsCertPath: remoteCn.remoteTlsCertPath || undefined,
         tlsKeyPath:  remoteCn.remoteTlsKeyPath  || undefined,
         oauthEnabled: !!remoteCn.remoteOauthEnabled,
-        oauthAdminPassword: remoteCn.remoteOauthAdminPassword || undefined,
+        oauthAdminPassword: effectiveAdminPassword || undefined,
         oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
         rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
         rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,

@@ -13,8 +13,11 @@
  *   POST /oauth/revoke                            — token revocation
  *
  * The "consent page" is a single minimal HTML form that asks the user to
- * paste the admin password (the same value as remoteBearerToken — the
- * intent is to prove physical presence, not to model a full user base).
+ * paste the admin password — a value distinct from remoteBearerToken,
+ * configured separately as remoteOauthAdminPassword. The intent is to
+ * prove physical presence, not to model a full user base. Do NOT reuse
+ * the bearer token here: a single shared secret across both auth modes
+ * means compromise of one path compromises both.
  *
  * Rate-limited through the shared TokenBucketLimiter (per client IP).
  */
@@ -242,7 +245,14 @@ export class OAuthHandlers {
       return { handled: true };
     }
     if (method !== "S256") { error(res, 400, "invalid_request", "PKCE S256 is required."); return { handled: true }; }
-    if (!codeChallenge || codeChallenge.length < 43) { error(res, 400, "invalid_request", "code_challenge missing or too short."); return { handled: true }; }
+    if (state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
+    // RFC 7636 §4.2: code_challenge is base64url(SHA256(verifier)), which is
+    // exactly 43 chars of URL-safe alphabet. Reject anything longer or with
+    // non-base64url characters.
+    if (!codeChallenge || !/^[A-Za-z0-9_\-.~]{43,128}$/.test(codeChallenge)) {
+      error(res, 400, "invalid_request", "code_challenge must be 43–128 chars of base64url alphabet.");
+      return { handled: true };
+    }
 
     const html = this.consentPage({
       clientId,
@@ -279,6 +289,7 @@ export class OAuthHandlers {
     if (!client) { error(res, 400, "invalid_client", "Unknown client_id."); return { handled: true }; }
     const redirectUri = body.redirect_uri ?? "";
     if (!client.redirect_uris.includes(redirectUri)) { error(res, 400, "invalid_redirect_uri"); return { handled: true }; }
+    if (body.state && body.state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
 
     const rec = this.store.issueAuthCode({
       clientId: client.client_id,
@@ -322,11 +333,24 @@ export class OAuthHandlers {
     const redirectUri = body.redirect_uri ?? "";
     const resource = body.resource || undefined;
 
+    // Validate verifier shape per RFC 7636 §4.1 before hashing — rejects
+    // 1-char verifiers and other malformed input that would otherwise
+    // produce a valid SHA256 against a precomputed challenge.
+    if (!/^[A-Za-z0-9_\-.~]{43,128}$/.test(verifier)) {
+      error(res, 400, "invalid_grant", "Invalid authorization code.");
+      return { handled: true };
+    }
     const auth = this.store.consumeAuthCode(code);
-    if (!auth) { error(res, 400, "invalid_grant", "Unknown or expired authorization code."); return { handled: true }; }
-    if (auth.clientId !== clientId) { error(res, 400, "invalid_grant", "client_id does not match the issued code."); return { handled: true }; }
-    if (auth.redirectUri !== redirectUri) { error(res, 400, "invalid_grant", "redirect_uri does not match the issued code."); return { handled: true }; }
-    if (!verifyPkceS256(verifier, auth.codeChallenge)) { error(res, 400, "invalid_grant", "PKCE verification failed."); return { handled: true }; }
+    // Collapse all code-validation failures into a single opaque error so an
+    // attacker can't distinguish "unknown code" from "wrong client" from
+    // "wrong redirect_uri" from "PKCE failed" via error-string enumeration.
+    if (!auth
+      || auth.clientId !== clientId
+      || auth.redirectUri !== redirectUri
+      || !verifyPkceS256(verifier, auth.codeChallenge)) {
+      error(res, 400, "invalid_grant", "Invalid authorization code.");
+      return { handled: true };
+    }
     // Resource Indicators (RFC 8707): if the request included `resource`, it
     // must match the one from authorize; if neither set one, we accept it.
     if (resource && auth.resource && resource !== auth.resource) {
@@ -338,6 +362,7 @@ export class OAuthHandlers {
       clientId: auth.clientId,
       scopes: auth.scopes,
       resource: auth.resource ?? resource,
+      issuedFromIp: clientIp(req),
     });
 
     json(res, 200, {
