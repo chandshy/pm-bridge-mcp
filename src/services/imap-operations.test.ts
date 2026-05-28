@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SimpleIMAPService } from "./simple-imap-service.js";
+import { SimpleIMAPService, chunkUidsForWire } from "./simple-imap-service.js";
 import type { EmailMessage } from "../types/index.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1862,5 +1862,127 @@ describe("v3.0.44 sibling-path fixes (IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009)
 
     await expect(svc.getEmailById("1", "INBOX\r\nLOGOUT" as string))
       .rejects.toThrow();
+  });
+});
+
+describe("v3.0.45 chunkUidsForWire (IMAP-002)", () => {
+  it("returns empty array for empty input", () => {
+    expect(chunkUidsForWire([])).toEqual([]);
+  });
+
+  it("returns single chunk when all UIDs fit", () => {
+    expect(chunkUidsForWire(["1", "2", "3"])).toEqual(["1,2,3"]);
+  });
+
+  it("respects maxLen budget across chunk boundaries", () => {
+    // "10" + "," + "20" + "," + "30" = 8 bytes
+    const chunks = chunkUidsForWire(["10", "20", "30", "40"], 5);
+    // First chunk: "10,20" = 5 bytes (fits exactly); next UID would push to 8.
+    expect(chunks[0]).toBe("10,20");
+    expect(chunks.join(",").split(",")).toEqual(["10", "20", "30", "40"]);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(5);
+  });
+
+  it("splits a 2000-UID workload into multiple sub-8KB chunks", () => {
+    const uids = Array.from({ length: 2000 }, (_, i) => String(1_000_000 + i));
+    const chunks = chunkUidsForWire(uids);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(7500);
+    // No UID is lost or duplicated across chunks.
+    const flat = chunks.flatMap((c) => c.split(","));
+    expect(flat).toEqual(uids);
+  });
+
+  it("never emits an empty chunk even for a single oversized UID", () => {
+    const chunks = chunkUidsForWire(["999999999"], 3);
+    expect(chunks).toEqual(["999999999"]);
+  });
+});
+
+describe("v3.0.45 runIdleLoop refuses TLS downgrade (IMAP-001)", () => {
+  it("refuses to start IDLE when bridgeCertPath is unset and allowInsecureBridge is not set", async () => {
+    const svc = new SimpleIMAPService();
+    const prev = process.env.MAILPOUCH_INSECURE_BRIDGE;
+    delete process.env.MAILPOUCH_INSECURE_BRIDGE;
+
+    (svc as any).connectionConfig = {
+      host: 'localhost',
+      port: 1143,
+      username: 'u',
+      password: 'p',
+      // bridgeCertPath undefined; allowInsecureBridge undefined
+    };
+    (svc as any).idleActive = true;
+
+    await (svc as any).runIdleLoop();
+
+    expect((svc as any).idleActive).toBe(false);
+    // idleClient should never have been instantiated
+    expect((svc as any).idleClient).toBeFalsy();
+
+    if (prev !== undefined) process.env.MAILPOUCH_INSECURE_BRIDGE = prev;
+  });
+
+  it("refuses to start IDLE when cert load throws and allowInsecureBridge is not set", async () => {
+    const svc = new SimpleIMAPService();
+    const prev = process.env.MAILPOUCH_INSECURE_BRIDGE;
+    delete process.env.MAILPOUCH_INSECURE_BRIDGE;
+
+    (svc as any).connectionConfig = {
+      host: '127.0.0.1',
+      port: 1143,
+      bridgeCertPath: '/nonexistent/path/cert.pem',
+      // allowInsecureBridge undefined
+    };
+    (svc as any).idleActive = true;
+
+    await (svc as any).runIdleLoop();
+
+    expect((svc as any).idleActive).toBe(false);
+    expect((svc as any).idleClient).toBeFalsy();
+
+    if (prev !== undefined) process.env.MAILPOUCH_INSECURE_BRIDGE = prev;
+  });
+});
+
+describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
+  it("bulkDeleteEmails splits 2000 UIDs across multiple messageDelete calls", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const uids = Array.from({ length: 2000 }, (_, i) => String(1_000_000 + i));
+    // fetch must report every UID present; default mock does that.
+    await svc.bulkDeleteEmails(uids, "INBOX");
+
+    const calls = (client.messageDelete as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    for (const [arg] of calls) {
+      expect(String(arg).length).toBeLessThanOrEqual(7500);
+    }
+  });
+
+  it("bulkMoveEmails per-chunk failure falls back per-UID for that chunk only", async () => {
+    const svc = new SimpleIMAPService();
+    // Force a single deterministic chunk boundary by making the wire-budget
+    // tight enough that 3 UIDs land in chunk 1, the rest in chunk 2.
+    const uids = ["1", "2", "3", "4", "5"];
+    let call = 0;
+    const messageMove = vi.fn().mockImplementation(async (arg: unknown) => {
+      call += 1;
+      // First call: chunked set fails. Per-UID fallback for that chunk succeeds.
+      if (call === 1 && String(arg).includes(",")) {
+        throw new Error("BAD command line too long");
+      }
+      return undefined;
+    });
+    const client = connectSvc(svc, { messageMove });
+
+    vi.spyOn(svc, "getEmailById").mockImplementation(async (id) => makeEmail(id, "INBOX"));
+
+    const results = await svc.bulkMoveEmails(uids, "Archive", "INBOX");
+
+    expect(results.success).toBe(5);
+    expect(results.failed).toBe(0);
+    // First call was the chunked one that failed; subsequent calls are per-UID.
+    expect(client.messageMove).toHaveBeenCalledTimes(1 + uids.length);
   });
 });

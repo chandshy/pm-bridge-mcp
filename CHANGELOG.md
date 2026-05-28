@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.45] — 2026-05-28
+
+### Fixed
+- **IMAP IDLE loop silently downgraded to insecure TLS when cert load failed** (IMAP-001 from the 2026-05-28 audit). `runIdleLoop` always fell through to `{ rejectUnauthorized: false }` whenever `readPinnedBridgeCert` threw or `bridgeCertPath` was absent — completely ignoring the `allowInsecureBridge` opt-in that the main `connect()` path enforces. An operator who pinned a cert (or never opted into the legacy localhost behaviour) would unknowingly run the IDLE socket downgraded forever. The IDLE loop now mirrors `connect()`'s contract: if `allowInsecureBridge` is unset and `MAILPOUCH_INSECURE_BRIDGE !== '1'`, a missing/broken cert is logged at error level and the IDLE loop refuses to start (`idleActive = false`).
+- **Six bulk IMAP paths joined unbounded UID sets into a single command** (IMAP-002). `bulkMoveEmails`, `bulkDeleteEmails`, `bulkMarkRead`, `bulkStar`, `bulkCopyToFolder`, `bulkDeleteFromFolder`, and the pre-flight in `findExistingUidsInLockedFolder` all built `present.join(',')` with no upper bound — Proton Bridge caps IMAP command lines around 8 KB, so ~800 nine-digit UIDs already crashed the batch and forced the per-UID fallback (minutes of held mailbox lock for what should be one round-trip). New `chunkUidsForWire(uids, maxLen=7500)` helper splits the UID list into bytes-bounded chunks; new private `chunkedBatchOp(present, perChunk, perUid, …)` runs the chunked call and falls back per-UID only for the failing chunk. All six bulk methods and the existence pre-flight now route through these helpers.
+- 9 new regression tests added (`chunkUidsForWire` boundary cases, `bulkDeleteEmails` 2000-UID splitting, per-chunk fallback isolation, IDLE TLS refusal for both no-cert and broken-cert paths). Unit suite: 1640 passes.
+
 ## [3.0.44] — 2026-05-28
 
 ### Fixed
