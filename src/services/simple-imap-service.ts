@@ -294,22 +294,20 @@ export class SimpleIMAPService {
    * the folder. UIDs not returned by the server are absent from the folder —
    * mutations against them would be silent no-ops, so callers should treat
    * them as failed rather than reporting false success.
+   *
+   * Throws on transport errors (network reset, BAD response, command-too-long).
+   * Bulk callers must distinguish "UID not in folder" from "I couldn't even
+   * check" — collapsing both into `failed` lies to the caller and recreates
+   * the v3.0.41 false-success pattern (IMAP-006 from the 2026-05-28 audit).
    */
   private async findExistingUidsInLockedFolder(uids: string[]): Promise<Set<string>> {
     const found = new Set<string>();
     if (!this.client || uids.length === 0) return found;
     const uidSet = uids.join(',');
-    try {
-      for await (const msg of this.client.fetch(uidSet, { uid: true }, { uid: true })) {
-        if (msg && typeof msg.uid === 'number') {
-          found.add(msg.uid.toString());
-        }
+    for await (const msg of this.client.fetch(uidSet, { uid: true }, { uid: true })) {
+      if (msg && typeof msg.uid === 'number') {
+        found.add(msg.uid.toString());
       }
-    } catch (e: unknown) {
-      logger.warn(
-        `UID existence check failed: ${e instanceof Error ? e.message : String(e)}`,
-        'IMAPService'
-      );
     }
     return found;
   }
@@ -826,6 +824,11 @@ export class SimpleIMAPService {
    */
   async getEmailById(emailId: string, folderHint?: string): Promise<EmailMessage | null> {
     this.validateEmailId(emailId);
+    // VALID-001 from the 2026-05-28 audit: callers (six tool handlers)
+    // forward args.folder raw via `as string | undefined`. Validate here so
+    // a CRLF/path-traversal/quote-injected folder name can't reach
+    // getMailboxLock.
+    if (folderHint !== undefined) this.validateFolderName(folderHint);
     const tags: SpanTags = { emailId };
     return tracer.span('imap.getEmailById', tags, async () => {
     logger.debug('Fetching email by ID', 'IMAPService', { emailId, folderHint });
@@ -1747,12 +1750,18 @@ export class SimpleIMAPService {
    * @param emailId Numeric UID string of the email
    * @param flag The IMAP flag to set/clear (e.g. '\\Answered', '$Forwarded')
    * @param set true to add the flag, false to remove it (default: true)
-   * @returns true on success, false/throws on failure
+   * @param sourceFolder Folder containing the UID. Strongly recommended
+   *   whenever the UID came from a folder other than INBOX — IMAP UIDs are
+   *   folder-scoped, and without this the all-folders scan can pick a
+   *   colliding UID in the wrong mailbox (IMAP-009 from the 2026-05-28 audit).
+   * @returns true on success. Throws if the UID does not exist in the
+   *   resolved source folder (IMAP-008 from the 2026-05-28 audit).
    */
-  async setFlag(emailId: string, flag: string, set: boolean = true): Promise<boolean> {
+  async setFlag(emailId: string, flag: string, set: boolean = true, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
-    return tracer.span('imap.setFlag', { emailId, flag, set }, async () => {
-    logger.debug('Setting flag on email', 'IMAPService', { emailId, flag, set });
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    return tracer.span('imap.setFlag', { emailId, flag, set, sourceFolder }, async () => {
+    logger.debug('Setting flag on email', 'IMAPService', { emailId, flag, set, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1760,23 +1769,26 @@ export class SimpleIMAPService {
     }
 
     try {
-      // Find folder from cache first, then scan
       let folder: string | undefined;
-      const cached = this.findCacheEntryByUid(emailId);
-      if (cached) {
-        folder = cached.folder;
+      if (sourceFolder) {
+        folder = sourceFolder;
       } else {
-        const folders = await this.getFolders();
-        for (const f of folders) {
-          const lock = await this.client.getMailboxLock(f.path);
-          try {
-            let found = false;
-            for await (const msg of this.client.fetch(emailId, { uid: true }, { uid: true })) {
-              if (msg.uid.toString() === emailId) { found = true; break; }
+        const cached = this.findCacheEntryByUid(emailId);
+        if (cached) {
+          folder = cached.folder;
+        } else {
+          const folders = await this.getFolders();
+          for (const f of folders) {
+            const lock = await this.client.getMailboxLock(f.path);
+            try {
+              let found = false;
+              for await (const msg of this.client.fetch(emailId, { uid: true }, { uid: true })) {
+                if (msg.uid.toString() === emailId) { found = true; break; }
+              }
+              if (found) { folder = f.path; break; }
+            } catch { /* not in this folder */ } finally {
+              lock.release();
             }
-            if (found) { folder = f.path; break; }
-          } catch { /* not in this folder */ } finally {
-            lock.release();
           }
         }
       }
@@ -1787,12 +1799,16 @@ export class SimpleIMAPService {
 
       const lock = await this.client.getMailboxLock(folder);
       try {
+        const existing = await this.findExistingUidsInLockedFolder([emailId]);
+        if (!existing.has(emailId)) {
+          throw new Error(`Email ${emailId} not found in folder ${folder}`);
+        }
         if (set) {
           await this.client.messageFlagsAdd(emailId, [flag], { uid: true });
         } else {
           await this.client.messageFlagsRemove(emailId, [flag], { uid: true });
         }
-        logger.info(`Flag ${flag} ${set ? 'set' : 'cleared'} on email ${emailId}`, 'IMAPService');
+        logger.info(`Flag ${flag} ${set ? 'set' : 'cleared'} on email ${emailId} in ${folder}`, 'IMAPService');
         return true;
       } finally {
         lock.release();
@@ -1877,7 +1893,21 @@ export class SimpleIMAPService {
     for (const [folder, ids] of emailsByFolder.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const existing = await this.findExistingUidsInLockedFolder(ids);
+        let existing: Set<string>;
+        try {
+          existing = await this.findExistingUidsInLockedFolder(ids);
+        } catch (e: unknown) {
+          // IMAP-006: transport error during pre-flight. Surface the real
+          // failure mode rather than collapsing into "UIDs not found" — the
+          // caller needs to distinguish "definitely absent" from "couldn't
+          // verify" so a retry is meaningful.
+          const msg = e instanceof Error ? e.message : String(e);
+          for (const id of ids) {
+            results.failed++;
+            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
+          }
+          continue;
+        }
         const present: string[] = [];
         for (const id of ids) {
           if (existing.has(id)) {
@@ -2037,7 +2067,21 @@ export class SimpleIMAPService {
     for (const [folder, ids] of emailsByFolder2.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const existing = await this.findExistingUidsInLockedFolder(ids);
+        let existing: Set<string>;
+        try {
+          existing = await this.findExistingUidsInLockedFolder(ids);
+        } catch (e: unknown) {
+          // IMAP-006: transport error during pre-flight. Surface the real
+          // failure mode rather than collapsing into "UIDs not found" — the
+          // caller needs to distinguish "definitely absent" from "couldn't
+          // verify" so a retry is meaningful.
+          const msg = e instanceof Error ? e.message : String(e);
+          for (const id of ids) {
+            results.failed++;
+            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
+          }
+          continue;
+        }
         const present: string[] = [];
         for (const id of ids) {
           if (existing.has(id)) {
@@ -2110,12 +2154,27 @@ export class SimpleIMAPService {
       }
       if (validIds.length > 0) grouped.set(sourceFolder, validIds);
     } else {
+      // No explicit sourceFolder — discover per UID. IMAP-003 from the
+      // 2026-05-28 audit: this used to fall back to 'INBOX' on cache miss,
+      // recreating the v3.0.41 false-success class. Now mirrors the
+      // bulkMoveEmails pattern: cache lookup, then full discovery via
+      // getEmailById, then explicit failure if still not found.
       for (const id of emailIds) {
         try {
           this.validateEmailId(id);
           const cached = this.findCacheEntryByUid(id);
-          const folder = cached?.folder ?? 'INBOX';
-          if (!cached) logger.warn(`bulkMarkRead: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
+          let folder: string;
+          if (cached) {
+            folder = cached.folder;
+          } else {
+            const discovered = await this.getEmailById(id);
+            if (!discovered) {
+              results.failed++;
+              results.errors.push(`Email ${id} not found in any folder`);
+              continue;
+            }
+            folder = discovered.folder;
+          }
           if (!grouped.has(folder)) grouped.set(folder, []);
           grouped.get(folder)!.push(id);
         } catch (e: unknown) {
@@ -2128,7 +2187,21 @@ export class SimpleIMAPService {
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const existing = await this.findExistingUidsInLockedFolder(ids);
+        let existing: Set<string>;
+        try {
+          existing = await this.findExistingUidsInLockedFolder(ids);
+        } catch (e: unknown) {
+          // IMAP-006: transport error during pre-flight. Surface the real
+          // failure mode rather than collapsing into "UIDs not found" — the
+          // caller needs to distinguish "definitely absent" from "couldn't
+          // verify" so a retry is meaningful.
+          const msg = e instanceof Error ? e.message : String(e);
+          for (const id of ids) {
+            results.failed++;
+            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
+          }
+          continue;
+        }
         const present: string[] = [];
         for (const id of ids) {
           if (existing.has(id)) {
@@ -2193,12 +2266,23 @@ export class SimpleIMAPService {
       }
       if (validIds.length > 0) grouped.set(sourceFolder, validIds);
     } else {
+      // No sourceFolder — discover per UID (IMAP-003 from 2026-05-28 audit).
       for (const id of emailIds) {
         try {
           this.validateEmailId(id);
           const cached = this.findCacheEntryByUid(id);
-          const folder = cached?.folder ?? 'INBOX';
-          if (!cached) logger.warn(`bulkStar: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
+          let folder: string;
+          if (cached) {
+            folder = cached.folder;
+          } else {
+            const discovered = await this.getEmailById(id);
+            if (!discovered) {
+              results.failed++;
+              results.errors.push(`Email ${id} not found in any folder`);
+              continue;
+            }
+            folder = discovered.folder;
+          }
           if (!grouped.has(folder)) grouped.set(folder, []);
           grouped.get(folder)!.push(id);
         } catch (e: unknown) {
@@ -2211,7 +2295,21 @@ export class SimpleIMAPService {
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const existing = await this.findExistingUidsInLockedFolder(ids);
+        let existing: Set<string>;
+        try {
+          existing = await this.findExistingUidsInLockedFolder(ids);
+        } catch (e: unknown) {
+          // IMAP-006: transport error during pre-flight. Surface the real
+          // failure mode rather than collapsing into "UIDs not found" — the
+          // caller needs to distinguish "definitely absent" from "couldn't
+          // verify" so a retry is meaningful.
+          const msg = e instanceof Error ? e.message : String(e);
+          for (const id of ids) {
+            results.failed++;
+            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
+          }
+          continue;
+        }
         const present: string[] = [];
         for (const id of ids) {
           if (existing.has(id)) {
@@ -2278,12 +2376,23 @@ export class SimpleIMAPService {
       }
       if (validIds.length > 0) grouped.set(sourceFolder, validIds);
     } else {
+      // No sourceFolder — discover per UID (IMAP-003 from 2026-05-28 audit).
       for (const id of emailIds) {
         try {
           this.validateEmailId(id);
           const cached = this.findCacheEntryByUid(id);
-          const folder = cached?.folder ?? 'INBOX';
-          if (!cached) logger.warn(`bulkCopyToFolder: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
+          let folder: string;
+          if (cached) {
+            folder = cached.folder;
+          } else {
+            const discovered = await this.getEmailById(id);
+            if (!discovered) {
+              results.failed++;
+              results.errors.push(`Email ${id} not found in any folder`);
+              continue;
+            }
+            folder = discovered.folder;
+          }
           if (!grouped.has(folder)) grouped.set(folder, []);
           grouped.get(folder)!.push(id);
         } catch (e: unknown) {
@@ -2296,7 +2405,21 @@ export class SimpleIMAPService {
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const existing = await this.findExistingUidsInLockedFolder(ids);
+        let existing: Set<string>;
+        try {
+          existing = await this.findExistingUidsInLockedFolder(ids);
+        } catch (e: unknown) {
+          // IMAP-006: transport error during pre-flight. Surface the real
+          // failure mode rather than collapsing into "UIDs not found" — the
+          // caller needs to distinguish "definitely absent" from "couldn't
+          // verify" so a retry is meaningful.
+          const msg = e instanceof Error ? e.message : String(e);
+          for (const id of ids) {
+            results.failed++;
+            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
+          }
+          continue;
+        }
         const present: string[] = [];
         for (const id of ids) {
           if (existing.has(id)) {
@@ -2358,7 +2481,20 @@ export class SimpleIMAPService {
 
     const lock = await this.client.getMailboxLock(folder);
     try {
-      const existing = await this.findExistingUidsInLockedFolder(validIds);
+      let existing: Set<string>;
+      try {
+        existing = await this.findExistingUidsInLockedFolder(validIds);
+      } catch (e: unknown) {
+        // IMAP-006: transport error during pre-flight. Don't lie that the
+        // UIDs are absent — bubble up so the caller knows the check failed.
+        const msg = e instanceof Error ? e.message : String(e);
+        for (const id of validIds) {
+          results.failed++;
+          results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
+        }
+        tags.successCount = results.success; tags.failCount = results.failed;
+        return results;
+      }
       const present: string[] = [];
       for (const id of validIds) {
         if (existing.has(id)) {

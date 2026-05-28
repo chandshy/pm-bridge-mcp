@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.44] — 2026-05-28
+
+### Fixed
+- **`bulkMarkRead` / `bulkStar` / `bulkCopyToFolder` defaulted to INBOX on cache miss** (IMAP-003 from the 2026-05-28 audit) — the three sibling bulk methods missed by the v3.0.41 fix. When `sourceFolder` was absent and the UID wasn't cached, they silently grouped the UID under `'INBOX'`, recreating the false-success class for these three operations. They now mirror the `bulkMoveEmails` pattern: cache lookup, then `getEmailById()` discovery, then explicit failure if still not found.
+- **`findExistingUidsInLockedFolder` silently lied about UID absence on transport errors** (IMAP-006). The pre-flight FETCH used to `catch (e) { logger.warn(...); return new Set(); }`, which collapsed network/BAD/command-too-long errors into "UIDs not found" — a flat-out misrepresentation. It now rethrows; every bulk caller wraps the call in its own catch that surfaces `UID X existence check failed in folder Y: <reason>` so callers can distinguish "definitely absent" from "couldn't verify."
+- **`setFlag` was missed by the v3.0.41 fix entirely** (IMAP-008, IMAP-009). Now (a) accepts an optional `sourceFolder` parameter, locking it directly and skipping the all-folders scan; (b) runs the same pre-flight `findExistingUidsInLockedFolder` UID check as every other mutator, so silent IMAP STORE no-ops on missing UIDs surface as honest errors.
+- **`getEmailById` accepted unvalidated `folderHint`** (VALID-001). Six reading/sending tool handlers (`get_email_by_id`, `get_thread`, `extract_action_items`, `extract_meeting`, `reply_to_email`, `forward_email`) forwarded `args.folder` raw via `as string | undefined`. The service now calls `validateFolderName(folderHint)` defensively, and the tool handlers route the arg through a new `optionalFolderHint()` helper in `src/utils/helpers.ts` that produces a clean `McpError(InvalidParams, …)` before the IMAP wire. Also closes the related VALID-009 sibling at the tool layer.
+- 9 new regression tests added in `src/services/imap-operations.test.ts` covering each bullet above. Unit suite: 1631 passes. E2E Greenmail (CI mode) green.
+
 ## [3.0.43] — 2026-05-28
 
 ### Fixed

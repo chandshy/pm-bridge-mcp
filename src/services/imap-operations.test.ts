@@ -386,7 +386,10 @@ describe("SimpleIMAPService.setFlag", () => {
       messageFlagsAdd: vi.fn().mockResolvedValue(undefined),
       messageFlagsRemove: vi.fn().mockResolvedValue(undefined),
       // fetch returns an async generator yielding a message with matching UID
-      fetch: vi.fn().mockReturnValue(asyncMessages([{ uid: 77 }])),
+      // mockImplementation (not mockReturnValue) so each fetch() call gets
+      // a fresh iterator — setFlag now calls fetch twice (folder scan +
+      // pre-flight UID existence check).
+      fetch: vi.fn().mockImplementation(() => asyncMessages([{ uid: 77 }])),
     };
     (svc as any).isConnected = true;
     (svc as any).client = client;
@@ -1728,5 +1731,136 @@ describe("UID existence pre-flight: missing UIDs count as failed, not silent suc
 
     await expect(svc.markEmailRead("999", true, "Folders/BulkTestMove"))
       .rejects.toThrow(/999 not found in folder Folders\/BulkTestMove/);
+  });
+});
+
+// ─── Batch 2 (v3.0.44): finish the v3.0.41 fix in sibling paths ──────────────
+
+describe("v3.0.44 sibling-path fixes (IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009)", () => {
+  // IMAP-003: bulkMarkRead/bulkStar/bulkCopyToFolder used to default to INBOX
+  // when sourceFolder absent and cache missed. Now discover folder via
+  // getEmailById, then explicit failure if still not found.
+
+  it("bulkMarkRead without sourceFolder discovers folder via getEmailById (not INBOX default)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    // Cache MISS — must call getEmailById to discover
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("42", "Folders/Work"));
+
+    const results = await svc.bulkMarkRead(["42"], true);
+
+    expect(results.success).toBe(1);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/Work");
+    expect(client.getMailboxLock).not.toHaveBeenCalledWith("INBOX");
+  });
+
+  it("bulkMarkRead reports failed when getEmailById returns null (instead of defaulting to INBOX)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc);
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(null);
+
+    const results = await svc.bulkMarkRead(["99"], true);
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(1);
+    expect(results.errors[0]).toMatch(/Email 99 not found in any folder/);
+  });
+
+  it("bulkStar without sourceFolder discovers folder via getEmailById", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("7", "Labels/Priority"));
+
+    const results = await svc.bulkStar(["7"], true);
+
+    expect(results.success).toBe(1);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Labels/Priority");
+  });
+
+  it("bulkCopyToFolder without sourceFolder discovers folder via getEmailById", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("12", "Folders/X"));
+
+    const results = await svc.bulkCopyToFolder(["12"], "Labels/Y");
+
+    expect(results.success).toBe(1);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/X");
+    expect(client.messageCopy).toHaveBeenCalledWith("12", "Labels/Y", { uid: true });
+  });
+
+  // IMAP-006: findExistingUidsInLockedFolder used to catch all errors and
+  // return empty Set → all UIDs reported as "not found" (silent corruption
+  // of success/failed counters). Now rethrows; bulk callers surface a
+  // distinct "existence check failed" message.
+
+  it("bulkMarkRead surfaces 'existence check failed' on transport error (IMAP-006)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc, {
+      fetch: vi.fn().mockImplementation(() => {
+        // First call: pre-flight UID FETCH throws
+        throw new Error("connection reset");
+      }),
+    });
+
+    const results = await svc.bulkMarkRead(["1", "2"], true, "INBOX");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(2);
+    for (const err of results.errors) {
+      expect(err).toMatch(/existence check failed/);
+      expect(err).toMatch(/connection reset/);
+    }
+  });
+
+  it("bulkDeleteFromFolder surfaces 'existence check failed' on transport error", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc, {
+      fetch: vi.fn().mockImplementation(() => { throw new Error("BAD command line too long"); }),
+    });
+
+    const results = await svc.bulkDeleteFromFolder(["10", "11"], "Labels/Foo");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(2);
+    expect(results.errors[0]).toMatch(/existence check failed.*BAD command line too long/);
+  });
+
+  // IMAP-008: setFlag now does pre-flight UID FETCH inside the lock.
+
+  it("setFlag throws when UID is not present in the resolved folder (IMAP-008)", async () => {
+    const svc = new SimpleIMAPService();
+    // Inline empty-fetch mock (fetchYielding from sister describe block isn't in scope here).
+    connectSvc(svc, {
+      fetch: vi.fn().mockImplementation(() => (async function* () { /* no UIDs */ })()),
+    });
+
+    await expect(svc.setFlag("999", "\\Answered", true, "Folders/Work"))
+      .rejects.toThrow(/999 not found in folder Folders\/Work/);
+  });
+
+  // IMAP-009: setFlag now accepts sourceFolder, locking it directly.
+
+  it("setFlag with sourceFolder locks the specified folder and skips the scan (IMAP-009)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const getEmailByIdSpy = vi.spyOn(svc, "getEmailById");
+
+    const result = await svc.setFlag("5", "\\Flagged", true, "Folders/Priority");
+
+    expect(result).toBe(true);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/Priority");
+    expect(getEmailByIdSpy).not.toHaveBeenCalled();
+    expect(client.messageFlagsAdd).toHaveBeenCalledWith("5", ["\\Flagged"], { uid: true });
+  });
+
+  // VALID-001: getEmailById rejects CRLF/control-char folder hints.
+
+  it("getEmailById rejects folderHint containing CRLF (VALID-001)", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc);
+
+    await expect(svc.getEmailById("1", "INBOX\r\nLOGOUT" as string))
+      .rejects.toThrow();
   });
 });
