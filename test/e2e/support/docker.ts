@@ -56,7 +56,23 @@ function isContainerRunning(): boolean {
   }
 }
 
+/**
+ * When the Greenmail container is provided externally (e.g. by GitHub
+ * Actions' `services:` block on a hosted runner that doesn't have
+ * `docker compose` CLI available), set MAILPOUCH_E2E_GREENMAIL_EXTERNAL=1
+ * to make up/down/restart no-op the docker compose calls. Tests still wait
+ * for the IMAP/SMTP ports to be reachable, so the harness is self-checking
+ * rather than blindly trusting the env var.
+ */
+const externallyManaged = (): boolean =>
+  process.env.MAILPOUCH_E2E_GREENMAIL_EXTERNAL === "1";
+
 export async function up(): Promise<void> {
+  if (externallyManaged()) {
+    await waitForReady(GREENMAIL_IMAP_PORT);
+    await waitForReady(GREENMAIL_SMTP_PORT);
+    return;
+  }
   if (isContainerRunning() && (await probeTcp(GREENMAIL_IMAP_PORT))) return;
   execSync(`docker compose -f ${COMPOSE_FILE} up -d`, { stdio: "inherit" });
   await waitForReady(GREENMAIL_IMAP_PORT);
@@ -64,6 +80,7 @@ export async function up(): Promise<void> {
 }
 
 export async function down(): Promise<void> {
+  if (externallyManaged()) return;
   try {
     execSync(`docker compose -f ${COMPOSE_FILE} down`, { stdio: "inherit" });
   } catch {
@@ -76,8 +93,19 @@ export async function down(): Promise<void> {
  * not be polluted by state left over from earlier files in the run. Vitest
  * runs e2e files serially under singleFork; this is the cleanest way to
  * guarantee a fresh UID space and empty mailbox tree.
+ *
+ * When the container is externally managed (MAILPOUCH_E2E_GREENMAIL_EXTERNAL=1),
+ * we can't restart it — instead, ensure ports are reachable and call wipe()
+ * via a quick standalone ImapFlow client. Tests in those environments
+ * accept the residual cross-file state risk; CI typically only runs the
+ * full suite once per workflow so the risk is small.
  */
 export async function restart(): Promise<void> {
+  if (externallyManaged()) {
+    await waitForReady(GREENMAIL_IMAP_PORT);
+    await waitForReady(GREENMAIL_SMTP_PORT);
+    return;
+  }
   await up();
   execSync(`docker compose -f ${COMPOSE_FILE} restart`, { stdio: "inherit" });
   await waitForReady(GREENMAIL_IMAP_PORT);

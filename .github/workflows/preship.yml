@@ -26,6 +26,11 @@ jobs:
       # Skip TLS pinning for the localhost Greenmail / Bridge connection,
       # matching the local E2E harness convention.
       MAILPOUCH_INSECURE_BRIDGE: "1"
+      # GitHub Actions provides Greenmail via the `services:` block below
+      # rather than via `docker compose`. test/e2e/support/docker.ts's
+      # up/down/restart no-op the compose calls when this is set; tests
+      # still wait for the IMAP/SMTP ports to be reachable.
+      MAILPOUCH_E2E_GREENMAIL_EXTERNAL: "1"
 
     services:
       greenmail:
