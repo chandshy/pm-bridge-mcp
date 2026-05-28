@@ -215,7 +215,9 @@ Proton Mail uses labels rather than IMAP folders for organisation. All label ope
 - `list_labels` — all labels in your account
 - `get_emails_by_label` — fetch emails with a given label
 - `move_to_label` / `bulk_move_to_label` — apply a label to one or many emails
-- `remove_label` / `bulk_remove_label` — remove a label
+- `remove_label` / `bulk_remove_label` — remove a label (note: pass the UID inside `Labels/{name}`, not the original INBOX UID — label folders have their own UID space)
+
+> **Cross-folder UIDs:** IMAP UIDs are folder-scoped. When mutating (move, mark-read, star, delete, label) a message that lives in a folder other than INBOX, pass `sourceFolder` (e.g. `Folders/Work` or `Labels/Foo`) so mailpouch locks the right mailbox. Without it, the cache may resolve the UID to the wrong folder and the operation can silently no-op.
 
 ### Folders
 

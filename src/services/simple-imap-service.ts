@@ -288,6 +288,32 @@ export class SimpleIMAPService {
     }
   }
 
+  /**
+   * Issue a UID FETCH within the currently locked folder and return the set of
+   * UIDs that actually exist there. Caller must already hold a mailbox lock on
+   * the folder. UIDs not returned by the server are absent from the folder —
+   * mutations against them would be silent no-ops, so callers should treat
+   * them as failed rather than reporting false success.
+   */
+  private async findExistingUidsInLockedFolder(uids: string[]): Promise<Set<string>> {
+    const found = new Set<string>();
+    if (!this.client || uids.length === 0) return found;
+    const uidSet = uids.join(',');
+    try {
+      for await (const msg of this.client.fetch(uidSet, { uid: true }, { uid: true })) {
+        if (msg && typeof msg.uid === 'number') {
+          found.add(msg.uid.toString());
+        }
+      }
+    } catch (e: unknown) {
+      logger.warn(
+        `UID existence check failed: ${e instanceof Error ? e.message : String(e)}`,
+        'IMAPService'
+      );
+    }
+    return found;
+  }
+
   /** Validate a folder name — reject empty, whitespace-only, overly long, or
    *  names with control characters.
    *
@@ -1436,12 +1462,17 @@ export class SimpleIMAPService {
    * Set the \Seen flag on an email.
    * @param emailId Numeric UID string of the email to update
    * @param isRead true to mark as read, false to mark as unread (default: true)
-   * @returns true on success, false if not connected or email not found
+   * @param sourceFolder When provided, operate directly on this folder. Skips
+   *   the cache lookup that can collide on cross-folder UIDs. Strongly
+   *   recommended whenever the UID came from a folder other than INBOX.
+   * @returns true on success, false if not connected. Throws if the UID does
+   *   not exist in the resolved folder.
    */
-  async markEmailRead(emailId: string, isRead: boolean = true): Promise<boolean> {
+  async markEmailRead(emailId: string, isRead: boolean = true, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
-    return tracer.span('imap.markEmailRead', { emailId, isRead }, async () => {
-    logger.debug('Marking email read status', 'IMAPService', { emailId, isRead });
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    return tracer.span('imap.markEmailRead', { emailId, isRead, sourceFolder }, async () => {
+    logger.debug('Marking email read status', 'IMAPService', { emailId, isRead, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1449,14 +1480,25 @@ export class SimpleIMAPService {
     }
 
     try {
-      const email = await this.getEmailById(emailId);
-      if (!email) {
-        throw new Error(`Email ${emailId} not found`);
+      let folder: string;
+      if (sourceFolder) {
+        folder = sourceFolder;
+      } else {
+        const email = await this.getEmailById(emailId);
+        if (!email) {
+          throw new Error(`Email ${emailId} not found`);
+        }
+        folder = email.folder;
       }
 
-      const lock = await this.client.getMailboxLock(email.folder);
+      const lock = await this.client.getMailboxLock(folder);
 
       try {
+        const existing = await this.findExistingUidsInLockedFolder([emailId]);
+        if (!existing.has(emailId)) {
+          throw new Error(`Email ${emailId} not found in folder ${folder}`);
+        }
+
         if (isRead) {
           await this.client.messageFlagsAdd(emailId, ['\\Seen'], { uid: true });
         } else {
@@ -1464,7 +1506,7 @@ export class SimpleIMAPService {
         }
 
         // Update cache
-        const cachedForRead = this.getCacheEntry(emailId, email.folder);
+        const cachedForRead = this.getCacheEntry(emailId, folder);
         if (cachedForRead) {
           cachedForRead.isRead = isRead;
         }
@@ -1485,12 +1527,16 @@ export class SimpleIMAPService {
    * Set the \Flagged (starred) flag on an email.
    * @param emailId Numeric UID string of the email to update
    * @param isStarred true to star, false to unstar (default: true)
-   * @returns true on success, false if not connected or email not found
+   * @param sourceFolder Folder containing the UID. See markEmailRead for why
+   *   passing this avoids cross-folder UID collisions.
+   * @returns true on success, false if not connected. Throws if the UID does
+   *   not exist in the resolved folder.
    */
-  async starEmail(emailId: string, isStarred: boolean = true): Promise<boolean> {
+  async starEmail(emailId: string, isStarred: boolean = true, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
-    return tracer.span('imap.starEmail', { emailId, isStarred }, async () => {
-    logger.debug('Starring email', 'IMAPService', { emailId, isStarred });
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    return tracer.span('imap.starEmail', { emailId, isStarred, sourceFolder }, async () => {
+    logger.debug('Starring email', 'IMAPService', { emailId, isStarred, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1498,22 +1544,32 @@ export class SimpleIMAPService {
     }
 
     try {
-      const email = await this.getEmailById(emailId);
-      if (!email) {
-        throw new Error(`Email ${emailId} not found`);
+      let folder: string;
+      if (sourceFolder) {
+        folder = sourceFolder;
+      } else {
+        const email = await this.getEmailById(emailId);
+        if (!email) {
+          throw new Error(`Email ${emailId} not found`);
+        }
+        folder = email.folder;
       }
 
-      const lock = await this.client.getMailboxLock(email.folder);
+      const lock = await this.client.getMailboxLock(folder);
 
       try {
+        const existing = await this.findExistingUidsInLockedFolder([emailId]);
+        if (!existing.has(emailId)) {
+          throw new Error(`Email ${emailId} not found in folder ${folder}`);
+        }
+
         if (isStarred) {
           await this.client.messageFlagsAdd(emailId, ['\\Flagged'], { uid: true });
         } else {
           await this.client.messageFlagsRemove(emailId, ['\\Flagged'], { uid: true });
         }
 
-        // Update cache
-        const cachedForStar = this.getCacheEntry(emailId, email.folder);
+        const cachedForStar = this.getCacheEntry(emailId, folder);
         if (cachedForStar) {
           cachedForStar.isStarred = isStarred;
         }
@@ -1534,13 +1590,18 @@ export class SimpleIMAPService {
    * Move an email to a different IMAP folder.
    * @param emailId Numeric UID string of the email to move
    * @param targetFolder Destination folder path (e.g. "Trash", "Folders/Work")
-   * @returns true on success, false if not connected or email not found
+   * @param sourceFolder Folder currently holding the UID. Strongly recommended
+   *   whenever the UID came from a folder other than INBOX — IMAP UIDs are
+   *   folder-scoped, so without this the wrong folder may be selected.
+   * @returns true on success, false if not connected. Throws if the UID does
+   *   not exist in the resolved source folder.
    */
-  async moveEmail(emailId: string, targetFolder: string): Promise<boolean> {
+  async moveEmail(emailId: string, targetFolder: string, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
     this.validateFolderName(targetFolder);
-    return tracer.span('imap.moveEmail', { emailId, targetFolder }, async () => {
-    logger.debug('Moving email', 'IMAPService', { emailId, targetFolder });
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    return tracer.span('imap.moveEmail', { emailId, targetFolder, sourceFolder }, async () => {
+    logger.debug('Moving email', 'IMAPService', { emailId, targetFolder, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1548,20 +1609,31 @@ export class SimpleIMAPService {
     }
 
     try {
-      const email = await this.getEmailById(emailId);
-      if (!email) {
-        throw new Error(`Email ${emailId} not found`);
+      let folder: string;
+      if (sourceFolder) {
+        folder = sourceFolder;
+      } else {
+        const email = await this.getEmailById(emailId);
+        if (!email) {
+          throw new Error(`Email ${emailId} not found`);
+        }
+        folder = email.folder;
       }
 
-      const lock = await this.client.getMailboxLock(email.folder);
+      const lock = await this.client.getMailboxLock(folder);
 
       try {
+        const existing = await this.findExistingUidsInLockedFolder([emailId]);
+        if (!existing.has(emailId)) {
+          throw new Error(`Email ${emailId} not found in folder ${folder}`);
+        }
+
         await this.client.messageMove(emailId, targetFolder, { uid: true });
 
         // Evict old cache entry — after MOVE the UID in the target folder may differ
-        this.evictCacheEntry(`${email.folder}:${emailId}`);
+        this.evictCacheEntry(`${folder}:${emailId}`);
 
-        logger.info(`Email ${emailId} moved to ${targetFolder}`, 'IMAPService');
+        logger.info(`Email ${emailId} moved from ${folder} to ${targetFolder}`, 'IMAPService');
         return true;
       } finally {
         lock.release();
@@ -1578,13 +1650,17 @@ export class SimpleIMAPService {
    * Use this for label operations in Proton Bridge's label model.
    * @param emailId Numeric UID string of the email to copy
    * @param targetFolder Destination folder path (e.g. "Labels/Work")
-   * @returns true on success, false if not connected or email not found
+   * @param sourceFolder Folder currently holding the UID. Strongly recommended
+   *   whenever the UID came from a folder other than INBOX.
+   * @returns true on success, false if not connected. Throws if the UID does
+   *   not exist in the resolved source folder.
    */
-  async copyEmailToFolder(emailId: string, targetFolder: string): Promise<boolean> {
+  async copyEmailToFolder(emailId: string, targetFolder: string, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
     this.validateFolderName(targetFolder);
-    return tracer.span('imap.copyEmailToFolder', { emailId, targetFolder }, async () => {
-    logger.debug('Copying email to folder', 'IMAPService', { emailId, targetFolder });
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    return tracer.span('imap.copyEmailToFolder', { emailId, targetFolder, sourceFolder }, async () => {
+    logger.debug('Copying email to folder', 'IMAPService', { emailId, targetFolder, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1592,16 +1668,27 @@ export class SimpleIMAPService {
     }
 
     try {
-      const email = await this.getEmailById(emailId);
-      if (!email) {
-        throw new Error(`Email ${emailId} not found`);
+      let folder: string;
+      if (sourceFolder) {
+        folder = sourceFolder;
+      } else {
+        const email = await this.getEmailById(emailId);
+        if (!email) {
+          throw new Error(`Email ${emailId} not found`);
+        }
+        folder = email.folder;
       }
 
-      const lock = await this.client.getMailboxLock(email.folder);
+      const lock = await this.client.getMailboxLock(folder);
 
       try {
+        const existing = await this.findExistingUidsInLockedFolder([emailId]);
+        if (!existing.has(emailId)) {
+          throw new Error(`Email ${emailId} not found in folder ${folder}`);
+        }
+
         await this.client.messageCopy(emailId, targetFolder, { uid: true });
-        logger.info(`Email ${emailId} copied to ${targetFolder}`, 'IMAPService');
+        logger.info(`Email ${emailId} copied from ${folder} to ${targetFolder}`, 'IMAPService');
         return true;
       } finally {
         lock.release();
@@ -1635,6 +1722,11 @@ export class SimpleIMAPService {
       const lock = await this.client.getMailboxLock(folder);
 
       try {
+        const existing = await this.findExistingUidsInLockedFolder([emailId]);
+        if (!existing.has(emailId)) {
+          throw new Error(`Email ${emailId} not found in folder ${folder}`);
+        }
+
         await this.client.messageDelete(emailId, { uid: true });
         // Remove from cache using folder-qualified key
         this.evictCacheEntry(`${folder}:${emailId}`);
@@ -1712,11 +1804,24 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.setFlag')
   }
 
-  async bulkMoveEmails(emailIds: string[], targetFolder: string): Promise<{ success: number; failed: number; errors: string[] }> {
+  /**
+   * Move many emails to `targetFolder` in one IMAP UID MOVE per source folder.
+   *
+   * @param sourceFolder When provided, all `emailIds` are assumed to live in
+   *   this folder; cache lookup is skipped. Strongly recommended whenever the
+   *   UIDs came from anything other than INBOX — IMAP UIDs are folder-scoped
+   *   and silent no-ops are otherwise possible.
+   *
+   * Before each batch IMAP MOVE the method does a UID FETCH inside the lock to
+   * determine which UIDs actually exist in the folder. UIDs that don't exist
+   * are reported in `results.failed` rather than silently counted as success.
+   */
+  async bulkMoveEmails(emailIds: string[], targetFolder: string, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
     this.validateFolderName(targetFolder);
-    const tags: SpanTags = { count: emailIds.length, targetFolder };
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    const tags: SpanTags = { count: emailIds.length, targetFolder, sourceFolder };
     return tracer.span('imap.bulkMoveEmails', tags, async () => {
-    logger.debug('Bulk moving emails', 'IMAPService', { count: emailIds.length, targetFolder });
+    logger.debug('Bulk moving emails', 'IMAPService', { count: emailIds.length, targetFolder, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1729,52 +1834,74 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    // Group emails by their source folder
     const emailsByFolder = new Map<string, string[]>();
 
-    for (const emailId of emailIds) {
-      try {
-        this.validateEmailId(emailId);
-        const cachedEmail = this.findCacheEntryByUid(emailId);
-        let folder: string;
-        if (cachedEmail) {
-          folder = cachedEmail.folder;
-        } else {
-          const discovered = await this.getEmailById(emailId);
-          if (!discovered) {
-            results.failed++;
-            results.errors.push(`Email ${emailId} not found in any folder`);
-            continue;
-          }
-          folder = discovered.folder;
+    if (sourceFolder) {
+      const validIds: string[] = [];
+      for (const emailId of emailIds) {
+        try {
+          this.validateEmailId(emailId);
+          validIds.push(emailId);
+        } catch (error: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
         }
-        if (!emailsByFolder.has(folder)) emailsByFolder.set(folder, []);
-        emailsByFolder.get(folder)!.push(emailId);
-      } catch (error: unknown) {
-        results.failed++;
-        results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (validIds.length > 0) emailsByFolder.set(sourceFolder, validIds);
+    } else {
+      for (const emailId of emailIds) {
+        try {
+          this.validateEmailId(emailId);
+          const cachedEmail = this.findCacheEntryByUid(emailId);
+          let folder: string;
+          if (cachedEmail) {
+            folder = cachedEmail.folder;
+          } else {
+            const discovered = await this.getEmailById(emailId);
+            if (!discovered) {
+              results.failed++;
+              results.errors.push(`Email ${emailId} not found in any folder`);
+              continue;
+            }
+            folder = discovered.folder;
+          }
+          if (!emailsByFolder.has(folder)) emailsByFolder.set(folder, []);
+          emailsByFolder.get(folder)!.push(emailId);
+        } catch (error: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
 
-    // For each group, open the folder lock once and batch-move all UIDs
-    for (const [sourceFolder, ids] of emailsByFolder.entries()) {
-      const lock = await this.client.getMailboxLock(sourceFolder);
+    for (const [folder, ids] of emailsByFolder.entries()) {
+      const lock = await this.client.getMailboxLock(folder);
       try {
-        const uidSet = ids.join(',');
+        const existing = await this.findExistingUidsInLockedFolder(ids);
+        const present: string[] = [];
+        for (const id of ids) {
+          if (existing.has(id)) {
+            present.push(id);
+          } else {
+            results.failed++;
+            results.errors.push(`UID ${id} not found in folder ${folder}`);
+          }
+        }
+        if (present.length === 0) continue;
+
+        const uidSet = present.join(',');
         try {
           await this.client.messageMove(uidSet, targetFolder, { uid: true });
-          // Evict old cache entries — after MOVE the UID in target folder may differ
-          for (const emailId of ids) {
-            this.evictCacheEntry(`${sourceFolder}:${emailId}`);
+          for (const emailId of present) {
+            this.evictCacheEntry(`${folder}:${emailId}`);
             results.success++;
           }
         } catch (batchError: unknown) {
-          // Batch failed — fall back to per-email
-          logger.warn(`Batch move failed for folder ${sourceFolder}, falling back to per-email`, 'IMAPService', batchError);
-          for (const emailId of ids) {
+          logger.warn(`Batch move failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchError);
+          for (const emailId of present) {
             try {
               await this.client.messageMove(emailId, targetFolder, { uid: true });
-              this.evictCacheEntry(`${sourceFolder}:${emailId}`);
+              this.evictCacheEntry(`${folder}:${emailId}`);
               results.success++;
             } catch (error: unknown) {
               results.failed++;
@@ -1795,10 +1922,11 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.bulkMoveEmails')
   }
 
-  async deleteEmail(emailId: string): Promise<boolean> {
+  async deleteEmail(emailId: string, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
-    return tracer.span('imap.deleteEmail', { emailId }, async () => {
-    logger.debug('Deleting email', 'IMAPService', { emailId });
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    return tracer.span('imap.deleteEmail', { emailId, sourceFolder }, async () => {
+    logger.debug('Deleting email', 'IMAPService', { emailId, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1806,20 +1934,30 @@ export class SimpleIMAPService {
     }
 
     try {
-      const email = await this.getEmailById(emailId);
-      if (!email) {
-        throw new Error(`Email ${emailId} not found`);
+      let folder: string;
+      if (sourceFolder) {
+        folder = sourceFolder;
+      } else {
+        const email = await this.getEmailById(emailId);
+        if (!email) {
+          throw new Error(`Email ${emailId} not found`);
+        }
+        folder = email.folder;
       }
 
-      const lock = await this.client.getMailboxLock(email.folder);
+      const lock = await this.client.getMailboxLock(folder);
 
       try {
+        const existing = await this.findExistingUidsInLockedFolder([emailId]);
+        if (!existing.has(emailId)) {
+          throw new Error(`Email ${emailId} not found in folder ${folder}`);
+        }
+
         await this.client.messageDelete(emailId, { uid: true });
 
-        // Remove from cache using folder-qualified key
-        this.evictCacheEntry(`${email.folder}:${emailId}`);
+        this.evictCacheEntry(`${folder}:${emailId}`);
 
-        logger.info(`Email ${emailId} deleted`, 'IMAPService');
+        logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
         return true;
       } finally {
         lock.release();
@@ -1831,10 +1969,19 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.deleteEmail')
   }
 
-  async bulkDeleteEmails(emailIds: string[]): Promise<{ success: number; failed: number; errors: string[] }> {
-    const tags: SpanTags = { count: emailIds.length };
+  /**
+   * Permanently delete many emails in one IMAP UID STORE+EXPUNGE per source folder.
+   *
+   * @param sourceFolder When provided, all UIDs are assumed to live in this
+   *   folder; cache lookup is skipped. Strongly recommended whenever the UIDs
+   *   came from anything other than INBOX. Pre-flight UID existence check
+   *   prevents silent no-ops from being counted as success.
+   */
+  async bulkDeleteEmails(emailIds: string[], sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    const tags: SpanTags = { count: emailIds.length, sourceFolder };
     return tracer.span('imap.bulkDeleteEmails', tags, async () => {
-    logger.debug('Bulk deleting emails', 'IMAPService', { count: emailIds.length });
+    logger.debug('Bulk deleting emails', 'IMAPService', { count: emailIds.length, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
@@ -1847,48 +1994,71 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    // Group emails by their folder — discover folder for any uncached IDs via IMAP
     const emailsByFolder2 = new Map<string, string[]>();
 
-    for (const emailId of emailIds) {
-      try {
-        this.validateEmailId(emailId);
-        const cachedEmail = this.findCacheEntryByUid(emailId);
-        let folder: string;
-        if (cachedEmail) {
-          folder = cachedEmail.folder;
-        } else {
-          const discovered = await this.getEmailById(emailId);
-          if (!discovered) {
-            results.failed++;
-            results.errors.push(`Email ${emailId} not found in any folder`);
-            continue;
-          }
-          folder = discovered.folder;
+    if (sourceFolder) {
+      const validIds: string[] = [];
+      for (const emailId of emailIds) {
+        try {
+          this.validateEmailId(emailId);
+          validIds.push(emailId);
+        } catch (error: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
         }
-        if (!emailsByFolder2.has(folder)) emailsByFolder2.set(folder, []);
-        emailsByFolder2.get(folder)!.push(emailId);
-      } catch (error: unknown) {
-        results.failed++;
-        results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (validIds.length > 0) emailsByFolder2.set(sourceFolder, validIds);
+    } else {
+      for (const emailId of emailIds) {
+        try {
+          this.validateEmailId(emailId);
+          const cachedEmail = this.findCacheEntryByUid(emailId);
+          let folder: string;
+          if (cachedEmail) {
+            folder = cachedEmail.folder;
+          } else {
+            const discovered = await this.getEmailById(emailId);
+            if (!discovered) {
+              results.failed++;
+              results.errors.push(`Email ${emailId} not found in any folder`);
+              continue;
+            }
+            folder = discovered.folder;
+          }
+          if (!emailsByFolder2.has(folder)) emailsByFolder2.set(folder, []);
+          emailsByFolder2.get(folder)!.push(emailId);
+        } catch (error: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
 
-    // For each group, open the folder lock once and batch-delete all UIDs
     for (const [folder, ids] of emailsByFolder2.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const uidSet = ids.join(',');
+        const existing = await this.findExistingUidsInLockedFolder(ids);
+        const present: string[] = [];
+        for (const id of ids) {
+          if (existing.has(id)) {
+            present.push(id);
+          } else {
+            results.failed++;
+            results.errors.push(`UID ${id} not found in folder ${folder}`);
+          }
+        }
+        if (present.length === 0) continue;
+
+        const uidSet = present.join(',');
         try {
           await this.client.messageDelete(uidSet, { uid: true });
-          for (const emailId of ids) {
+          for (const emailId of present) {
             this.evictCacheEntry(`${folder}:${emailId}`);
             results.success++;
           }
         } catch (batchError: unknown) {
-          // Batch failed — fall back to per-email
           logger.warn(`Batch delete failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchError);
-          for (const emailId of ids) {
+          for (const emailId of present) {
             try {
               await this.client.messageDelete(emailId, { uid: true });
               this.evictCacheEntry(`${folder}:${emailId}`);
@@ -1918,42 +2088,69 @@ export class SimpleIMAPService {
    * group by cached folder, lock once, batch flag-set, fall back to per-UID
    * on a batch error.
    */
-  async bulkMarkRead(emailIds: string[], isRead: boolean = true): Promise<{ success: number; failed: number; errors: string[] }> {
-    const tags: SpanTags = { count: emailIds.length, isRead };
+  async bulkMarkRead(emailIds: string[], isRead: boolean = true, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    const tags: SpanTags = { count: emailIds.length, isRead, sourceFolder };
     return tracer.span('imap.bulkMarkRead', tags, async () => {
-    logger.debug('Bulk marking read status', 'IMAPService', { count: emailIds.length, isRead });
+    logger.debug('Bulk marking read status', 'IMAPService', { count: emailIds.length, isRead, sourceFolder });
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
     const grouped = new Map<string, string[]>();
-    for (const id of emailIds) {
-      try {
-        this.validateEmailId(id);
-        const cached = this.findCacheEntryByUid(id);
-        const folder = cached?.folder ?? 'INBOX';
-        if (!cached) logger.warn(`bulkMarkRead: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
-        if (!grouped.has(folder)) grouped.set(folder, []);
-        grouped.get(folder)!.push(id);
-      } catch (e: unknown) {
-        results.failed++;
-        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+    if (sourceFolder) {
+      const validIds: string[] = [];
+      for (const id of emailIds) {
+        try {
+          this.validateEmailId(id);
+          validIds.push(id);
+        } catch (e: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
+    } else {
+      for (const id of emailIds) {
+        try {
+          this.validateEmailId(id);
+          const cached = this.findCacheEntryByUid(id);
+          const folder = cached?.folder ?? 'INBOX';
+          if (!cached) logger.warn(`bulkMarkRead: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
+          if (!grouped.has(folder)) grouped.set(folder, []);
+          grouped.get(folder)!.push(id);
+        } catch (e: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
 
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const uidSet = ids.join(',');
+        const existing = await this.findExistingUidsInLockedFolder(ids);
+        const present: string[] = [];
+        for (const id of ids) {
+          if (existing.has(id)) {
+            present.push(id);
+          } else {
+            results.failed++;
+            results.errors.push(`UID ${id} not found in folder ${folder}`);
+          }
+        }
+        if (present.length === 0) continue;
+
+        const uidSet = present.join(',');
         try {
           if (isRead) await this.client.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true });
           else        await this.client.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true });
-          for (const id of ids) {
+          for (const id of present) {
             const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
             results.success++;
           }
         } catch (batchErr: unknown) {
           logger.warn(`Batch mark-read failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchErr);
-          for (const id of ids) {
+          for (const id of present) {
             try {
               if (isRead) await this.client.messageFlagsAdd(id, ['\\Seen'], { uid: true });
               else        await this.client.messageFlagsRemove(id, ['\\Seen'], { uid: true });
@@ -1974,42 +2171,69 @@ export class SimpleIMAPService {
   }
 
   /** Bulk-toggle the \Flagged (starred) flag on many emails. Same shape as bulkMarkRead. */
-  async bulkStar(emailIds: string[], isStarred: boolean = true): Promise<{ success: number; failed: number; errors: string[] }> {
-    const tags: SpanTags = { count: emailIds.length, isStarred };
+  async bulkStar(emailIds: string[], isStarred: boolean = true, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    const tags: SpanTags = { count: emailIds.length, isStarred, sourceFolder };
     return tracer.span('imap.bulkStar', tags, async () => {
-    logger.debug('Bulk starring', 'IMAPService', { count: emailIds.length, isStarred });
+    logger.debug('Bulk starring', 'IMAPService', { count: emailIds.length, isStarred, sourceFolder });
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
     const grouped = new Map<string, string[]>();
-    for (const id of emailIds) {
-      try {
-        this.validateEmailId(id);
-        const cached = this.findCacheEntryByUid(id);
-        const folder = cached?.folder ?? 'INBOX';
-        if (!cached) logger.warn(`bulkStar: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
-        if (!grouped.has(folder)) grouped.set(folder, []);
-        grouped.get(folder)!.push(id);
-      } catch (e: unknown) {
-        results.failed++;
-        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+    if (sourceFolder) {
+      const validIds: string[] = [];
+      for (const id of emailIds) {
+        try {
+          this.validateEmailId(id);
+          validIds.push(id);
+        } catch (e: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
+    } else {
+      for (const id of emailIds) {
+        try {
+          this.validateEmailId(id);
+          const cached = this.findCacheEntryByUid(id);
+          const folder = cached?.folder ?? 'INBOX';
+          if (!cached) logger.warn(`bulkStar: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
+          if (!grouped.has(folder)) grouped.set(folder, []);
+          grouped.get(folder)!.push(id);
+        } catch (e: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
 
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const uidSet = ids.join(',');
+        const existing = await this.findExistingUidsInLockedFolder(ids);
+        const present: string[] = [];
+        for (const id of ids) {
+          if (existing.has(id)) {
+            present.push(id);
+          } else {
+            results.failed++;
+            results.errors.push(`UID ${id} not found in folder ${folder}`);
+          }
+        }
+        if (present.length === 0) continue;
+
+        const uidSet = present.join(',');
         try {
           if (isStarred) await this.client.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true });
           else           await this.client.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true });
-          for (const id of ids) {
+          for (const id of present) {
             const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
             results.success++;
           }
         } catch (batchErr: unknown) {
           logger.warn(`Batch star failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchErr);
-          for (const id of ids) {
+          for (const id of present) {
             try {
               if (isStarred) await this.client.messageFlagsAdd(id, ['\\Flagged'], { uid: true });
               else           await this.client.messageFlagsRemove(id, ['\\Flagged'], { uid: true });
@@ -2031,39 +2255,66 @@ export class SimpleIMAPService {
 
   /** Copy many emails into `targetFolder` in a single IMAP UID COPY per source folder.
    *  Used by bulk_move_to_label (the target is the Labels/<name> pseudo-folder). */
-  async bulkCopyToFolder(emailIds: string[], targetFolder: string): Promise<{ success: number; failed: number; errors: string[] }> {
+  async bulkCopyToFolder(emailIds: string[], targetFolder: string, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
     this.validateFolderName(targetFolder);
-    const tags: SpanTags = { count: emailIds.length, targetFolder };
+    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
+    const tags: SpanTags = { count: emailIds.length, targetFolder, sourceFolder };
     return tracer.span('imap.bulkCopyToFolder', tags, async () => {
-    logger.debug('Bulk copy to folder', 'IMAPService', { count: emailIds.length, targetFolder });
+    logger.debug('Bulk copy to folder', 'IMAPService', { count: emailIds.length, targetFolder, sourceFolder });
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
     const grouped = new Map<string, string[]>();
-    for (const id of emailIds) {
-      try {
-        this.validateEmailId(id);
-        const cached = this.findCacheEntryByUid(id);
-        const folder = cached?.folder ?? 'INBOX';
-        if (!cached) logger.warn(`bulkCopyToFolder: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
-        if (!grouped.has(folder)) grouped.set(folder, []);
-        grouped.get(folder)!.push(id);
-      } catch (e: unknown) {
-        results.failed++;
-        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+    if (sourceFolder) {
+      const validIds: string[] = [];
+      for (const id of emailIds) {
+        try {
+          this.validateEmailId(id);
+          validIds.push(id);
+        } catch (e: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
+    } else {
+      for (const id of emailIds) {
+        try {
+          this.validateEmailId(id);
+          const cached = this.findCacheEntryByUid(id);
+          const folder = cached?.folder ?? 'INBOX';
+          if (!cached) logger.warn(`bulkCopyToFolder: UID ${id} not in cache, assuming INBOX`, 'IMAPService');
+          if (!grouped.has(folder)) grouped.set(folder, []);
+          grouped.get(folder)!.push(id);
+        } catch (e: unknown) {
+          results.failed++;
+          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
 
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const uidSet = ids.join(',');
+        const existing = await this.findExistingUidsInLockedFolder(ids);
+        const present: string[] = [];
+        for (const id of ids) {
+          if (existing.has(id)) {
+            present.push(id);
+          } else {
+            results.failed++;
+            results.errors.push(`UID ${id} not found in folder ${folder}`);
+          }
+        }
+        if (present.length === 0) continue;
+
+        const uidSet = present.join(',');
         try {
           await this.client.messageCopy(uidSet, targetFolder, { uid: true });
-          results.success += ids.length;
+          results.success += present.length;
         } catch (batchErr: unknown) {
           logger.warn(`Batch copy failed from ${folder}→${targetFolder}, falling back to per-email`, 'IMAPService', batchErr);
-          for (const id of ids) {
+          for (const id of present) {
             try {
               await this.client.messageCopy(id, targetFolder, { uid: true });
               results.success++;
@@ -2107,20 +2358,34 @@ export class SimpleIMAPService {
 
     const lock = await this.client.getMailboxLock(folder);
     try {
-      const uidSet = validIds.join(',');
-      try {
-        await this.client.messageDelete(uidSet, { uid: true });
-        for (const id of validIds) { this.evictCacheEntry(`${folder}:${id}`); results.success++; }
-      } catch (batchErr: unknown) {
-        logger.warn(`Batch delete-from-folder failed for ${folder}, falling back to per-email`, 'IMAPService', batchErr);
-        for (const id of validIds) {
-          try {
-            await this.client.messageDelete(id, { uid: true });
-            this.evictCacheEntry(`${folder}:${id}`);
-            results.success++;
-          } catch (e: unknown) {
-            results.failed++;
-            results.errors.push(`Failed to delete ${id} from ${folder}: ${e instanceof Error ? e.message : String(e)}`);
+      const existing = await this.findExistingUidsInLockedFolder(validIds);
+      const present: string[] = [];
+      for (const id of validIds) {
+        if (existing.has(id)) {
+          present.push(id);
+        } else {
+          results.failed++;
+          results.errors.push(`UID ${id} not found in folder ${folder}`);
+        }
+      }
+      if (present.length === 0) {
+        // nothing to do — fall through to logging/return
+      } else {
+        const uidSet = present.join(',');
+        try {
+          await this.client.messageDelete(uidSet, { uid: true });
+          for (const id of present) { this.evictCacheEntry(`${folder}:${id}`); results.success++; }
+        } catch (batchErr: unknown) {
+          logger.warn(`Batch delete-from-folder failed for ${folder}, falling back to per-email`, 'IMAPService', batchErr);
+          for (const id of present) {
+            try {
+              await this.client.messageDelete(id, { uid: true });
+              this.evictCacheEntry(`${folder}:${id}`);
+              results.success++;
+            } catch (e: unknown) {
+              results.failed++;
+              results.errors.push(`Failed to delete ${id} from ${folder}: ${e instanceof Error ? e.message : String(e)}`);
+            }
           }
         }
       }

@@ -40,3 +40,13 @@ coverage/
 temp/
 tmp/
 *.tmp
+
+# E2E test harness
+test/e2e/.tmp/
+.mailpouch-e2e-*.json
+.mailpouch.bridge-test.json
+
+# Preship gate artifacts
+mailpouch-*.tgz
+/tmp/preship-pack-*
+/tmp/preship-smoke-*

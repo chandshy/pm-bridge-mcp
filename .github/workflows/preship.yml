@@ -1,0 +1,101 @@
+name: preship
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# Minimum permissions — this workflow only checks out code and runs tests.
+# It does not write to issues, PRs, comments, or releases.
+permissions:
+  contents: read
+
+# Run only the most recent workflow for a given branch/PR.
+concurrency:
+  group: preship-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preship:
+    name: ship-readiness gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Proton Bridge is a desktop app and can't run on hosted runners. The
+      # bridge step in preship.mjs short-circuits cleanly when this env var
+      # is set. Developer machines that run `npm run preship` locally do NOT
+      # set this — Bridge is hard-required there.
+      PRESHIP_NO_BRIDGE: "1"
+      # Skip TLS pinning for the localhost Greenmail / Bridge connection,
+      # matching the local E2E harness convention.
+      MAILPOUCH_INSECURE_BRIDGE: "1"
+      # GitHub Actions provides Greenmail via the `services:` block below
+      # rather than via `docker compose`. test/e2e/support/docker.ts's
+      # up/down/restart no-op the compose calls when this is set; tests
+      # still wait for the IMAP/SMTP ports to be reachable.
+      MAILPOUCH_E2E_GREENMAIL_EXTERNAL: "1"
+
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.4
+        ports:
+          - 3025:3025
+          - 3143:3143
+        env:
+          GREENMAIL_OPTS: >-
+            -Dgreenmail.setup.test.smtp
+            -Dgreenmail.setup.test.imap
+            -Dgreenmail.hostname=0.0.0.0
+            -Dgreenmail.users=alice:test-password@test.local,bob:test-password@test.local
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for Greenmail IMAP
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/3143) 2>/dev/null; then
+              echo "Greenmail IMAP ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "Greenmail IMAP did not become ready"; exit 1
+
+      # Run preship in three explicit segments instead of `npm run preship`:
+      #   1. preship:fast covers typecheck/lint/version-sync/secrets/audit/
+      #      licenses/build/unit (< 30 s).
+      #   2. check:tarball does the install-from-tarball smoke.
+      #   3. test:e2e:local:keep runs the Greenmail E2E suite against the
+      #      service-container Greenmail that `services:` already provides
+      #      (the `:keep` variant skips the docker compose up/down that
+      #      `test:e2e:local` does locally — we don't have docker compose
+      #      available on hosted runners, only the service container).
+      # Bridge E2E is intentionally skipped — Proton Bridge is a desktop app
+      # and can't run on hosted runners. See docs/preship.md.
+      - name: preship:fast
+        run: npm run preship:fast
+      - name: check:tarball
+        run: npm run check:tarball
+      - name: e2e:greenmail (service-container Greenmail)
+        run: npm run test:e2e:local:keep
+
+      - name: Upload preship log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preship-log
+          path: |
+            test/e2e/.tmp/
+            *.log
+          if-no-files-found: ignore
+          retention-days: 7

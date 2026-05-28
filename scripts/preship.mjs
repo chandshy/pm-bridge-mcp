@@ -1,0 +1,120 @@
+#!/usr/bin/env node
+// Ship-readiness gate orchestrator.
+//
+// Usage:
+//   node scripts/preship.mjs           # full preship (preship:fast + heavy)
+//   node scripts/preship.mjs fast      # fast subset for pre-push hook
+//   node scripts/preship.mjs release   # preship + tag-release checks
+//
+// Env knobs:
+//   PRESHIP_NO_BRIDGE=1   — skip the e2e:bridge step (CI sets this; locally do
+//                           NOT set it — Bridge tests are required for ship).
+//   PRESHIP_VERBOSE=1     — print step output even on success.
+
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { runSteps, spawnNpmRun, spawnStep } from "./lib/preship-runner.mjs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = dirname(__dirname);
+const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf-8"));
+
+const level = process.argv[2] ?? "full";
+if (!["fast", "full", "release"].includes(level)) {
+  console.error(`Unknown preship level: ${level}. Use fast|full|release.`);
+  process.exit(2);
+}
+
+// ─── Step definitions ────────────────────────────────────────────────────────
+
+const STEP_NODE = (name, script, opts = {}) => ({
+  name,
+  mode: "hard",
+  run: () => spawnStep("node", [join("scripts", script)], opts),
+  ...opts,
+});
+
+const STEP_NPM = (name, scriptName, opts = {}) => ({
+  name,
+  mode: "hard",
+  run: () => spawnNpmRun(scriptName, opts),
+  ...opts,
+});
+
+const fastSteps = [
+  STEP_NPM("typecheck", "typecheck"),
+  // lint is currently identical to typecheck; keep as a no-op slot until a real
+  // linter is wired so the table stays stable across the configurations.
+  {
+    name: "lint",
+    mode: "hard",
+    run: async () => ({ ok: true, summary: "alias of typecheck" }),
+  },
+  STEP_NODE("version-sync", "check-version-sync.mjs"),
+  STEP_NODE("secrets", "check-secrets.mjs"),
+  // npm-audit downgrades MODERATE/LOW into advisory inside the script.
+  { ...STEP_NODE("npm-audit", "check-npm-audit.mjs"), mode: "advisory" },
+  STEP_NODE("license-inv", "check-licenses.mjs"),
+  STEP_NPM("build", "build"),
+  STEP_NPM("unit", "test"),
+];
+
+const heavySteps = [
+  STEP_NODE("tarball-smoke", "smoke-tarball.mjs"),
+  STEP_NPM("e2e:greenmail", "test:e2e:local"),
+  {
+    name: "e2e:bridge",
+    mode: "hard",
+    run: async () => {
+      if (process.env.PRESHIP_NO_BRIDGE === "1") {
+        return { ok: true, summary: "SKIPPED — PRESHIP_NO_BRIDGE=1" };
+      }
+      if (!process.env.MAILPOUCH_E2E_BRIDGE_CONFIG) {
+        return {
+          ok: false,
+          summary: "MAILPOUCH_E2E_BRIDGE_CONFIG not set",
+          output:
+            "The Bridge E2E suite is required for ship. Set MAILPOUCH_E2E_BRIDGE_CONFIG=<path-to-bridge-config.json> and re-run preship, or set PRESHIP_NO_BRIDGE=1 to opt out (CI does this; locally you should not).",
+        };
+      }
+      return spawnNpmRun("test:e2e:bridge");
+    },
+  },
+];
+
+const releaseSteps = [
+  STEP_NPM("build:clean", "build:clean"),
+  STEP_NODE("changelog-has-entry", "check-version-sync.mjs", { env: { CHECK_CHANGELOG_BODY: "1" } }),
+  {
+    name: "git-tag-free",
+    mode: "hard",
+    run: () =>
+      spawnStep("git", ["rev-parse", "--verify", `v${pkg.version}`], {
+        successWhen: ({ code }) => code !== 0,
+        summary: `v${pkg.version}`,
+      }),
+  },
+  {
+    name: "npm-version-free",
+    mode: "advisory",
+    run: () =>
+      spawnStep("npm", ["view", `${pkg.name}@${pkg.version}`, "version"], {
+        successWhen: ({ code, output }) => code !== 0 || !output.trim(),
+        summary: `${pkg.name}@${pkg.version}`,
+      }),
+  },
+];
+
+const stepsByLevel = {
+  fast: fastSteps,
+  full: [...fastSteps, ...heavySteps],
+  release: [...fastSteps, ...heavySteps, ...releaseSteps],
+};
+
+const header = `PRESHIP — ${pkg.name} ${pkg.version} (${level})`;
+const { ok } = await runSteps(stepsByLevel[level], {
+  header,
+  verbose: process.env.PRESHIP_VERBOSE === "1",
+});
+process.exit(ok ? 0 : 1);
