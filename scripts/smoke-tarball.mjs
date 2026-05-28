@@ -87,7 +87,39 @@ try {
     console.error(`mailpouch --version output did not contain ${PKG_VERSION}: got "${out}"`);
     process.exit(1);
   }
-  console.log(`tarball-smoke OK: ${tgzName} → ${out}`);
+
+  // 4. Verify packed files include the native-tray JS shim (BUILD-006). The
+  //    --version path short-circuits before tray load, so we can't rely on
+  //    "it booted" to prove the tray shim shipped. Probe the tar listing
+  //    directly: the published tarball must contain native/tray/index.js.
+  //    Failure paths here `throw` so the existing catch/finally chain runs
+  //    the staging/install cleanup (the older `process.exit(1)` paths
+  //    above remain as-is — BUILD-007 cleanup is tracked in a later batch).
+  const tgzListRes = spawnSync("tar", ["-tzf", join(stagingDir, tgzName)], {
+    encoding: "utf-8",
+    timeout: 15_000,
+  });
+  if (tgzListRes.status !== 0) {
+    throw new Error(
+      `tar -tzf <tarball> failed (exit ${tgzListRes.status}): ${tgzListRes.stderr || tgzListRes.stdout}`
+    );
+  }
+  const REQUIRED_PACKED_FILES = [
+    "package/native/tray/index.js",
+    "package/native/tray/index.d.ts",
+    "package/dist/index.js",
+    "package/dist/settings-main.js",
+    "package/dist/utils/tray.js",
+  ];
+  const packedFiles = new Set(tgzListRes.stdout.split("\n").map((s) => s.trim()));
+  const missing = REQUIRED_PACKED_FILES.filter((p) => !packedFiles.has(p));
+  if (missing.length > 0) {
+    throw new Error(
+      `tarball-smoke FAILED: required files missing from tarball: ${missing.join(", ")}`
+    );
+  }
+
+  console.log(`tarball-smoke OK: ${tgzName} → ${out} (${REQUIRED_PACKED_FILES.length} required files present)`);
 } catch (e) {
   console.error(`tarball-smoke threw: ${e.message}`);
   exitCode = 1;

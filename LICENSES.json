@@ -1,12 +1,7 @@
 {
   "generatedAt": "2026-05-28",
-  "rootPackage": "mailpouch@3.0.42",
+  "rootPackage": "mailpouch@3.0.43",
   "deps": [
-    {
-      "name": "@cfworker/json-schema",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
     {
       "name": "@hono/node-server",
       "version": "1.19.14",
@@ -23,41 +18,6 @@
       "license": "MIT"
     },
     {
-      "name": "@napi-rs/keyring-darwin-arm64",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-darwin-x64",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-freebsd-x64",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-linux-arm-gnueabihf",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-linux-arm64-gnu",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-linux-arm64-musl",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-linux-riscv64-gnu",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
       "name": "@napi-rs/keyring-linux-x64-gnu",
       "version": "1.3.0",
       "license": "MIT"
@@ -66,21 +26,6 @@
       "name": "@napi-rs/keyring-linux-x64-musl",
       "version": "1.3.0",
       "license": "MIT"
-    },
-    {
-      "name": "@napi-rs/keyring-win32-arm64-msvc",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-win32-ia32-msvc",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
-    },
-    {
-      "name": "@napi-rs/keyring-win32-x64-msvc",
-      "version": "(unknown)",
-      "license": "UNKNOWN"
     },
     {
       "name": "@pinojs/redact",

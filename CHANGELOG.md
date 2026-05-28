@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.43] — 2026-05-28
+
+### Fixed
+- **preship gate's `npm-audit` step was advisory, not hard** (DOCS-009 from the 2026-05-28 audit). `docs/preship.md` advertised HIGH/CRITICAL CVE findings as ship-blocking — and the v3.0.42 CHANGELOG said the same — but `scripts/preship.mjs` wrapped the step with `mode: "advisory"`, so the gate exited 0 even when `check-npm-audit.mjs` returned 1. Step is now `mode: "hard"` with `successWhen: code === 0 || code === 2` so MODERATE/LOW (exit 2) print as warnings without blocking and HIGH/CRITICAL (exit 1) block the gate as documented.
+- **`PRESHIP_SKIP=1` bypass was documented but unimplemented** (BUILD-014). The merge-pr skill's Step 2 references it; `docs/preship.md`'s "Bypassing the gate" table promised it. Now implemented at the top of `scripts/preship.mjs` — short-circuits with a loud `BYPASS: PRESHIP_SKIP=1` line to stderr so the bypass leaves an audit trail.
+- **`npm-version-free` advisory inverted on network failure** (BUILD-002). The previous `successWhen: code !== 0 || !output.trim()` declared "version not yet on npm" whenever `npm view` failed — including when the registry was unreachable. Now distinguishes E404 (truly free), explicit "version listed" (already published), and unknown failure (printed as "could not verify (registry unreachable?)").
+- **`LICENSES.json` baseline recorded 11 prod deps as `(unknown)`, neutering drift detection** (BUILD-004). `npm ls --omit=dev --long` returns nodes without `version` for off-platform native optionals; recording them produced false add/remove churn on every install. Check now filters unresolved-version deps from both current and baseline sets and surfaces them in a "skipped" diagnostic. Baseline regenerated; 180 prod deps tracked, 11 skipped.
+- **`check-licenses.mjs` first-run silently staged a baseline AND failed** (BUILD-005). First run now errors with `license-inv ERROR: no baseline. Generate with: PRESHIP_LICENSE_WRITE=1 …` without writing — operators review and commit the baseline explicitly.
+- **`tarball-smoke` only validated `--version` and never exercised packed-files presence** (BUILD-006). `--version` short-circuits before tray load; a missing `native/tray/index.js` would not have surfaced. Smoke now additionally runs `tar -tzf` against the produced tarball and asserts five required paths (`package/native/tray/index.{js,d.ts}`, `package/dist/{index,settings-main,utils/tray}.js`) are present.
+- **Audit doc shipped** at `docs/audit-2026-05-28.md` — 241 findings across 12 detective beats from the full-repo audit. This release closes 1 High + 5 Medium from the audit; the remaining 25 Critical+High items land in v3.0.44 … v3.0.51 per the plan at `~/.claude/plans/bright-stirring-gray.md`.
+
 ## [3.0.42] — 2026-05-28
 
 ### Added
