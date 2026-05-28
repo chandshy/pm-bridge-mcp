@@ -1786,7 +1786,19 @@ export class SimpleIMAPService {
                 if (msg.uid.toString() === emailId) { found = true; break; }
               }
               if (found) { folder = f.path; break; }
-            } catch { /* not in this folder */ } finally {
+            } catch (scanErr: unknown) {
+              // We can't reliably distinguish "UID not present in this folder"
+              // from a transport error here — imapflow surfaces both as throws
+              // depending on the server. Log at warn level so silent transport
+              // failures aren't invisible, then continue to the next folder.
+              // Callers that need certainty should pass `sourceFolder` and
+              // bypass this scan entirely.
+              logger.warn(
+                `setFlag folder-scan: fetch on ${f.path} for UID ${emailId} threw — ` +
+                `treating as "not in this folder": ${scanErr instanceof Error ? scanErr.message : String(scanErr)}`,
+                'IMAPService'
+              );
+            } finally {
               lock.release();
             }
           }
