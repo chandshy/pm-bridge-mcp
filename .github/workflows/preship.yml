@@ -7,6 +7,11 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+# Minimum permissions — this workflow only checks out code and runs tests.
+# It does not write to issues, PRs, comments, or releases.
+permissions:
+  contents: read
+
 # Run only the most recent workflow for a given branch/PR.
 concurrency:
   group: preship-${{ github.ref }}

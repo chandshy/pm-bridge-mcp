@@ -1,6 +1,6 @@
 {
   "generatedAt": "2026-05-28",
-  "rootPackage": "mailpouch@3.0.41",
+  "rootPackage": "mailpouch@3.0.42",
   "deps": [
     {
       "name": "@cfworker/json-schema",

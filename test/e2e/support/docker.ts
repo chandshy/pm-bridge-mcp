@@ -6,7 +6,7 @@
  * container is absent.
  */
 
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 import { createConnection } from "net";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -42,14 +42,26 @@ async function waitForReady(port: number, attempts = 30): Promise<void> {
   throw new Error(`Greenmail port ${port} did not become ready within ${attempts * 0.5}s`);
 }
 
+/** Run a command with explicit argv (no shell) and return stdout. Throws on
+ *  non-zero exit. Using `spawnSync` with an array avoids the shell entirely,
+ *  which means COMPOSE_FILE / CONTAINER can never be interpreted as shell
+ *  metacharacters even though they're derived from `__dirname`. */
+function runArgv(cmd: string, args: string[], inherit = false): string {
+  const res = spawnSync(cmd, args, {
+    stdio: inherit ? "inherit" : ["ignore", "pipe", "pipe"],
+    encoding: "utf-8",
+  });
+  if (res.status !== 0) {
+    const stderr = (res.stderr ?? "").toString().trim();
+    throw new Error(`${cmd} ${args.join(" ")} exited ${res.status}: ${stderr}`);
+  }
+  return (res.stdout ?? "").toString();
+}
+
 /** True if the container exists and is in 'running' state. */
 function isContainerRunning(): boolean {
   try {
-    const out = execSync(`docker inspect -f '{{.State.Running}}' ${CONTAINER}`, {
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-      .toString()
-      .trim();
+    const out = runArgv("docker", ["inspect", "-f", "{{.State.Running}}", CONTAINER]).trim();
     return out === "true";
   } catch {
     return false;
@@ -74,7 +86,7 @@ export async function up(): Promise<void> {
     return;
   }
   if (isContainerRunning() && (await probeTcp(GREENMAIL_IMAP_PORT))) return;
-  execSync(`docker compose -f ${COMPOSE_FILE} up -d`, { stdio: "inherit" });
+  runArgv("docker", ["compose", "-f", COMPOSE_FILE, "up", "-d"], /* inherit */ true);
   await waitForReady(GREENMAIL_IMAP_PORT);
   await waitForReady(GREENMAIL_SMTP_PORT);
 }
@@ -82,7 +94,7 @@ export async function up(): Promise<void> {
 export async function down(): Promise<void> {
   if (externallyManaged()) return;
   try {
-    execSync(`docker compose -f ${COMPOSE_FILE} down`, { stdio: "inherit" });
+    runArgv("docker", ["compose", "-f", COMPOSE_FILE, "down"], /* inherit */ true);
   } catch {
     // already down — nothing to do
   }
@@ -107,7 +119,7 @@ export async function restart(): Promise<void> {
     return;
   }
   await up();
-  execSync(`docker compose -f ${COMPOSE_FILE} restart`, { stdio: "inherit" });
+  runArgv("docker", ["compose", "-f", COMPOSE_FILE, "restart"], /* inherit */ true);
   await waitForReady(GREENMAIL_IMAP_PORT);
   await waitForReady(GREENMAIL_SMTP_PORT);
 }

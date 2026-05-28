@@ -17,7 +17,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { existsSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { expect } from "vitest";
@@ -111,17 +111,65 @@ export function bridgeConfigAvailable(): boolean {
   return typeof path === "string" && existsSync(path);
 }
 
+/** Shape of the subset of mailpouch's config we need to talk IMAP. */
+interface BridgeConnectionConfig {
+  imapHost: string;
+  imapPort: number;
+  username: string;
+  password: string;
+}
+
+/** Read the Bridge config file and extract just the IMAP connection fields
+ *  ImapFixtures needs. Throws if any required field is missing — the harness
+ *  can't usefully run against a half-configured Bridge. */
+function readBridgeConnection(configPath: string): BridgeConnectionConfig {
+  const raw = JSON.parse(readFileSync(configPath, "utf-8")) as {
+    connection?: Partial<BridgeConnectionConfig>;
+  };
+  const conn = raw.connection ?? {};
+  if (!conn.imapHost || !conn.imapPort || !conn.username || !conn.password) {
+    throw new Error(
+      `Bridge config at ${configPath} is missing connection.imapHost / imapPort / username / password. ` +
+        `ImapFixtures cannot connect without all four.`
+    );
+  }
+  return {
+    imapHost: conn.imapHost,
+    imapPort: conn.imapPort,
+    username: conn.username,
+    password: conn.password,
+  };
+}
+
 export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> {
-  const mode = opts.mode ?? "greenmail";
-  const user = opts.user ?? TEST_USER;
+  // Mode resolution:
+  //   - explicit opts.mode wins
+  //   - else MAILPOUCH_E2E_BRIDGE_CONFIG present → bridge (so the same
+  //     scenarios re-run via `test:e2e:bridge` actually target Bridge)
+  //   - else default to greenmail
+  const mode = opts.mode ?? (bridgeConfigAvailable() ? "bridge" : "greenmail");
+  const greenmailUser = opts.user ?? TEST_USER;
 
   let configPath: string;
   let isTempConfig = false;
+  let imapHost: string;
+  let imapPort: number;
+  let imapUser: string;
+  let imapPass: string;
   if (mode === "greenmail") {
-    configPath = writeGreenmailConfig(user);
+    configPath = writeGreenmailConfig(greenmailUser);
     isTempConfig = true;
+    imapHost = "127.0.0.1";
+    imapPort = GREENMAIL_IMAP_PORT;
+    imapUser = greenmailUser.username;
+    imapPass = greenmailUser.password;
   } else {
     configPath = resolveBridgeConfig();
+    const bridge = readBridgeConnection(configPath);
+    imapHost = bridge.imapHost;
+    imapPort = bridge.imapPort;
+    imapUser = bridge.username;
+    imapPass = bridge.password;
   }
 
   const transport = new StdioClientTransport({
@@ -144,10 +192,10 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   await client.listTools();
 
   const imap = new ImapFixtures({
-    host: mode === "greenmail" ? "127.0.0.1" : new URL("imap://" + (user as { host?: string }).host || "imap://127.0.0.1").hostname,
-    port: mode === "greenmail" ? GREENMAIL_IMAP_PORT : 1143,
-    user: user.username,
-    pass: user.password,
+    host: imapHost,
+    port: imapPort,
+    user: imapUser,
+    pass: imapPass,
   });
   await imap.connect();
 
