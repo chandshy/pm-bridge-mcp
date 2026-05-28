@@ -280,6 +280,39 @@ export function requireNumericEmailId(raw: unknown, fieldName: string = "emailId
 }
 
 /**
+ * Validate an optional `folder` argument that flows from a tool handler into
+ * `imapService.getEmailById` (or similar service methods that take a folder
+ * hint). Returns the validated folder string when present; returns undefined
+ * for `undefined`/`null`/empty-string; throws `McpError(InvalidParams, …)`
+ * for non-strings or invalid IMAP paths (CRLF / control chars / `..`).
+ *
+ * Closes VALID-001 / VALID-009 from the 2026-05-28 audit — the by-id reading
+ * tools (`get_email_by_id`, `get_thread`, `extract_action_items`,
+ * `extract_meeting`, `reply_to_email`, `forward_email`) were forwarding
+ * `args.folder` raw via `as string | undefined` casts.
+ */
+export function optionalFolderHint(raw: unknown, fieldName: string = "folder"): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, `'${fieldName}' must be a string when provided.`);
+  }
+  // Trim and treat whitespace-only as "not provided" — otherwise '   ' passes
+  // `validateTargetFolder()` and reaches `getEmailById()` only to be rejected
+  // with a generic Error("Folder name must not be empty") from the service
+  // layer, defeating the McpError(InvalidParams) shape the gate gives.
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const err = validateTargetFolder(trimmed);
+  if (err) {
+    // Rewrite the validator's `targetFolder ...` prefix so the error reads
+    // as the caller's own field name, not the helper's internal vocabulary.
+    const cleaned = err.replace(/^targetFolder\s+/, "").replace(/^targetFolder/, "");
+    throw new McpError(ErrorCode.InvalidParams, `Invalid ${fieldName}: ${cleaned}`);
+  }
+  return trimmed;
+}
+
+/**
  * Validate the shape of an `attachments` argument before passing it to a service.
  *
  * Each element must be a plain object with:

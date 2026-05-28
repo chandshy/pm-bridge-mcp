@@ -7,7 +7,7 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { isValidEmail, validateAttachments, requireNumericEmailId } from "../utils/helpers.js";
+import { isValidEmail, optionalFolderHint, validateAttachments, requireNumericEmailId } from "../utils/helpers.js";
 import type { EmailAttachment } from "../types/index.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
@@ -179,7 +179,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.replyAll !== undefined && typeof args.replyAll !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'replyAll' must be a boolean when provided.");
     }
-    const original = await imapService.getEmailById(emailId, args.folder as string | undefined);
+    const original = await imapService.getEmailById(emailId, optionalFolderHint(args.folder));
     if (!original) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }
@@ -228,7 +228,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
       throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
     }
-    const fwdOriginal = await imapService.getEmailById(fwdId, args.folder as string | undefined);
+    const fwdOriginal = await imapService.getEmailById(fwdId, optionalFolderHint(args.folder));
     if (!fwdOriginal) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }

@@ -18,6 +18,7 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   isValidEmail,
+  optionalFolderHint,
   requireNumericEmailId,
   validateLabelName,
   validateTargetFolder,
@@ -516,7 +517,7 @@ export const handlers: Record<string, ToolHandler> = {
   get_email_by_id: async (ctx) => {
     const { args, imapService, ok, limits } = ctx;
     const rawEmailId = requireNumericEmailId(args.emailId);
-    const folderHint = args.folder as string | undefined;
+    const folderHint = optionalFolderHint(args.folder);
     const email = await imapService.getEmailById(rawEmailId, folderHint);
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
@@ -719,7 +720,7 @@ export const handlers: Record<string, ToolHandler> = {
   get_thread: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const threadEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const threadFolderHint = args.folder as string | undefined;
+    const threadFolderHint = optionalFolderHint(args.folder);
     const maxMsgs = typeof args.max_messages === "number"
       ? Math.min(Math.max(1, args.max_messages), 200)
       : 50;
@@ -835,7 +836,7 @@ export const handlers: Record<string, ToolHandler> = {
   extract_action_items: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const aiEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const email = await imapService.getEmailById(aiEmailId, args.folder as string | undefined);
+    const email = await imapService.getEmailById(aiEmailId, optionalFolderHint(args.folder));
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
@@ -846,7 +847,7 @@ export const handlers: Record<string, ToolHandler> = {
   extract_meeting: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const emEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const email = await imapService.getEmailById(emEmailId, args.folder as string | undefined);
+    const email = await imapService.getEmailById(emEmailId, optionalFolderHint(args.folder));
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
