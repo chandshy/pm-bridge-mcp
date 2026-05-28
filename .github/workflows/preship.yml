@@ -61,22 +61,23 @@ jobs:
           done
           echo "Greenmail IMAP did not become ready"; exit 1
 
-      # The orchestrator runs every fast-tier check + heavy tier minus Bridge.
-      # The `e2e:greenmail` step in preship.mjs calls `npm run test:e2e:local`
-      # which uses docker compose; here we override with a direct vitest run
-      # since the service container is already up.
-      - name: Run preship (CI mode — bridge skipped)
-        env:
-          PRESHIP_E2E_GREENMAIL_DIRECT: "1"
-        run: |
-          # In CI the Greenmail container is provided by `services:`, so we
-          # don't want the script to docker-compose up/down its own copy.
-          # The preship orchestrator delegates `e2e:greenmail` to the npm
-          # script `test:e2e:local`, which assumes local docker. For CI we
-          # short-circuit that by aliasing the npm script via PATH inject.
-          npm run preship:fast
-          npm run check:tarball
-          vitest run --config vitest.config.e2e.ts
+      # Run preship in three explicit segments instead of `npm run preship`:
+      #   1. preship:fast covers typecheck/lint/version-sync/secrets/audit/
+      #      licenses/build/unit (< 30 s).
+      #   2. check:tarball does the install-from-tarball smoke.
+      #   3. test:e2e:local:keep runs the Greenmail E2E suite against the
+      #      service-container Greenmail that `services:` already provides
+      #      (the `:keep` variant skips the docker compose up/down that
+      #      `test:e2e:local` does locally — we don't have docker compose
+      #      available on hosted runners, only the service container).
+      # Bridge E2E is intentionally skipped — Proton Bridge is a desktop app
+      # and can't run on hosted runners. See docs/preship.md.
+      - name: preship:fast
+        run: npm run preship:fast
+      - name: check:tarball
+        run: npm run check:tarball
+      - name: e2e:greenmail (service-container Greenmail)
+        run: npm run test:e2e:local:keep
 
       - name: Upload preship log on failure
         if: failure()
