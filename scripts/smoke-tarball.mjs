@@ -92,14 +92,17 @@ try {
   //    --version path short-circuits before tray load, so we can't rely on
   //    "it booted" to prove the tray shim shipped. Probe the tar listing
   //    directly: the published tarball must contain native/tray/index.js.
+  //    Failure paths here `throw` so the existing catch/finally chain runs
+  //    the staging/install cleanup (the older `process.exit(1)` paths
+  //    above remain as-is — BUILD-007 cleanup is tracked in a later batch).
   const tgzListRes = spawnSync("tar", ["-tzf", join(stagingDir, tgzName)], {
     encoding: "utf-8",
     timeout: 15_000,
   });
   if (tgzListRes.status !== 0) {
-    console.error(`tar -tzf <tarball> failed (exit ${tgzListRes.status}):`);
-    console.error(tgzListRes.stderr || tgzListRes.stdout);
-    process.exit(1);
+    throw new Error(
+      `tar -tzf <tarball> failed (exit ${tgzListRes.status}): ${tgzListRes.stderr || tgzListRes.stdout}`
+    );
   }
   const REQUIRED_PACKED_FILES = [
     "package/native/tray/index.js",
@@ -111,9 +114,9 @@ try {
   const packedFiles = new Set(tgzListRes.stdout.split("\n").map((s) => s.trim()));
   const missing = REQUIRED_PACKED_FILES.filter((p) => !packedFiles.has(p));
   if (missing.length > 0) {
-    console.error(`tarball-smoke FAILED: required files missing from tarball:`);
-    for (const f of missing) console.error(`  - ${f}`);
-    process.exit(1);
+    throw new Error(
+      `tarball-smoke FAILED: required files missing from tarball: ${missing.join(", ")}`
+    );
   }
 
   console.log(`tarball-smoke OK: ${tgzName} → ${out} (${REQUIRED_PACKED_FILES.length} required files present)`);

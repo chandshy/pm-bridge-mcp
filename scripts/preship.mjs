@@ -62,16 +62,28 @@ const fastSteps = [
   STEP_NODE("version-sync", "check-version-sync.mjs"),
   STEP_NODE("secrets", "check-secrets.mjs"),
   // npm-audit: HIGH/CRITICAL is a hard fail (the check script returns exit 1
-  // on those; exit 2 on MODERATE/LOW). The orchestrator treats exit 2 as
-  // success via successWhen below, so MODERATE/LOW print as advisories but
-  // don't block the gate. HIGH/CRITICAL → exit 1 → hard fail as documented.
+  // on those; exit 2 on MODERATE/LOW; 0 on clean). We can't just lift exit-2
+  // through `successWhen` — the runner suppresses output on ok=true, which
+  // would hide the advisory findings the script writes to stderr. Instead we
+  // forward the advisory text ourselves before returning ok=true.
   {
     name: "npm-audit",
     mode: "hard",
-    run: () =>
-      spawnStep("node", [join("scripts", "check-npm-audit.mjs")], {
-        successWhen: ({ code }) => code === 0 || code === 2,
-      }),
+    run: async () => {
+      const res = await spawnStep("node", [join("scripts", "check-npm-audit.mjs")]);
+      if (res.exitCode === 0) {
+        return { ok: true, summary: "no prod-dep findings" };
+      }
+      if (res.exitCode === 2) {
+        if (res.output) process.stderr.write(res.output);
+        return { ok: true, summary: "advisories printed above (non-blocking)" };
+      }
+      return {
+        ok: false,
+        summary: `HIGH/CRITICAL or unexpected exit ${res.exitCode}`,
+        output: res.output,
+      };
+    },
   },
   STEP_NODE("license-inv", "check-licenses.mjs"),
   STEP_NPM("build", "build"),
@@ -129,9 +141,12 @@ const releaseSteps = [
       if (res.exitCode !== 0 && /E404|not found|no such package/i.test(res.output ?? "")) {
         return { ok: true, summary: `${pkg.name}@${pkg.version} not yet published` };
       }
-      // Unknown — registry unreachable or unexpected output.
+      // Unknown — registry unreachable or unexpected output. Return ok:false
+      // so the advisory mode surfaces it as a warning instead of silently
+      // marking the version "free". Operator should re-run when the registry
+      // is reachable.
       return {
-        ok: true,
+        ok: false,
         summary: `${pkg.name}@${pkg.version} — could not verify (registry unreachable?)`,
         output: res.output ?? "",
       };
