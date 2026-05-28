@@ -57,29 +57,47 @@ function normalizeLicense(license) {
 }
 
 visit(tree, null);
-// Dedupe by name+version (same package may appear multiple times in the tree).
+// Dedupe by name+version. Skip entries where `npm ls` could not resolve a
+// version — those are typically optional native deps for off-host platforms.
+// Including them as `name@(unknown)` polluted the baseline (BUILD-004): a
+// later install that resolves a real version looked like an add+remove.
+const skipped = flat.filter((d) => d.version === "(unknown)");
+const usable = flat.filter((d) => d.version !== "(unknown)");
 const seen = new Map();
-for (const dep of flat) {
+for (const dep of usable) {
   const key = `${dep.name}@${dep.version}`;
   if (!seen.has(key)) seen.set(key, dep);
 }
 const current = Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
 
 const writeMode = process.env.PRESHIP_LICENSE_WRITE === "1";
-if (writeMode || !existsSync(INVENTORY)) {
+
+if (writeMode) {
   const payload = {
     generatedAt: new Date().toISOString().slice(0, 10),
     rootPackage: `${tree.name}@${tree.version}`,
     deps: current,
   };
   await writeFile(INVENTORY, JSON.stringify(payload, null, 2) + "\n", "utf-8");
-  console.log(`Wrote ${INVENTORY} (${current.length} prod deps).`);
-  // Wrote-and-exited counts as "drift" for safety on first run.
-  process.exit(writeMode ? 0 : 1);
+  console.log(`Wrote ${INVENTORY} (${current.length} prod deps; ${skipped.length} skipped as unresolved).`);
+  process.exit(0);
+}
+
+if (!existsSync(INVENTORY)) {
+  // First-run UX (BUILD-005): don't silently stage a baseline; error
+  // actionably so the user reviews and explicitly accepts it.
+  console.error(`license-inv ERROR: no baseline at ${INVENTORY}.`);
+  console.error(`Generate one with: PRESHIP_LICENSE_WRITE=1 node scripts/check-licenses.mjs`);
+  console.error(`Then commit the file so future runs can diff against it.`);
+  process.exit(1);
 }
 
 const baseline = JSON.parse(await readFile(INVENTORY, "utf-8"));
-const baselineByKey = new Map((baseline.deps ?? []).map((d) => [`${d.name}@${d.version}`, d]));
+const baselineByKey = new Map(
+  (baseline.deps ?? [])
+    .filter((d) => d.version !== "(unknown)")
+    .map((d) => [`${d.name}@${d.version}`, d])
+);
 const currentByKey = new Map(current.map((d) => [`${d.name}@${d.version}`, d]));
 
 const added = [];
@@ -98,6 +116,15 @@ for (const [key, dep] of baselineByKey.entries()) {
 const unknown = current.filter((d) => d.license === "UNKNOWN");
 
 const drifted = added.length + removed.length + licenseChanged.length;
+
+if (skipped.length > 0) {
+  // Diagnostic only — these deps weren't resolved by `npm ls`. They are
+  // excluded from baseline + drift detection to avoid the BUILD-004 churn.
+  console.error(`license-inv: ${skipped.length} dep(s) skipped (unresolved version):`);
+  for (const d of skipped.slice(0, 5)) console.error(`  - ${d.name}`);
+  if (skipped.length > 5) console.error(`  … (${skipped.length - 5} more)`);
+}
+
 if (drifted > 0) {
   console.error(`license-inv DRIFT detected:`);
   if (added.length > 0) {

@@ -26,6 +26,14 @@ if (!["fast", "full", "release"].includes(level)) {
   process.exit(2);
 }
 
+// Emergency escape hatch — documented in docs/preship.md and referenced by
+// the merge-pr skill. Loud to stderr so the bypass leaves an audit trail.
+if (process.env.PRESHIP_SKIP === "1") {
+  console.error(`BYPASS: PRESHIP_SKIP=1 — preship gate skipped for ${pkg.name} ${pkg.version} (${level}).`);
+  console.error(`This is an emergency-only escape. Call it out in the PR description.`);
+  process.exit(0);
+}
+
 // ─── Step definitions ────────────────────────────────────────────────────────
 
 const STEP_NODE = (name, script, opts = {}) => ({
@@ -53,8 +61,18 @@ const fastSteps = [
   },
   STEP_NODE("version-sync", "check-version-sync.mjs"),
   STEP_NODE("secrets", "check-secrets.mjs"),
-  // npm-audit downgrades MODERATE/LOW into advisory inside the script.
-  { ...STEP_NODE("npm-audit", "check-npm-audit.mjs"), mode: "advisory" },
+  // npm-audit: HIGH/CRITICAL is a hard fail (the check script returns exit 1
+  // on those; exit 2 on MODERATE/LOW). The orchestrator treats exit 2 as
+  // success via successWhen below, so MODERATE/LOW print as advisories but
+  // don't block the gate. HIGH/CRITICAL → exit 1 → hard fail as documented.
+  {
+    name: "npm-audit",
+    mode: "hard",
+    run: () =>
+      spawnStep("node", [join("scripts", "check-npm-audit.mjs")], {
+        successWhen: ({ code }) => code === 0 || code === 2,
+      }),
+  },
   STEP_NODE("license-inv", "check-licenses.mjs"),
   STEP_NPM("build", "build"),
   STEP_NPM("unit", "test"),
@@ -98,11 +116,26 @@ const releaseSteps = [
   {
     name: "npm-version-free",
     mode: "advisory",
-    run: () =>
-      spawnStep("npm", ["view", `${pkg.name}@${pkg.version}`, "version"], {
-        successWhen: ({ code, output }) => code !== 0 || !output.trim(),
-        summary: `${pkg.name}@${pkg.version}`,
-      }),
+    // Pass when npm explicitly says E404 ("version not published"); fail when
+    // npm returns the version string ("already published"). Generic non-zero
+    // (network down, registry unreachable) is reported as "could not verify"
+    // — we don't want to give a false-green on an unreachable registry.
+    run: async () => {
+      const res = await spawnStep("npm", ["view", `${pkg.name}@${pkg.version}`, "version"]);
+      const out = (res.output ?? "").trim();
+      if (res.exitCode === 0 && out) {
+        return { ok: false, summary: `${pkg.name}@${pkg.version} ALREADY PUBLISHED (${out})`, output: out };
+      }
+      if (res.exitCode !== 0 && /E404|not found|no such package/i.test(res.output ?? "")) {
+        return { ok: true, summary: `${pkg.name}@${pkg.version} not yet published` };
+      }
+      // Unknown — registry unreachable or unexpected output.
+      return {
+        ok: true,
+        summary: `${pkg.name}@${pkg.version} — could not verify (registry unreachable?)`,
+        output: res.output ?? "",
+      };
+    },
   },
 ];
 

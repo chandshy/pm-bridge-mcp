@@ -47,7 +47,7 @@ npm run preship:release
 | `build:clean` | Full clean build (catches stale-dist regressions) | yes |
 | `changelog-has-entry` | Latest `## [X.Y.Z]` CHANGELOG entry has non-empty body | yes |
 | `git-tag-free` | No existing `vX.Y.Z` tag (sanity check before tagging) | yes |
-| `npm-version-free` | `mailpouch@X.Y.Z` isn't already on npm | advisory |
+| `npm-version-free` | `mailpouch@X.Y.Z` isn't already on npm. Reports "not yet published" only when the registry explicitly returns E404; on registry unreachable, reports "could not verify" without claiming the version is free | advisory |
 
 ## Running individual checks
 
@@ -136,9 +136,10 @@ Don't, in normal operation. For emergencies:
 |---------|--------|
 | Pre-push hook | `git push --no-verify` |
 | Ship skill (`/ship`) | `PRESHIP_SKIP=1 /ship` |
+| Any `npm run preship*` invocation | `PRESHIP_SKIP=1 npm run preship` (short-circuits at the top of `scripts/preship.mjs` with a loud `BYPASS: PRESHIP_SKIP=1` line to stderr) |
 | `npm publish` | Not bypassable. `prepublishOnly` runs preship:release; remove the script line only as part of an explicit rescue plan and revert immediately. |
 
-Every bypass logs to stdout so a reader can see it happened.
+Every bypass logs to stderr so a reader can see it happened (and `BYPASS:` lines are grep-able from CI logs).
 
 ## Installing gitleaks (recommended)
 
