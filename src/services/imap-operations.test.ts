@@ -34,6 +34,21 @@ function makeLock() {
   return { release: vi.fn() };
 }
 
+// Default fetch mock: yields every UID in the requested range as "existing"
+// so existing tests pass without explicit fetch wiring. Tests that need to
+// simulate missing UIDs override this with a custom fetch implementation.
+function defaultFetchMock() {
+  return vi.fn().mockImplementation((range: unknown) => {
+    const ids = String(range)
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => /^\d+$/.test(s));
+    return (async function* () {
+      for (const id of ids) yield { uid: Number(id) };
+    })();
+  });
+}
+
 function makeClient(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
@@ -42,6 +57,7 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
     messageMove: vi.fn().mockResolvedValue(undefined),
     messageCopy: vi.fn().mockResolvedValue(undefined),
     messageDelete: vi.fn().mockResolvedValue(undefined),
+    fetch: defaultFetchMock(),
     ...overrides,
   };
 }
@@ -1561,5 +1577,156 @@ describe("SimpleIMAPService private ensureConnection", () => {
     await (svc as any).ensureConnection();
 
     expect(reconnectSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── sourceFolder + UID validation (regressions for Bugs A/B/C from
+//     2026-05-28 report) ──────────────────────────────────────────────────────
+//
+// Bug A: bulk_remove_label reported success when callers passed INBOX UIDs
+//        for a Labels/ folder — the UIDs didn't exist there, IMAP UID DELETE
+//        was a silent no-op, but the success counter was still bumped.
+// Bug B: bulk_move_emails/move_email assumed cached/INBOX as the source folder,
+//        so moves from custom folders silently no-op'd while reporting success.
+// Bug C: bulk_mark_read had the same root cause for flag operations.
+//
+// The fix has two parts: (1) sourceFolder param skips cache lookup; (2) UID
+// FETCH inside the folder lock counts honest success/failed.
+
+describe("sourceFolder param: source-folder-specific UID resolution", () => {
+  it("bulkMoveEmails(sourceFolder=Folders/X) locks Folders/X, not INBOX", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    // Seed a stale INBOX cache entry for the same UID — without sourceFolder
+    // we'd lock INBOX (the bug). With sourceFolder we must lock the explicit one.
+    (svc as any).setCacheEntry("1", makeEmail("1", "INBOX"));
+
+    const results = await svc.bulkMoveEmails(["1"], "INBOX", "Folders/BulkTestMove");
+
+    expect(results.success).toBe(1);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/BulkTestMove");
+    expect(client.messageMove).toHaveBeenCalledWith("1", "INBOX", { uid: true });
+  });
+
+  it("moveEmail(sourceFolder=Folders/X) locks Folders/X without calling getEmailById", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const gebSpy = vi.spyOn(svc, "getEmailById");
+
+    const result = await svc.moveEmail("1", "Archive", "Folders/BulkTestMove");
+
+    expect(result).toBe(true);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/BulkTestMove");
+    expect(client.messageMove).toHaveBeenCalledWith("1", "Archive", { uid: true });
+    expect(gebSpy).not.toHaveBeenCalled();
+  });
+
+  it("bulkMarkRead(sourceFolder=Folders/X) locks Folders/X, not INBOX", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+
+    const results = await svc.bulkMarkRead(["1", "2"], true, "Folders/BulkTestMove");
+
+    expect(results.success).toBe(2);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/BulkTestMove");
+    expect(client.messageFlagsAdd).toHaveBeenCalledWith("1,2", ["\\Seen"], { uid: true });
+  });
+
+  it("bulkStar(sourceFolder=Folders/X) locks Folders/X, not INBOX", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+
+    const results = await svc.bulkStar(["7"], true, "Folders/BulkTestMove");
+
+    expect(results.success).toBe(1);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/BulkTestMove");
+    expect(client.messageFlagsAdd).toHaveBeenCalledWith("7", ["\\Flagged"], { uid: true });
+  });
+
+  it("bulkDeleteEmails(sourceFolder=Folders/X) locks Folders/X without scanning", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const gebSpy = vi.spyOn(svc, "getEmailById");
+
+    const results = await svc.bulkDeleteEmails(["3", "4"], "Folders/BulkTestMove");
+
+    expect(results.success).toBe(2);
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Folders/BulkTestMove");
+    expect(gebSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("UID existence pre-flight: missing UIDs count as failed, not silent success", () => {
+  // Helper: a fetch mock that only yields UIDs in `existing`. Used to simulate
+  // "UID not in this folder" — the IMAP server returns no message for that UID.
+  function fetchYielding(existing: string[]) {
+    return vi.fn().mockImplementation((range: unknown) => {
+      const requested = String(range).split(",").map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
+      return (async function* () {
+        for (const id of requested) if (existing.includes(id)) yield { uid: Number(id) };
+      })();
+    });
+  }
+
+  it("bulkDeleteFromFolder counts missing UIDs as failed (Bug A)", async () => {
+    const svc = new SimpleIMAPService();
+    // None of the requested UIDs exist in Labels/BulkTest
+    connectSvc(svc, { fetch: fetchYielding([]) });
+
+    const results = await svc.bulkDeleteFromFolder(["2954", "2955"], "Labels/BulkTest");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(2);
+    expect(results.errors.join(" ")).toMatch(/not found in folder Labels\/BulkTest/);
+  });
+
+  it("bulkMoveEmails counts missing UIDs as failed when sourceFolder doesn't contain them (Bug B)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { fetch: fetchYielding([]) });
+
+    const results = await svc.bulkMoveEmails(["1", "2"], "INBOX", "Folders/BulkTestMove");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(2);
+    // messageMove must NOT have been called — no UIDs to move
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
+  it("bulkMarkRead counts missing UIDs as failed (Bug C)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { fetch: fetchYielding([]) });
+
+    const results = await svc.bulkMarkRead(["1", "2"], true, "Folders/BulkTestMove");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(2);
+    expect(client.messageFlagsAdd).not.toHaveBeenCalled();
+  });
+
+  it("bulkMoveEmails partial existence: present UIDs move, missing UIDs fail", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { fetch: fetchYielding(["1", "3"]) });
+
+    const results = await svc.bulkMoveEmails(["1", "2", "3"], "Archive", "Folders/BulkTestMove");
+
+    expect(results.success).toBe(2);
+    expect(results.failed).toBe(1);
+    expect(client.messageMove).toHaveBeenCalledWith("1,3", "Archive", { uid: true });
+  });
+
+  it("moveEmail throws when UID does not exist in sourceFolder", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc, { fetch: fetchYielding([]) });
+
+    await expect(svc.moveEmail("999", "Archive", "Folders/BulkTestMove"))
+      .rejects.toThrow(/999 not found in folder Folders\/BulkTestMove/);
+  });
+
+  it("markEmailRead throws when UID does not exist in sourceFolder", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc, { fetch: fetchYielding([]) });
+
+    await expect(svc.markEmailRead("999", true, "Folders/BulkTestMove"))
+      .rejects.toThrow(/999 not found in folder Folders\/BulkTestMove/);
   });
 });

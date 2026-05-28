@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.42] — 2026-05-28
+
+### Added
+- **E2E test harness (`test/e2e/`)** — two-phase end-to-end coverage that drives the real mailpouch MCP server over stdio: Phase 1 against Greenmail in Docker (`npm run test:e2e:local`, 62 passing tests across 10 scenario files), Phase 2 against live Proton Bridge (`npm run test:e2e:bridge`, opt-in via `MAILPOUCH_E2E_BRIDGE_CONFIG`). Each scenario asserts on actual IMAP state via `imapflow` rather than tool return values — the property that catches false-success counters like the 3.0.41 bug class. `ImapFixtures` helper, deterministic seed data, container lifecycle helper, orphan-cleanup script for Phase 2. Full docs at `test/e2e/README.md`.
+- **Permanent ship-readiness gate (`npm run preship`)** — single-command audit that runs typecheck, lint, version/CHANGELOG/README sync, secret scan (gitleaks with grep fallback), `npm audit` (HIGH/CRITICAL blocking; MODERATE/LOW advisory), license inventory drift check, build, unit tests, `npm pack` install smoke, Greenmail E2E, and Bridge E2E in deterministic order with a clear pass/fail summary table. Three depth levels: `preship:fast` (<30 s, runs in pre-push hook), `preship` (~5 min, for `/ship`), `preship:release` (adds tag/changelog-body/npm-version checks; wired to `prepublishOnly` so `npm publish` cannot run without it). Five standalone check scripts (`npm run check:version-sync`, `:secrets`, `:npm-audit`, `:licenses`, `:tarball`) for debugging individual failures. `.preship-audit-allow.json` for acknowledging specific advisories; `LICENSES.json` is the committed prod-dep license baseline (regenerate with `PRESHIP_LICENSE_WRITE=1`). New `.github/workflows/preship.yml` runs the gate on every PR with Greenmail as a service container (Bridge is `PRESHIP_NO_BRIDGE=1`-skipped on hosted runners; documented in `docs/preship.md`). `simple-git-hooks` installs a pre-push hook running `preship:fast`. `merge-pr` skill picks up `npm run preship` as Step 2 — every `/ship` is gated by it unless `PRESHIP_SKIP=1` is set as an emergency escape hatch.
+- **`mailpouch --version` / `-v`** — short-circuits before any side effects and prints `mailpouch vX.Y.Z`. Used by the `tarball-smoke` preship step and routinely by users to identify the installed binary.
+
+### Fixed
+- **`optionalSourceFolder()` validator mismatch (follow-up to 3.0.41)** — `src/tools/actions.ts` and `src/tools/deletion.ts` were calling `validateFolderName()` (leaf-only, rejects `/`) for the `sourceFolder` argument. Every `sourceFolder: "Folders/X"` would have returned `Invalid sourceFolder` — a self-inflicted bug in the 3.0.41 fix caught by the new E2E harness. Now uses `validateTargetFolder()` which allows full IMAP paths.
+
+## [3.0.41] — 2026-05-28
+
+### Fixed
+- **Mutating tools silently no-op'd when UIDs lived outside INBOX (Bugs A/B/C from 2026-05-28 report)** — `bulk_move_emails`, `move_email`, `bulk_mark_read`, `bulk_star`, `bulk_move_to_label`, `bulk_remove_label`, `bulk_delete_emails`, `delete_email`, `mark_email_read`, `star_email`, `archive_email`, `move_to_trash`, `move_to_spam`, `move_to_folder`, and `move_to_label` resolved the source folder via a cache lookup that scanned every folder for a matching UID. IMAP UIDs are folder-scoped, so the wrong folder would be selected (or INBOX defaulted) and the IMAP UID MOVE/STORE/DELETE would silently no-op while the tool reported `{ success: N, failed: 0 }`. Added an optional `sourceFolder` parameter to every mutating tool; when supplied it skips the cache lookup and locks the explicit folder. Strongly recommended whenever the UIDs came from a folder other than INBOX.
+- **Success counters lied (Observation O2)** — counters were incremented unconditionally after each IMAP call. Added a UID FETCH pre-flight inside the folder lock to determine which UIDs actually exist there; missing UIDs are now reported in `failed`/`errors` rather than counted as success. Affects every bulk and singular mutation.
+- **`bulk_remove_label` / `remove_label` `targetFolder` argument removed** — the parameter was schemaed but never plumbed to the IMAP call. Tools now document that callers must pass label-folder UIDs (Proton Bridge's label folders have their own UID space).
+
 ## [3.0.40] — 2026-05-27
 
 ### Fixed

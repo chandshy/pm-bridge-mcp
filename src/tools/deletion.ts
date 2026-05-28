@@ -7,8 +7,27 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { requireNumericEmailId } from "../utils/helpers.js";
+import { requireNumericEmailId, validateTargetFolder } from "../utils/helpers.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+
+const SOURCE_FOLDER_SCHEMA = {
+  type: "string",
+  description:
+    "Folder the UID(s) live in (e.g. INBOX, Folders/Work, Labels/Foo). Strongly recommended whenever the UIDs came from a folder other than INBOX — IMAP UIDs are folder-scoped, so without this the wrong folder may be selected.",
+};
+
+/** Validate the optional sourceFolder arg. Uses validateTargetFolder so
+ *  full-path strings like `Folders/Work` aren't rejected by the leaf-only
+ *  validator. */
+function optionalSourceFolder(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, "'sourceFolder' must be a string when provided.");
+  }
+  const err = validateTargetFolder(raw);
+  if (err) throw new McpError(ErrorCode.InvalidParams, `Invalid sourceFolder: ${err}`);
+  return raw;
+}
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -35,13 +54,14 @@ export const defs: ToolDef[] = [
     name: "delete_email",
     title: "Delete Email",
     description:
-      "Permanently delete an email. This action cannot be undone. Consider move_email to Trash first. Destructive: requires { confirmed: true }.",
+      "Permanently delete an email. This action cannot be undone. Consider move_email to Trash first. Destructive: requires { confirmed: true }. Pass sourceFolder whenever the UID came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",
       properties: {
         emailId: { type: "string" },
         confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId"],
     },
@@ -51,13 +71,14 @@ export const defs: ToolDef[] = [
     name: "bulk_delete_emails",
     title: "Bulk Delete Emails",
     description:
-      "Permanently delete multiple emails. Irreversible. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Destructive: requires { confirmed: true }.",
+      "Permanently delete multiple emails. Irreversible. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Destructive: requires { confirmed: true }. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",
       properties: {
         emailIds: { type: "array", items: { type: "string" } },
         confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailIds"],
     },
@@ -67,13 +88,14 @@ export const defs: ToolDef[] = [
     name: "bulk_delete",
     title: "Bulk Delete Emails",
     description:
-      "Alias for bulk_delete_emails. Permanently delete multiple emails. Irreversible. Destructive: requires { confirmed: true }.",
+      "Alias for bulk_delete_emails. Permanently delete multiple emails. Irreversible. Destructive: requires { confirmed: true }. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",
       properties: {
         emailIds: { type: "array", items: { type: "string" } },
         confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailIds"],
     },
@@ -93,8 +115,9 @@ const bulkDeleteHandler: ToolHandler = async (ctx) => {
   if (emailIds3.length === 0) {
     throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list. Email IDs must be numeric UID strings.");
   }
+  const bdSourceFolder = optionalSourceFolder(args.sourceFolder);
 
-  const results3 = await imapService.bulkDeleteEmails(emailIds3);
+  const results3 = await imapService.bulkDeleteEmails(emailIds3, bdSourceFolder);
   await sendProgress(emailIds3.length, emailIds3.length, `Deleted ${results3.success} of ${emailIds3.length} (${results3.failed} failed)`);
   state.analyticsCache = null;
   state.analyticsCacheInflight = null;
@@ -105,7 +128,8 @@ export const handlers: Record<string, ToolHandler> = {
   delete_email: async (ctx) => {
     const { args, imapService, actionOk, state } = ctx;
     const deEmailId = requireNumericEmailId(args.emailId);
-    await imapService.deleteEmail(deEmailId);
+    const deSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.deleteEmail(deEmailId, deSourceFolder);
     state.analyticsCache = null;
     state.analyticsCacheInflight = null;
     return actionOk();

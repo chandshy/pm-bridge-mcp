@@ -1781,6 +1781,13 @@ async function _initTray(): Promise<void> {
 }
 
 async function main() {
+  // `--version` short-circuits before any side effects. Used by tarball-smoke
+  // and routinely by users to identify the installed binary.
+  if (process.argv.includes("--version") || process.argv.includes("-v")) {
+    process.stdout.write(`mailpouch v${_pkgVersion}\n`);
+    process.exit(0);
+  }
+
   const noTray       = process.argv.includes("--no-tray");
   const noSettingsUi = process.argv.includes("--no-settings-ui");
 

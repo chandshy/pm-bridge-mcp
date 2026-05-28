@@ -34,17 +34,28 @@ const BULK_RESULT_SCHEMA = {
   required: ["success", "failed", "errors"],
 };
 
+// Shared schema fragment for the optional sourceFolder parameter — appears on
+// every mutating tool. IMAP UIDs are folder-scoped, so callers should pass the
+// folder the UID came from to avoid cross-folder collisions and silent no-ops.
+const SOURCE_FOLDER_SCHEMA = {
+  type: "string",
+  description:
+    "Folder the UID(s) live in (e.g. INBOX, Folders/Work, Labels/Foo). Strongly recommended whenever the UIDs came from a folder other than INBOX — IMAP UIDs are folder-scoped, so without this the wrong folder may be selected and the operation may silently no-op.",
+};
+
 export const defs: ToolDef[] = [
   {
     name: "mark_email_read",
     title: "Mark Email Read/Unread",
-    description: "Set the read/unread status of an email. isRead defaults to true.",
+    description:
+      "Set the read/unread status of an email. isRead defaults to true. Pass sourceFolder whenever the UID came from a folder other than INBOX — IMAP UIDs are folder-scoped and silent no-ops can otherwise occur.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       type: "object",
       properties: {
         emailId: { type: "string" },
         isRead: { type: "boolean", default: true },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId"],
     },
@@ -53,13 +64,15 @@ export const defs: ToolDef[] = [
   {
     name: "star_email",
     title: "Star / Unstar Email",
-    description: "Toggle the starred (flagged) status of an email. isStarred defaults to true.",
+    description:
+      "Toggle the starred (flagged) status of an email. isStarred defaults to true. Pass sourceFolder whenever the UID came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       type: "object",
       properties: {
         emailId: { type: "string" },
         isStarred: { type: "boolean", default: true },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId"],
     },
@@ -69,7 +82,7 @@ export const defs: ToolDef[] = [
     name: "move_email",
     title: "Move Email",
     description:
-      "Move an email to a different folder. Common targets: Trash, Archive, Spam, INBOX, Folders/MyFolder.",
+      "Move an email to a different folder. Common targets: Trash, Archive, Spam, INBOX, Folders/MyFolder. Pass sourceFolder whenever the UID came from a folder other than INBOX — IMAP UIDs are folder-scoped.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -79,6 +92,7 @@ export const defs: ToolDef[] = [
           type: "string",
           description: "Destination folder path (e.g. Trash, Archive, Folders/Work)",
         },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId", "targetFolder"],
     },
@@ -92,7 +106,10 @@ export const defs: ToolDef[] = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
-      properties: { emailId: { type: "string" } },
+      properties: {
+        emailId: { type: "string" },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
+      },
       required: ["emailId"],
     },
     outputSchema: ACTION_RESULT_SCHEMA,
@@ -108,6 +125,7 @@ export const defs: ToolDef[] = [
       properties: {
         emailId: { type: "string" },
         confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId"],
     },
@@ -124,6 +142,7 @@ export const defs: ToolDef[] = [
       properties: {
         emailId: { type: "string" },
         confirmed: { type: "boolean", description: "Must be true to execute. See requireDestructiveConfirm." },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId"],
     },
@@ -143,6 +162,7 @@ export const defs: ToolDef[] = [
           type: "string",
           description: "Folder name without prefix (e.g. Work). Moves to Folders/Work.",
         },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId", "folder"],
     },
@@ -152,13 +172,14 @@ export const defs: ToolDef[] = [
     name: "bulk_mark_read",
     title: "Bulk Mark Emails Read/Unread",
     description:
-      "Mark multiple emails as read or unread. Emits progress notifications. Returns success/failed counts.",
+      "Mark multiple emails as read or unread. Emits progress notifications. Returns success/failed counts. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       type: "object",
       properties: {
         emailIds: { type: "array", items: { type: "string" }, description: "Array of email UIDs" },
         isRead: { type: "boolean", default: true },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailIds"],
     },
@@ -168,13 +189,14 @@ export const defs: ToolDef[] = [
     name: "bulk_star",
     title: "Bulk Star/Unstar Emails",
     description:
-      "Star or unstar multiple emails. Emits progress notifications. Returns success/failed counts.",
+      "Star or unstar multiple emails. Emits progress notifications. Returns success/failed counts. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: {
       type: "object",
       properties: {
         emailIds: { type: "array", items: { type: "string" }, description: "Array of email UIDs" },
         isStarred: { type: "boolean", default: true },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailIds"],
     },
@@ -184,7 +206,7 @@ export const defs: ToolDef[] = [
     name: "bulk_move_emails",
     title: "Bulk Move Emails",
     description:
-      "Move multiple emails to a folder in one call. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts.",
+      "Move multiple emails to a folder in one call. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -195,6 +217,7 @@ export const defs: ToolDef[] = [
           description: "Array of email UIDs to move",
         },
         targetFolder: { type: "string", description: "Destination folder path" },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailIds", "targetFolder"],
     },
@@ -214,6 +237,7 @@ export const defs: ToolDef[] = [
           type: "string",
           description: "Label name without prefix (e.g. Work). Moves to Labels/Work.",
         },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId", "label"],
     },
@@ -230,6 +254,7 @@ export const defs: ToolDef[] = [
       properties: {
         emailIds: { type: "array", items: { type: "string" } },
         label: { type: "string", description: "Label name without prefix" },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailIds", "label"],
     },
@@ -239,14 +264,13 @@ export const defs: ToolDef[] = [
     name: "remove_label",
     title: "Remove Label from Email",
     description:
-      "Remove a label from an email. The email is removed from Labels/{label} but remains in its original folder (Inbox, etc.).",
+      "Remove a label from an email. The email is removed from Labels/{label} but remains in its original folder (Inbox, etc.). The UID passed must be the UID in Labels/{label} (not the INBOX/source UID) — Labels/ folders have their own UID space.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
       properties: {
-        emailId: { type: "string" },
+        emailId: { type: "string", description: "UID of the email inside Labels/{label}" },
         label: { type: "string", description: "Label name to remove (e.g. Work)" },
-        targetFolder: { type: "string", default: "INBOX", description: "Where to move the email (default: INBOX)" },
       },
       required: ["emailId", "label"],
     },
@@ -256,20 +280,33 @@ export const defs: ToolDef[] = [
     name: "bulk_remove_label",
     title: "Bulk Remove Label from Emails",
     description:
-      "Remove a label from multiple emails. Emails are removed from Labels/{label} but remain in their original folders.",
+      "Remove a label from multiple emails. Emails are removed from Labels/{label} but remain in their original folders. The UIDs passed must be the UIDs inside Labels/{label} — Labels/ folders have their own UID space, so INBOX UIDs will silently miss.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
       properties: {
-        emailIds: { type: "array", items: { type: "string" } },
+        emailIds: { type: "array", items: { type: "string" }, description: "Array of UIDs inside Labels/{label}" },
         label: { type: "string", description: "Label name to remove" },
-        targetFolder: { type: "string", default: "INBOX", description: "Where to move emails (default: INBOX)" },
       },
       required: ["emailIds", "label"],
     },
     outputSchema: BULK_RESULT_SCHEMA,
   },
 ];
+
+/** Validate and extract an optional sourceFolder argument. Uses the
+ *  full-path validator (validateTargetFolder) since sourceFolder is a
+ *  complete IMAP path like `Folders/Work` or `Labels/Priority` — the
+ *  leaf-only validateFolderName would reject the embedded `/`. */
+function optionalSourceFolder(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, "'sourceFolder' must be a string when provided.");
+  }
+  const err = validateTargetFolder(raw);
+  if (err) throw new McpError(ErrorCode.InvalidParams, `Invalid sourceFolder: ${err}`);
+  return raw;
+}
 
 export const handlers: Record<string, ToolHandler> = {
   mark_email_read: async (ctx) => {
@@ -279,7 +316,8 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
     }
     const isRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
-    await imapService.markEmailRead(merEmailId, isRead);
+    const merSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.markEmailRead(merEmailId, isRead, merSourceFolder);
     return actionOk();
   },
 
@@ -290,7 +328,8 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
     }
     const isStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
-    await imapService.starEmail(seEmailId, isStarred);
+    const seSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.starEmail(seEmailId, isStarred, seSourceFolder);
     return actionOk();
   },
 
@@ -299,28 +338,32 @@ export const handlers: Record<string, ToolHandler> = {
     const mvEmailId = requireNumericEmailId(args.emailId);
     const mvValidErr = validateTargetFolder(args.targetFolder);
     if (mvValidErr) throw new McpError(ErrorCode.InvalidParams, mvValidErr);
-    await imapService.moveEmail(mvEmailId, args.targetFolder as string);
+    const mvSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.moveEmail(mvEmailId, args.targetFolder as string, mvSourceFolder);
     return actionOk();
   },
 
   archive_email: async (ctx) => {
     const { args, imapService, actionOk } = ctx;
     const aeEmailId = requireNumericEmailId(args.emailId);
-    await imapService.moveEmail(aeEmailId, "Archive");
+    const aeSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.moveEmail(aeEmailId, "Archive", aeSourceFolder);
     return actionOk();
   },
 
   move_to_trash: async (ctx) => {
     const { args, imapService, actionOk } = ctx;
     const mttEmailId = requireNumericEmailId(args.emailId);
-    await imapService.moveEmail(mttEmailId, "Trash");
+    const mttSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.moveEmail(mttEmailId, "Trash", mttSourceFolder);
     return actionOk();
   },
 
   move_to_spam: async (ctx) => {
     const { args, imapService, actionOk } = ctx;
     const mtsEmailId = requireNumericEmailId(args.emailId);
-    await imapService.moveEmail(mtsEmailId, "Spam");
+    const mtsSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.moveEmail(mtsEmailId, "Spam", mtsSourceFolder);
     return actionOk();
   },
 
@@ -330,7 +373,8 @@ export const handlers: Record<string, ToolHandler> = {
     const folderName = args.folder as string;
     const folderValidErr = validateFolderName(folderName);
     if (folderValidErr) throw new McpError(ErrorCode.InvalidParams, folderValidErr);
-    await imapService.moveEmail(mtfEmailId, `Folders/${folderName}`);
+    const mtfSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.moveEmail(mtfEmailId, `Folders/${folderName}`, mtfSourceFolder);
     return actionOk();
   },
 
@@ -349,7 +393,8 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
     }
     const bmrIsRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
-    const bmrResults = await imapService.bulkMarkRead(bmrEmailIds, bmrIsRead);
+    const bmrSourceFolder = optionalSourceFolder(args.sourceFolder);
+    const bmrResults = await imapService.bulkMarkRead(bmrEmailIds, bmrIsRead, bmrSourceFolder);
     await sendProgress(bmrEmailIds.length, bmrEmailIds.length, `Marked ${bmrResults.success} of ${bmrEmailIds.length} (${bmrResults.failed} failed)`);
     return bulkOk(bmrResults);
   },
@@ -369,7 +414,8 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
     }
     const bsIsStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
-    const bsResults = await imapService.bulkStar(bsEmailIds, bsIsStarred);
+    const bsSourceFolder = optionalSourceFolder(args.sourceFolder);
+    const bsResults = await imapService.bulkStar(bsEmailIds, bsIsStarred, bsSourceFolder);
     await sendProgress(bsEmailIds.length, bsEmailIds.length, `Starred ${bsResults.success} of ${bsEmailIds.length} (${bsResults.failed} failed)`);
     return bulkOk(bsResults);
   },
@@ -389,8 +435,9 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list. Email IDs must be numeric UID strings.");
     }
     const targetFolder = args.targetFolder as string;
+    const bmSourceFolder = optionalSourceFolder(args.sourceFolder);
 
-    const results = await imapService.bulkMoveEmails(emailIds, targetFolder);
+    const results = await imapService.bulkMoveEmails(emailIds, targetFolder, bmSourceFolder);
     await sendProgress(emailIds.length, emailIds.length, `Moved ${results.success} of ${emailIds.length} to ${targetFolder} (${results.failed} failed)`);
     state.analyticsCache = null;
     state.analyticsCacheInflight = null;
@@ -406,7 +453,8 @@ export const handlers: Record<string, ToolHandler> = {
     const label = args.label as string;
     const mtlValidErr = validateLabelName(label);
     if (mtlValidErr) throw new McpError(ErrorCode.InvalidParams, mtlValidErr);
-    await imapService.copyEmailToFolder(mtlEmailId, `Labels/${label}`);
+    const mtlSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.copyEmailToFolder(mtlEmailId, `Labels/${label}`, mtlSourceFolder);
     return actionOk();
   },
 
@@ -428,8 +476,9 @@ export const handlers: Record<string, ToolHandler> = {
     const bmlValidErr = validateLabelName(rawLabel);
     if (bmlValidErr) throw new McpError(ErrorCode.InvalidParams, bmlValidErr);
     const labelFolder = `Labels/${rawLabel}`;
+    const bmlSourceFolder = optionalSourceFolder(args.sourceFolder);
 
-    const results2 = await imapService.bulkCopyToFolder(emailIds2, labelFolder);
+    const results2 = await imapService.bulkCopyToFolder(emailIds2, labelFolder, bmlSourceFolder);
     await sendProgress(emailIds2.length, emailIds2.length, `Labeled ${results2.success} of ${emailIds2.length} (${results2.failed} failed)`);
     state.analyticsCache = null;
     state.analyticsCacheInflight = null;

@@ -1,0 +1,4 @@
+{
+  "_doc": "Acknowledged npm-audit advisories. Add entries here to silence specific HIGH/CRITICAL findings that are known-false-positives or have a documented mitigation. Schema: { allow: [{ id: <advisoryId>, reason: <text> }] }. Re-run `npm run check:npm-audit` to verify.",
+  "allow": []
+}
