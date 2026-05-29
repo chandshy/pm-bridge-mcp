@@ -14,17 +14,27 @@ jobs:
       id-token: write
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Use Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
       with:
         node-version: '20.x'
         registry-url: 'https://registry.npmjs.org'
         cache: 'npm'
 
+    # BUILD-011: `npm ci` runs every transitive's preinstall/install/postinstall
+    # script with `id-token: write` and `NPM_TOKEN` in scope. A single
+    # compromised transitive (next event-stream) could exfiltrate the publish
+    # token via a `postinstall` exec. `--ignore-scripts` blocks the entire
+    # lifecycle, then we rebuild ONLY the natives mailpouch actually depends on.
+    # If you add another native dep (e.g. `bcrypt`, `keytar`), it must be added
+    # to the `npm rebuild` line here, or its native binary won't be built.
     - name: Install dependencies
-      run: npm ci
+      run: npm ci --ignore-scripts
+
+    - name: Rebuild trusted native dependencies
+      run: npm rebuild better-sqlite3 @napi-rs/keyring
 
     - name: Run type checking
       run: npm run typecheck
@@ -61,17 +71,27 @@ jobs:
       packages: write
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Use Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
       with:
         node-version: '20.x'
         registry-url: 'https://npm.pkg.github.com'
         cache: 'npm'
 
+    # BUILD-011: `npm ci` runs every transitive's preinstall/install/postinstall
+    # script with `id-token: write` and `NPM_TOKEN` in scope. A single
+    # compromised transitive (next event-stream) could exfiltrate the publish
+    # token via a `postinstall` exec. `--ignore-scripts` blocks the entire
+    # lifecycle, then we rebuild ONLY the natives mailpouch actually depends on.
+    # If you add another native dep (e.g. `bcrypt`, `keytar`), it must be added
+    # to the `npm rebuild` line here, or its native binary won't be built.
     - name: Install dependencies
-      run: npm ci
+      run: npm ci --ignore-scripts
+
+    - name: Rebuild trusted native dependencies
+      run: npm rebuild better-sqlite3 @napi-rs/keyring
 
     - name: Build project
       run: npm run build
