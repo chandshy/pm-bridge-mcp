@@ -34,32 +34,143 @@ function makeLock() {
   return { release: vi.fn() };
 }
 
-// Default fetch mock: yields every UID in the requested range as "existing"
-// so existing tests pass without explicit fetch wiring. Tests that need to
-// simulate missing UIDs override this with a custom fetch implementation.
-function defaultFetchMock() {
-  return vi.fn().mockImplementation((range: unknown) => {
-    const ids = String(range)
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => /^\d+$/.test(s));
-    return (async function* () {
-      for (const id of ids) yield { uid: Number(id) };
-    })();
-  });
+// ─── TEST-001 / TEST-002 (audit 2026-05-28): honest IMAP mocks ────────────────
+//
+// The pre-Batch-7 helpers had two falsehoods:
+//   • `defaultFetchMock()` yielded any UID in any range, so the UID-existence
+//     pre-flight in production code always succeeded — even if a test seeded
+//     nothing.
+//   • `messageMove` / `messageDelete` / `messageFlagsAdd` / `messageCopy`
+//     ignored which mailbox was currently locked by `getMailboxLock`, so a
+//     test could lock INBOX and "successfully" move a UID that only lived in
+//     Sent.
+//
+// The replacement helpers below model real IMAP semantics:
+//   • Each client owns a per-folder UID seed map. Default is empty.
+//   • `getMailboxLock(folder)` records the locked folder; `lock.release()`
+//     clears it.
+//   • `fetch(range)` (used for the UID pre-flight) yields only UIDs that
+//     exist in the currently-locked folder. No lock → no yields.
+//   • `messageMove` / `messageDelete` / `messageFlagsAdd` / `messageFlagsRemove`
+//     / `messageCopy` reject when any requested UID isn't in the locked
+//     folder's seed set (modelling the IMAP server replying "no such UID").
+//
+// Tests that previously relied on the permissive default must call
+// `seedUids(client, "<folder>", [<uid>, …])` explicitly.
+
+interface MockClientState {
+  uidsByFolder: Map<string, Set<string>>;
+  lockedFolder: string | null;
+}
+
+/** Stored on the returned client object so test helpers can mutate it. */
+const STATE_KEY = "__mailpouchMockState";
+
+function clientState(client: Record<string, unknown>): MockClientState {
+  return client[STATE_KEY] as MockClientState;
+}
+
+/** Seed a per-folder UID table. Call before any operation that touches `folder`. */
+export function seedUids(
+  client: Record<string, unknown>,
+  folder: string,
+  uids: Array<number | string>,
+): void {
+  const state = clientState(client);
+  let set = state.uidsByFolder.get(folder);
+  if (!set) {
+    set = new Set();
+    state.uidsByFolder.set(folder, set);
+  }
+  for (const u of uids) set.add(String(u));
+}
+
+function parseUidRange(range: unknown): string[] {
+  return String(range)
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^\d+$/.test(s));
+}
+
+/** Validate that every UID in `range` lives in the currently-locked folder. */
+function assertUidsBelongToLockedFolder(state: MockClientState, range: unknown, op: string): void {
+  const ids = parseUidRange(range);
+  if (state.lockedFolder == null) {
+    throw new Error(`${op} called with no mailbox locked (uids=${ids.join(",")})`);
+  }
+  const seeded = state.uidsByFolder.get(state.lockedFolder) ?? new Set<string>();
+  const missing = ids.filter((id) => !seeded.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `${op}: UID(s) ${missing.join(",")} not in locked folder ${state.lockedFolder}`,
+    );
+  }
 }
 
 function makeClient(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
-    messageFlagsAdd: vi.fn().mockResolvedValue(undefined),
-    messageFlagsRemove: vi.fn().mockResolvedValue(undefined),
-    messageMove: vi.fn().mockResolvedValue(undefined),
-    messageCopy: vi.fn().mockResolvedValue(undefined),
-    messageDelete: vi.fn().mockResolvedValue(undefined),
-    fetch: defaultFetchMock(),
+  const state: MockClientState = {
+    uidsByFolder: new Map(),
+    lockedFolder: null,
+  };
+
+  const lockedFolderFetch = vi.fn().mockImplementation((range: unknown) => {
+    const ids = parseUidRange(range);
+    const folder = state.lockedFolder;
+    const seeded = folder ? state.uidsByFolder.get(folder) ?? new Set<string>() : new Set<string>();
+    return (async function* () {
+      for (const id of ids) {
+        if (seeded.has(id)) yield { uid: Number(id) };
+      }
+    })();
+  });
+
+  const getMailboxLock = vi.fn().mockImplementation(async (folder: string) => {
+    state.lockedFolder = folder;
+    return {
+      release: vi.fn().mockImplementation(() => {
+        state.lockedFolder = null;
+      }),
+    };
+  });
+
+  const messageFlagsAdd = vi.fn().mockImplementation(async (range: unknown, _flags: unknown, _opts: unknown) => {
+    assertUidsBelongToLockedFolder(state, range, "messageFlagsAdd");
+  });
+  const messageFlagsRemove = vi.fn().mockImplementation(async (range: unknown, _flags: unknown, _opts: unknown) => {
+    assertUidsBelongToLockedFolder(state, range, "messageFlagsRemove");
+  });
+  const messageMove = vi.fn().mockImplementation(async (range: unknown, _target: unknown, _opts: unknown) => {
+    assertUidsBelongToLockedFolder(state, range, "messageMove");
+    // Remove the moved UIDs from the source folder. Tests don't currently
+    // inspect the target seed set, so we don't add them there.
+    if (state.lockedFolder) {
+      const set = state.uidsByFolder.get(state.lockedFolder);
+      if (set) for (const id of parseUidRange(range)) set.delete(id);
+    }
+  });
+  const messageCopy = vi.fn().mockImplementation(async (range: unknown, _target: unknown, _opts: unknown) => {
+    assertUidsBelongToLockedFolder(state, range, "messageCopy");
+  });
+  const messageDelete = vi.fn().mockImplementation(async (range: unknown, _opts: unknown) => {
+    assertUidsBelongToLockedFolder(state, range, "messageDelete");
+    if (state.lockedFolder) {
+      const set = state.uidsByFolder.get(state.lockedFolder);
+      if (set) for (const id of parseUidRange(range)) set.delete(id);
+    }
+  });
+
+  const client: Record<string, unknown> = {
+    [STATE_KEY]: state,
+    getMailboxLock,
+    messageFlagsAdd,
+    messageFlagsRemove,
+    messageMove,
+    messageCopy,
+    messageDelete,
+    fetch: lockedFolderFetch,
     ...overrides,
   };
+  return client;
 }
 
 function connectSvc(svc: SimpleIMAPService, clientOverrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -82,6 +193,7 @@ describe("SimpleIMAPService.markEmailRead", () => {
   it("marks email as read (adds \\Seen flag)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [42]);
     const email = makeEmail("42");
     vi.spyOn(svc, "getEmailById").mockResolvedValue(email);
 
@@ -95,6 +207,7 @@ describe("SimpleIMAPService.markEmailRead", () => {
   it("marks email as unread (removes \\Seen flag)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [43]);
     const email = makeEmail("43");
     vi.spyOn(svc, "getEmailById").mockResolvedValue(email);
 
@@ -106,7 +219,8 @@ describe("SimpleIMAPService.markEmailRead", () => {
 
   it("updates cache isRead when entry is present", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc);
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [44]);
     const email = makeEmail("44");
     // Seed the cache
     (svc as any).setCacheEntry("44", email);
@@ -139,6 +253,7 @@ describe("SimpleIMAPService.starEmail", () => {
   it("stars email (adds \\Flagged flag)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [10]);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("10"));
 
     const result = await svc.starEmail("10", true);
@@ -150,6 +265,7 @@ describe("SimpleIMAPService.starEmail", () => {
   it("unstars email (removes \\Flagged flag)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [11]);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("11"));
 
     await svc.starEmail("11", false);
@@ -159,7 +275,8 @@ describe("SimpleIMAPService.starEmail", () => {
 
   it("updates cache isStarred when entry is present", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc);
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [12]);
     const email = makeEmail("12");
     (svc as any).setCacheEntry("12", email);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(email);
@@ -191,6 +308,7 @@ describe("SimpleIMAPService.moveEmail", () => {
   it("moves email and returns true", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [20]);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("20", "INBOX"));
 
     const result = await svc.moveEmail("20", "Trash");
@@ -201,7 +319,8 @@ describe("SimpleIMAPService.moveEmail", () => {
 
   it("evicts old cache entry on move (UID is not stable across folders)", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc);
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [21]);
     const email = makeEmail("21", "INBOX");
     (svc as any).setCacheEntry("21", email);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(email);
@@ -233,6 +352,7 @@ describe("SimpleIMAPService.copyEmailToFolder", () => {
   it("copies email and returns true", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [30]);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("30", "INBOX"));
 
     const result = await svc.copyEmailToFolder("30", "Labels/Work");
@@ -263,6 +383,7 @@ describe("SimpleIMAPService.deleteFromFolder", () => {
   it("deletes email from folder and returns true", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [50]);
 
     const result = await svc.deleteFromFolder("50", "INBOX");
 
@@ -272,7 +393,8 @@ describe("SimpleIMAPService.deleteFromFolder", () => {
 
   it("evicts cache entry after deletion", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc);
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [51]);
     (svc as any).setCacheEntry("51", makeEmail("51"));
 
     await svc.deleteFromFolder("51", "INBOX");
@@ -282,7 +404,9 @@ describe("SimpleIMAPService.deleteFromFolder", () => {
 
   it("throws when messageDelete fails", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc, { messageDelete: vi.fn().mockRejectedValue(new Error("EXPUNGED")) });
+    // Seed the UID so the pre-flight passes, then have messageDelete throw.
+    const client = connectSvc(svc, { messageDelete: vi.fn().mockRejectedValue(new Error("EXPUNGED")) });
+    seedUids(client, "INBOX", [52]);
 
     await expect(svc.deleteFromFolder("52", "INBOX")).rejects.toThrow("EXPUNGED");
   });
@@ -300,6 +424,7 @@ describe("SimpleIMAPService.deleteEmail", () => {
   it("deletes email and returns true", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [60]);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("60"));
 
     const result = await svc.deleteEmail("60");
@@ -310,7 +435,8 @@ describe("SimpleIMAPService.deleteEmail", () => {
 
   it("evicts email from cache after deletion", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc);
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [61]);
     const email = makeEmail("61");
     (svc as any).setCacheEntry("61", email);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(email);
@@ -341,6 +467,7 @@ describe("SimpleIMAPService.setFlag", () => {
   it("adds flag using cached folder (avoids scanning all folders)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [70]);
     // Seed the cache so setFlag can find the folder without scanning
     (svc as any).setCacheEntry("70", makeEmail("70", "INBOX"));
 
@@ -355,6 +482,7 @@ describe("SimpleIMAPService.setFlag", () => {
   it("removes flag when set=false", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Sent", [71]);
     (svc as any).setCacheEntry("71", makeEmail("71", "Sent"));
 
     await svc.setFlag("71", "$Forwarded", false);
@@ -438,6 +566,7 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
   it("batch-moves emails grouped by folder", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [80, 81]);
     // Seed two emails in INBOX
     (svc as any).setCacheEntry("80", makeEmail("80", "INBOX"));
     (svc as any).setCacheEntry("81", makeEmail("81", "INBOX"));
@@ -461,6 +590,7 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
         .mockRejectedValueOnce(new Error("batch error"))
         .mockResolvedValue(undefined),
     });
+    seedUids(client, "INBOX", [82, 83]);
     (svc as any).setCacheEntry("82", makeEmail("82", "INBOX"));
     (svc as any).setCacheEntry("83", makeEmail("83", "INBOX"));
 
@@ -473,9 +603,10 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
   it("records per-email failure in fallback mode", async () => {
     const svc = new SimpleIMAPService();
     // Batch fails, then per-email also fails
-    connectSvc(svc, {
+    const client = connectSvc(svc, {
       messageMove: vi.fn().mockRejectedValue(new Error("always fails")),
     });
+    seedUids(client, "INBOX", [84]);
     (svc as any).setCacheEntry("84", makeEmail("84", "INBOX"));
 
     const results = await svc.bulkMoveEmails(["84"], "Trash");
@@ -498,6 +629,7 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
   it("discovers folder via getEmailById when email not in cache", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [95]);
     // Email 95 is NOT in cache — getEmailById is called to discover its folder
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("95", "INBOX"));
 
@@ -520,11 +652,12 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
 
   it("handles non-Error in per-email fallback (line 1559 branch 1)", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc, {
+    const client = connectSvc(svc, {
       messageMove: vi.fn()
         .mockRejectedValueOnce(new Error("batch fail")) // batch fails
         .mockRejectedValueOnce("string error"),          // per-email fails with non-Error
     });
+    seedUids(client, "INBOX", [96]);
     (svc as any).setCacheEntry("96", makeEmail("96", "INBOX"));
 
     const results = await svc.bulkMoveEmails(["96"], "Trash");
@@ -535,7 +668,8 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
 
   it("skips cache eviction when email not in cache after successful batch move", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc);
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [97]);
     // Email 97 is NOT in cache — getEmailById discovers its folder, then move succeeds
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("97", "INBOX"));
 
@@ -557,6 +691,7 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
   it("batch-deletes emails grouped by folder", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [90, 91]);
     (svc as any).setCacheEntry("90", makeEmail("90", "INBOX"));
     (svc as any).setCacheEntry("91", makeEmail("91", "INBOX"));
 
@@ -572,11 +707,12 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
 
   it("falls back to per-email delete when batch fails", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc, {
+    const client = connectSvc(svc, {
       messageDelete: vi.fn()
         .mockRejectedValueOnce(new Error("batch error"))
         .mockResolvedValue(undefined),
     });
+    seedUids(client, "INBOX", [92, 93]);
     (svc as any).setCacheEntry("92", makeEmail("92", "INBOX"));
     (svc as any).setCacheEntry("93", makeEmail("93", "INBOX"));
 
@@ -588,9 +724,10 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
 
   it("records per-email failure in fallback mode", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc, {
+    const client = connectSvc(svc, {
       messageDelete: vi.fn().mockRejectedValue(new Error("EXPUNGED")),
     });
+    seedUids(client, "INBOX", [94]);
     (svc as any).setCacheEntry("94", makeEmail("94", "INBOX"));
 
     const results = await svc.bulkDeleteEmails(["94"]);
@@ -622,11 +759,12 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
 
   it("handles non-Error in per-email delete fallback (line 1665 branch 1)", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc, {
+    const client = connectSvc(svc, {
       messageDelete: vi.fn()
         .mockRejectedValueOnce(new Error("batch fail"))
         .mockRejectedValueOnce("delete-error-string"),
     });
+    seedUids(client, "INBOX", [96]);
     (svc as any).setCacheEntry("96", makeEmail("96", "INBOX"));
 
     const results = await svc.bulkDeleteEmails(["96"]);
@@ -638,6 +776,7 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
   it("discovers folder via getEmailById when email not in cache", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "INBOX", [95]);
     // Email "95" is NOT in cache — getEmailById is called to discover its folder
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("95", "INBOX"));
 
@@ -1543,11 +1682,12 @@ describe("SimpleIMAPService.setFlag non-matching UID", () => {
 describe("SimpleIMAPService.bulkMoveEmails per-email cache update", () => {
   it("skips cache eviction in per-email fallback when email not in cache", async () => {
     const svc = new SimpleIMAPService();
-    connectSvc(svc, {
+    const client = connectSvc(svc, {
       messageMove: vi.fn()
         .mockRejectedValueOnce(new Error("batch fail")) // batch fails → per-email fallback
         .mockResolvedValueOnce(undefined),               // per-email succeeds
     });
+    seedUids(client, "INBOX", [198]);
     // Email "198" is NOT in cache → getEmailById is called to discover folder
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("198", "INBOX"));
 
@@ -1600,6 +1740,7 @@ describe("sourceFolder param: source-folder-specific UID resolution", () => {
   it("bulkMoveEmails(sourceFolder=Folders/X) locks Folders/X, not INBOX", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/BulkTestMove", [1]);
     // Seed a stale INBOX cache entry for the same UID — without sourceFolder
     // we'd lock INBOX (the bug). With sourceFolder we must lock the explicit one.
     (svc as any).setCacheEntry("1", makeEmail("1", "INBOX"));
@@ -1614,6 +1755,7 @@ describe("sourceFolder param: source-folder-specific UID resolution", () => {
   it("moveEmail(sourceFolder=Folders/X) locks Folders/X without calling getEmailById", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/BulkTestMove", [1]);
     const gebSpy = vi.spyOn(svc, "getEmailById");
 
     const result = await svc.moveEmail("1", "Archive", "Folders/BulkTestMove");
@@ -1627,6 +1769,7 @@ describe("sourceFolder param: source-folder-specific UID resolution", () => {
   it("bulkMarkRead(sourceFolder=Folders/X) locks Folders/X, not INBOX", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/BulkTestMove", [1, 2]);
 
     const results = await svc.bulkMarkRead(["1", "2"], true, "Folders/BulkTestMove");
 
@@ -1638,6 +1781,7 @@ describe("sourceFolder param: source-folder-specific UID resolution", () => {
   it("bulkStar(sourceFolder=Folders/X) locks Folders/X, not INBOX", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/BulkTestMove", [7]);
 
     const results = await svc.bulkStar(["7"], true, "Folders/BulkTestMove");
 
@@ -1649,6 +1793,7 @@ describe("sourceFolder param: source-folder-specific UID resolution", () => {
   it("bulkDeleteEmails(sourceFolder=Folders/X) locks Folders/X without scanning", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/BulkTestMove", [3, 4]);
     const gebSpy = vi.spyOn(svc, "getEmailById");
 
     const results = await svc.bulkDeleteEmails(["3", "4"], "Folders/BulkTestMove");
@@ -1709,6 +1854,10 @@ describe("UID existence pre-flight: missing UIDs count as failed, not silent suc
   it("bulkMoveEmails partial existence: present UIDs move, missing UIDs fail", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc, { fetch: fetchYielding(["1", "3"]) });
+    // The custom fetch override decides what the UID pre-flight returns; seed
+    // the same UIDs into the honest messageMove guard so the real wire call
+    // doesn't fail the mutation step.
+    seedUids(client, "Folders/BulkTestMove", [1, 3]);
 
     const results = await svc.bulkMoveEmails(["1", "2", "3"], "Archive", "Folders/BulkTestMove");
 
@@ -1744,6 +1893,7 @@ describe("v3.0.44 sibling-path fixes (IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009)
   it("bulkMarkRead without sourceFolder discovers folder via getEmailById (not INBOX default)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/Work", [42]);
     // Cache MISS — must call getEmailById to discover
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("42", "Folders/Work"));
 
@@ -1769,6 +1919,7 @@ describe("v3.0.44 sibling-path fixes (IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009)
   it("bulkStar without sourceFolder discovers folder via getEmailById", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Labels/Priority", [7]);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("7", "Labels/Priority"));
 
     const results = await svc.bulkStar(["7"], true);
@@ -1780,6 +1931,7 @@ describe("v3.0.44 sibling-path fixes (IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009)
   it("bulkCopyToFolder without sourceFolder discovers folder via getEmailById", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/X", [12]);
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("12", "Folders/X"));
 
     const results = await svc.bulkCopyToFolder(["12"], "Labels/Y");
@@ -1844,6 +1996,7 @@ describe("v3.0.44 sibling-path fixes (IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009)
   it("setFlag with sourceFolder locks the specified folder and skips the scan (IMAP-009)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
+    seedUids(client, "Folders/Priority", [5]);
     const getEmailByIdSpy = vi.spyOn(svc, "getEmailById");
 
     const result = await svc.setFlag("5", "\\Flagged", true, "Folders/Priority");
@@ -1950,7 +2103,10 @@ describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
     const uids = Array.from({ length: 2000 }, (_, i) => String(1_000_000 + i));
-    // fetch must report every UID present; default mock does that.
+    // Seed every UID into the locked folder so the honest fetch pre-flight
+    // reports them as present (mirrors the old permissive-default behaviour
+    // but only for this folder).
+    seedUids(client, "INBOX", uids);
     await svc.bulkDeleteEmails(uids, "INBOX");
 
     const calls = (client.messageDelete as ReturnType<typeof vi.fn>).mock.calls;
@@ -1979,6 +2135,7 @@ describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
       return undefined;
     });
     const client = connectSvc(svc, { messageMove });
+    seedUids(client, "INBOX", uids);
 
     vi.spyOn(svc, "getEmailById").mockImplementation(async (id) => makeEmail(id, "INBOX"));
 

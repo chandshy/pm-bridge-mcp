@@ -4,7 +4,7 @@
  * the actual home directory.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ReminderService } from "./reminder-service.js";
 import { rmSync, existsSync } from "fs";
 import { join } from "path";
@@ -106,13 +106,25 @@ describe("ReminderService", () => {
   });
 
   it("prune() removes fired/cancelled records older than the retention window", () => {
-    const svc = new ReminderService(path);
-    const old = svc.add({ messageId: "<a>", recipient: "a@x", subject: "old", sentAt: new Date("2026-01-01Z"), afterDays: 1 });
-    svc.scanDue(new Date("2026-02-01Z"));
-    // After 2026-03-15 the old fired record is outside a 30-day window.
-    const removed = svc.prune(30); // retain last 30 days (prune uses Date.now)
-    expect(removed).toBeGreaterThanOrEqual(1);
-    expect(svc.listAll().find(r => r.id === old.id)).toBeUndefined();
+    // TEST-004 (audit 2026-05-28): prune() compares against `Date.now()`. The
+    // original test only passed when the wall-clock was after ~2026-03-03, so
+    // any CI lane stuck in early 2026 (or any locally faked clock) would
+    // fail. Pin the system clock to a fixed date so the assertion is
+    // deterministic across environments.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-03-15T00:00:00Z"));
+      const svc = new ReminderService(path);
+      const old = svc.add({ messageId: "<a>", recipient: "a@x", subject: "old", sentAt: new Date("2026-01-01Z"), afterDays: 1 });
+      svc.scanDue(new Date("2026-02-01Z"));
+      // 2026-03-15 minus 30 days = 2026-02-13; the old fired record (fired
+      // 2026-02-01) is outside the window and must be pruned.
+      const removed = svc.prune(30); // retain last 30 days (prune uses Date.now)
+      expect(removed).toBeGreaterThanOrEqual(1);
+      expect(svc.listAll().find(r => r.id === old.id)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recovers from a malformed file by starting empty", async () => {

@@ -181,6 +181,15 @@ export class SMTPService {
       tlsOptions = { minVersion: "TLSv1.2" };
     }
 
+    // requireTLS forces nodemailer to issue STARTTLS and reject the
+    // connection if the server doesn't advertise it. For real Bridge this
+    // is always correct (Bridge advertises STARTTLS on its localhost
+    // socket); for the Greenmail E2E harness the embedded SMTP server does
+    // NOT advertise STARTTLS, so respect the existing insecure opt-in
+    // signal (allowInsecureBridge / MAILPOUCH_INSECURE_BRIDGE=1) for both
+    // sides of the TLS contract — pinning verification AND the upgrade
+    // requirement. This keeps production behaviour identical (those flags
+    // are unset in real deployments) while making the test harness usable.
     this.transporter = nodemailer.createTransport({
       host: this.config.smtp.host,
       port: this.config.smtp.port,
@@ -189,7 +198,7 @@ export class SMTPService {
         user: this.config.smtp.username,
         pass: authPassword,
       },
-      requireTLS: isLocalhost,
+      requireTLS: isLocalhost && !allowInsecure,
       tls: tlsOptions,
     });
 
@@ -312,8 +321,20 @@ export class SMTPService {
     }
 
     try {
+      // Real Proton Bridge always uses a full email as the SMTP username
+      // (e.g. "chuck@protonmail.com"), so `from: username` is a valid address.
+      // The Greenmail E2E harness, by contrast, provisions users with bare
+      // logins ("alice"), so nodemailer would build `MAIL FROM:<>` and the
+      // server rejects "503 MAIL must come before RCPT". When MAILPOUCH_SMTP_FROM
+      // is set (only in the Greenmail E2E harness) it overrides the From
+      // header AND the envelope sender. Production is unaffected — operators
+      // never set this env var.
+      const fromOverride = process.env.MAILPOUCH_SMTP_FROM?.trim();
+      const fromAddress = fromOverride && isValidEmail(fromOverride)
+        ? fromOverride
+        : this.config.smtp.username;
       const mailOptions: nodemailer.SendMailOptions = {
-        from: this.config.smtp.username,
+        from: fromAddress,
         to: toAddresses.join(", "),
         // Strip CRLF/NUL to prevent header injection via a crafted subject line.
         // reply_to_email already strips these from fetched subjects; this covers

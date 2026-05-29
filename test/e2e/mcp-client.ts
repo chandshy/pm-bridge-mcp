@@ -184,6 +184,14 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     imapPass = bridge.password;
   }
 
+  // Greenmail provisions users with bare logins ("alice") but rejects
+  // outbound SMTP when MAIL FROM lacks a domain. Real Bridge has full-email
+  // usernames so this is normally a no-op. The MAILPOUCH_SMTP_FROM env var
+  // (production unaware of it) supplies a domain-qualified From for the
+  // Greenmail-only harness; bridge mode leaves it unset.
+  const smtpFromOverride = mode === "greenmail"
+    ? `${imapUser}@test.local`
+    : undefined;
   const transport = new StdioClientTransport({
     command: "node",
     args: [SERVER],
@@ -192,6 +200,7 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
       MAILPOUCH_CONFIG: configPath,
       MAILPOUCH_INSECURE_BRIDGE: "1",
       MAILPOUCH_TIER: "complete",
+      ...(smtpFromOverride ? { MAILPOUCH_SMTP_FROM: smtpFromOverride } : {}),
     },
   });
 
