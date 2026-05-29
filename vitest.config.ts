@@ -8,7 +8,10 @@ export default defineConfig({
     // E2E suite is run by vitest.config.e2e.ts via npm run test:e2e:* —
     // exclude from the default unit-test run so `npm test` stays fast and
     // doesn't require Docker / Bridge.
-    exclude: ['test/e2e/**', 'node_modules/**', 'dist/**'],
+    // `.claude/**` is a Claude Code internal artifact (agent worktrees,
+    // session state) and never contains project tests — excluding so
+    // background agents don't pollute local test runs.
+    exclude: ['test/e2e/**', 'node_modules/**', 'dist/**', '.claude/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

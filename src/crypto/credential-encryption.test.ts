@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { CredentialEncryption } from "./credential-encryption.js";
+import { CredentialEncryption, getMachineSecret } from "./credential-encryption.js";
 
 describe("CredentialEncryption", () => {
   it("encrypt → decrypt round-trips correctly", () => {
@@ -108,5 +108,81 @@ describe("CredentialEncryption", () => {
     };
     expect(CredentialEncryption.decrypt(v1Blob)).toBe("legacy-secret");
     expect(CredentialEncryption.needsReencrypt(v1Blob)).toBe(true);
+  });
+
+  // ─── CRED-003 (audit 2026-05-28): v3 scrypt-based key derivation ────────
+
+  it("CURRENT_VERSION is 3 and encrypt() writes the new salt field", () => {
+    expect(CredentialEncryption.CURRENT_VERSION).toBe(3);
+    const enc = CredentialEncryption.encrypt("v3-secret");
+    expect(enc.version).toBe(3);
+    expect(typeof enc.salt).toBe("string");
+    expect(enc.salt && enc.salt.length).toBeGreaterThan(0);
+    // 16-byte salt encoded base64 = at least 22 chars, ≤ 24.
+    expect(Buffer.from(enc.salt!, "base64").length).toBe(16);
+  });
+
+  it("v3 → v3 round-trip succeeds", () => {
+    const enc = CredentialEncryption.encrypt("v3-round-trip");
+    expect(CredentialEncryption.decrypt(enc)).toBe("v3-round-trip");
+  });
+
+  it("two v3 encryptions of the same plaintext use different salts AND different ciphertexts", () => {
+    const a = CredentialEncryption.encrypt("same");
+    const b = CredentialEncryption.encrypt("same");
+    expect(a.salt).not.toBe(b.salt);
+    expect(a.iv).not.toBe(b.iv);
+    expect(a.encryptedData).not.toBe(b.encryptedData);
+  });
+
+  it("v3 decrypt rejects a blob missing its salt (forged downgrade attempt)", () => {
+    const enc = CredentialEncryption.encrypt("guarded");
+    const noSalt: typeof enc = { ...enc };
+    delete (noSalt as { salt?: string }).salt;
+    expect(() => CredentialEncryption.decrypt(noSalt)).toThrow();
+    expect(CredentialEncryption.isValidEncrypted(noSalt)).toBe(false);
+  });
+
+  it("isValidEncrypted requires salt for v3 blobs but tolerates absence for v1/v2", () => {
+    const v1ish = {
+      algorithm: "aes-256-gcm" as const,
+      version: 1,
+      iv: "a".repeat(24),
+      encryptedData: "b".repeat(8),
+      authTag: "c".repeat(24),
+    };
+    expect(CredentialEncryption.isValidEncrypted(v1ish)).toBe(true);
+    const v3WithoutSalt = { ...v1ish, version: 3 };
+    expect(CredentialEncryption.isValidEncrypted(v3WithoutSalt)).toBe(false);
+  });
+
+  it("can still decrypt v2 blobs after the v3 cutover (transparent back-compat)", () => {
+    // Construct a v2 blob via the documented v2 derivation. Mirrors the v1
+    // back-compat test but for the sha256(machine||host||salt||platform) form.
+    const { createCipheriv, createHash, randomBytes } = require("crypto");
+    const { hostname, platform } = require("os");
+    const APP_SALT = "/mailpouch/credential-encryption/v1";
+    const v2Material = `${getMachineSecret()}|${hostname()}|${APP_SALT}|${platform()}`;
+    const v2Key = createHash("sha256").update(v2Material, "utf8").digest();
+    const iv = randomBytes(16);
+    const cipher = createCipheriv("aes-256-gcm", v2Key, iv);
+    let encryptedData = cipher.update("v2-secret", "utf8", "base64");
+    encryptedData += cipher.final("base64");
+    const authTag = cipher.getAuthTag();
+    const v2Blob = {
+      algorithm: "aes-256-gcm" as const,
+      version: 2,
+      iv: iv.toString("base64"),
+      encryptedData,
+      authTag: authTag.toString("base64"),
+    };
+    expect(CredentialEncryption.decrypt(v2Blob)).toBe("v2-secret");
+    expect(CredentialEncryption.needsReencrypt(v2Blob)).toBe(true);
+  });
+
+  it("decrypt with the wrong salt fails authentication (proves salt binds the key)", () => {
+    const enc = CredentialEncryption.encrypt("salt-matters");
+    const swapped = { ...enc, salt: Buffer.alloc(16, 0xff).toString("base64") };
+    expect(() => CredentialEncryption.decrypt(swapped)).toThrow();
   });
 });

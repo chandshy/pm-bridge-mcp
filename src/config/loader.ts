@@ -28,6 +28,8 @@ import {
   isKeychainAvailable,
   loadCredentials as loadKeychainCredentials,
   saveCredentials as saveKeychainCredentials,
+  loadAuxiliaryCredentials as loadKeychainAuxCredentials,
+  saveAuxiliaryCredentials as saveKeychainAuxCredentials,
   migrateFromConfig,
 } from "../security/keychain.js";
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
@@ -444,6 +446,8 @@ export async function loadCredentialsFromKeychain(): Promise<{
 export async function saveConfigWithCredentials(config: ServerConfig): Promise<"keychain" | "encrypted-file" | "config"> {
   const password  = config.connection.password;
   const smtpToken = config.connection.smtpToken;
+  const passPat = config.connection.passAccessToken;
+  const simpleloginKey = config.connection.simpleloginApiKey;
 
   // 1. Try keychain
   const keychainOk = await saveKeychainCredentials(password, smtpToken);
@@ -452,6 +456,16 @@ export async function saveConfigWithCredentials(config: ServerConfig): Promise<"
     config.connection.smtpToken = "";
     delete config.connection.passwordEncrypted;
     delete config.connection.smtpTokenEncrypted;
+    // CRED-001: route Pass PAT + SimpleLogin API key to keychain too.
+    // Best-effort: if the aux save fails, leave the fields on disk — the
+    // settings save reporting "keychain" stays honest for the bridge creds.
+    if (passPat || simpleloginKey) {
+      const auxOk = await saveKeychainAuxCredentials(passPat ?? "", simpleloginKey ?? "");
+      if (auxOk) {
+        config.connection.passAccessToken = "";
+        config.connection.simpleloginApiKey = "";
+      }
+    }
     config.credentialStorage = "keychain";
     saveConfig(config);
     return "keychain";
@@ -469,6 +483,32 @@ export async function saveConfigWithCredentials(config: ServerConfig): Promise<"
   config.credentialStorage = "encrypted-file";
   saveConfig(config);
   return "encrypted-file";
+}
+
+/**
+ * Load passAccessToken + simpleloginApiKey from the keychain, falling back
+ * to the config-file plaintext if the keychain has neither. Used at startup
+ * to rehydrate the in-process clients after migrateCredentials() has blanked
+ * the disk fields. Returns null if neither secret is configured anywhere.
+ */
+export async function loadAuxiliaryCredentialsFromKeychain(): Promise<{
+  passAccessToken: string;
+  simpleloginApiKey: string;
+  storage: "keychain" | "config";
+} | null> {
+  const fromKeychain = await loadKeychainAuxCredentials();
+  if (fromKeychain) {
+    return { ...fromKeychain, storage: "keychain" as const };
+  }
+  const config = loadConfig();
+  if (config && (config.connection.passAccessToken || config.connection.simpleloginApiKey)) {
+    return {
+      passAccessToken: config.connection.passAccessToken ?? "",
+      simpleloginApiKey: config.connection.simpleloginApiKey ?? "",
+      storage: "config" as const,
+    };
+  }
+  return null;
 }
 
 /**

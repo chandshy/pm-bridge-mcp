@@ -56,7 +56,7 @@ import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
-import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain } from "./config/loader.js";
+import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName } from "./config/schema.js";
 import { DESTRUCTIVE_TOOLS, toolsForTier, parseToolTier } from "./config/schema.js";
 
@@ -163,11 +163,7 @@ accountManager.on("active-changed", (ev: { services: { imap: SimpleIMAPService; 
 let simpleloginService = new SimpleLoginService("");
 const analyticsService = new AnalyticsService();
 
-function _homeFile(envName: string, basename: string): string {
-  const envPath = process.env[envName];
-  if (envPath) return envPath;
-  return nodePath.join(homedir(), basename);
-}
+import { homeFile as _homeFile } from "./utils/home-path.js";
 
 const SCHEDULER_STORE = _homeFile("MAILPOUCH_SCHEDULER_STORE", ".mailpouch-scheduled.json");
 const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
@@ -1853,13 +1849,27 @@ async function main() {
       config.bridgePath         = cn.bridgePath || undefined;
       config.settingsPort       = fileConfig.settingsPort ?? 8765;
 
+      // CRED-001: Pass PAT + SimpleLogin API key now keychain-routable.
+      // After migrateCredentials() runs, the disk fields are blank — read
+      // from keychain first, fall back to the (newly-saved or unmigrated)
+      // disk fields.
+      const auxCreds = await loadAuxiliaryCredentialsFromKeychain();
+      const effectiveSimpleloginKey = auxCreds?.simpleloginApiKey || cn.simpleloginApiKey || "";
+      const effectivePassPat        = auxCreds?.passAccessToken   || cn.passAccessToken   || "";
+      // Storage source for the log line — `auxCreds.storage` is "keychain"
+      // when the secret came from the keychain entry, "config" when
+      // loadAuxiliaryCredentialsFromKeychain fell back to the disk file.
+      // Checking the value (e.g. `auxCreds?.simpleloginApiKey`) would
+      // overclaim "keychain" whenever the disk-fallback value was non-empty.
+      const auxSource = auxCreds?.storage ?? "config";
+
       // SimpleLogin client — populated from config; stays empty (isConfigured=false) if no key.
-      if (cn.simpleloginApiKey) {
+      if (effectiveSimpleloginKey) {
         simpleloginService = new SimpleLoginService(
-          cn.simpleloginApiKey,
+          effectiveSimpleloginKey,
           cn.simpleloginBaseUrl || undefined,
         );
-        logger.info("SimpleLogin client configured (alias_* tools active)", "MCPServer");
+        logger.info(`SimpleLogin client configured (alias_* tools active, source=${auxSource})`, "MCPServer");
       }
       logger.setDebugMode(!!cn.debug);
       tracer.setEnabled(!!cn.debug);
@@ -1867,13 +1877,13 @@ async function main() {
       // Proton Pass — constructed only when a PAT is configured. Pass is a
       // credential vault; errors from a missing CLI shouldn't crash the
       // server on startup. Mail tools work fine without it.
-      if (cn.passAccessToken) {
+      if (effectivePassPat) {
         passService = new PassService({
-          personalAccessToken: cn.passAccessToken,
+          personalAccessToken: effectivePassPat,
           cliPath: cn.passCliPath || undefined,
           auditLogPath: PASS_AUDIT_PATH,
         });
-        logger.info("Proton Pass client configured (pass_* tools active)", "MCPServer");
+        logger.info(`Proton Pass client configured (pass_* tools active, source=${auxSource})`, "MCPServer");
       }
 
       // Password: keychain takes priority over config file plaintext

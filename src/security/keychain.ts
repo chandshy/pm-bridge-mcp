@@ -20,6 +20,12 @@ const KEY_PASSWORD = "bridge-password";
 const KEY_SMTP_TOKEN = "smtp-token";
 const KEY_REMOTE_BEARER = "remote-bearer-token";
 const KEY_REMOTE_OAUTH_ADMIN = "remote-oauth-admin-password";
+// CRED-001 (audit 2026-05-28): the Proton Pass PAT and SimpleLogin API key
+// used to round-trip plaintext through ~/.mailpouch.json even when
+// credentialStorage="keychain". Routed to dedicated keychain entries from
+// v3.0.46 onwards; on-disk fields are blanked at migration.
+const KEY_PASS_PAT = "pass-pat";
+const KEY_SIMPLELOGIN_KEY = "simplelogin-api-key";
 
 /**
  * Build the keychain account key for a per-account credential. Multi-
@@ -242,9 +248,14 @@ export async function migrateFromConfig(
   const smtpToken = config.connection.smtpToken;
   const remoteBearer = config.connection.remoteBearerToken;
   const remoteOauthAdmin = config.connection.remoteOauthAdminPassword;
+  const passPat = config.connection.passAccessToken;
+  const simpleloginKey = config.connection.simpleloginApiKey;
 
-  // Nothing to migrate if all credentials are already blank
-  if (!password && !smtpToken && !remoteBearer && !remoteOauthAdmin) return false;
+  // Nothing to migrate if every secret is already blank
+  if (
+    !password && !smtpToken && !remoteBearer && !remoteOauthAdmin
+    && !passPat && !simpleloginKey
+  ) return false;
 
   // Check if keychain is available
   const available = await isKeychainAvailable();
@@ -271,11 +282,52 @@ export async function migrateFromConfig(
     }
   }
 
+  // CRED-001: Pass PAT + SimpleLogin API key. Were previously left in
+  // ~/.mailpouch.json even when credentialStorage="keychain" — silent lie.
+  if (passPat || simpleloginKey) {
+    const saved = await saveAuxiliaryCredentials(passPat ?? "", simpleloginKey ?? "");
+    if (saved) {
+      config.connection.passAccessToken = "";
+      config.connection.simpleloginApiKey = "";
+      migrated = true;
+    }
+  }
+
   if (migrated) {
     config.credentialStorage = "keychain";
     saveConfigFn(config);
   }
   return migrated;
+}
+
+/**
+ * Load Pass PAT + SimpleLogin API key from the keychain (CRED-001).
+ * Returns null if neither secret is present or keychain is unavailable.
+ */
+export async function loadAuxiliaryCredentials(): Promise<{ passAccessToken: string; simpleloginApiKey: string } | null> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return null;
+    const passAccessToken = new keyring.Entry(SERVICE_NAME, KEY_PASS_PAT).getPassword() ?? "";
+    const simpleloginApiKey = new keyring.Entry(SERVICE_NAME, KEY_SIMPLELOGIN_KEY).getPassword() ?? "";
+    if (!passAccessToken && !simpleloginApiKey) return null;
+    return { passAccessToken, simpleloginApiKey };
+  } catch {
+    return null;
+  }
+}
+
+/** Save Pass PAT + SimpleLogin API key to the keychain. */
+export async function saveAuxiliaryCredentials(passAccessToken: string, simpleloginApiKey: string): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    if (passAccessToken) new keyring.Entry(SERVICE_NAME, KEY_PASS_PAT).setPassword(passAccessToken);
+    if (simpleloginApiKey) new keyring.Entry(SERVICE_NAME, KEY_SIMPLELOGIN_KEY).setPassword(simpleloginApiKey);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Load remoteBearerToken + remoteOauthAdminPassword from the keychain. */
