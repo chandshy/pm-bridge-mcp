@@ -155,4 +155,94 @@ describeMaybe("FtsIndexService", () => {
     expect(err).toBeInstanceOf(FtsUnavailableError);
     expect(err.name).toBe("FtsUnavailableError");
   });
+
+  // ── PARSE-002: allowlist scoping ──────────────────────────────────────
+  // searchAll used to leak hits and snippet() text from every indexed
+  // folder, including Trash/Spam/Archive, when the caller had a
+  // folder-restricted grant but didn't pass `folder`. These tests pin the
+  // new opts.allowedFolders contract: undefined = unchanged, non-empty =
+  // restrict via bound `folder IN (?, ?, …)`, empty = zero hits.
+  describe("PARSE-002 folder allowlist", () => {
+    function seedAcrossFolders(): void {
+      svc.upsertMany([
+        sampleRecord({ id: "inbox-1", folder: "INBOX", subject: "password reset for the dashboard" }),
+        sampleRecord({ id: "sent-1",  folder: "Sent",  subject: "your password reset confirmation" }),
+        sampleRecord({ id: "trash-1", folder: "Trash", subject: "old password reset email" }),
+      ]);
+    }
+
+    it("with no allowlist, returns hits from every folder", () => {
+      seedAcrossFolders();
+      const hits = svc.search({ query: "password" });
+      expect(hits.map(h => h.folder).sort()).toEqual(["INBOX", "Sent", "Trash"]);
+    });
+
+    it("with allowedFolders=['INBOX'], returns only INBOX hits", () => {
+      seedAcrossFolders();
+      const hits = svc.search({ query: "password", allowedFolders: ["INBOX"] });
+      expect(hits.map(h => h.id)).toEqual(["inbox-1"]);
+      // Critical: snippet content from Trash/Sent must NOT appear in the response.
+      for (const h of hits) {
+        expect(h.folder).toBe("INBOX");
+        expect(["sent-1", "trash-1"]).not.toContain(h.id);
+      }
+    });
+
+    it("with allowedFolders=[], returns zero hits", () => {
+      seedAcrossFolders();
+      const hits = svc.search({ query: "password", allowedFolders: [] });
+      expect(hits).toEqual([]);
+    });
+
+    it("with allowedFolders + folder, intersects to the single folder", () => {
+      seedAcrossFolders();
+      // Caller is allowed INBOX + Sent, but asked for only Sent.
+      const hits = svc.search({
+        query: "password",
+        folder: "Sent",
+        allowedFolders: ["INBOX", "Sent"],
+      });
+      expect(hits.map(h => h.id)).toEqual(["sent-1"]);
+    });
+
+    it("with allowedFolders + folder outside the allowlist, returns zero hits", () => {
+      seedAcrossFolders();
+      // Caller is allowed INBOX only, but asked for Trash. The grant gate
+      // should have blocked the call upstream; defense-in-depth requires
+      // searchAll to still return zero hits.
+      const hits = svc.search({
+        query: "password",
+        folder: "Trash",
+        allowedFolders: ["INBOX"],
+      });
+      expect(hits).toEqual([]);
+    });
+
+    it("matches folder names case-insensitively to align with GrantManager (NOCASE)", () => {
+      seedAcrossFolders();
+      // GrantManager.checkFolderCondition compares via toLowerCase(); the
+      // FTS filter mirrors that with COLLATE NOCASE so a grant stored as
+      // "inbox" still returns hits against an index of "INBOX". Without
+      // this, the agent passes the tool-side gate but reads zero — silent
+      // data scoping drop.
+      const hits = svc.search({ query: "password", allowedFolders: ["inbox"] });
+      expect(hits.length).toBeGreaterThan(0);
+      for (const h of hits) expect(h.folder.toLowerCase()).toBe("inbox");
+    });
+
+    it("does not execute a SQL-injection payload smuggled through a folder name", () => {
+      seedAcrossFolders();
+      // The payload is bound as a parameter, not concatenated into SQL.
+      // Expected behavior: zero hits (no folder literally named this) AND
+      // the messages table still exists afterward.
+      const payload = "INBOX'; DROP TABLE messages--";
+      const hits = svc.search({ query: "password", allowedFolders: [payload] });
+      expect(hits).toEqual([]);
+      // Table must still be alive: a follow-up unrestricted search succeeds.
+      const followup = svc.search({ query: "password" });
+      expect(followup.length).toBeGreaterThan(0);
+      // And stats() still reports the seeded rows.
+      expect(svc.stats().messageCount).toBe(3);
+    });
+  });
 });

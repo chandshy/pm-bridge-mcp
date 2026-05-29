@@ -129,6 +129,34 @@ export class GrantManager {
   }
 
   private readonly permsCache = new Map<PermissionPreset, ReturnType<typeof buildPermissions>>();
+
+  /**
+   * Resolve the effective folder allowlist for a caller. Used by tools that
+   * return folder-bearing content (e.g., FTS snippets) and need to filter
+   * results to the caller's allowed folders independently of the per-call
+   * `folder` arg check in {@link check}.
+   *
+   * Returns:
+   *  - `undefined` when there is no grant, the grant has no folder restriction,
+   *    or the grant's allowlist is an empty array. Caller should treat
+   *    `undefined` as "no restriction — return all folders" to preserve
+   *    existing behavior for unscoped grants and stdio/local callers.
+   *  - A non-empty `string[]` when the grant's `conditions.folderAllowlist`
+   *    is set to a non-empty list. Caller should restrict results to those
+   *    folders.
+   *
+   * Note: this method intentionally does not return `[]` to distinguish
+   * "no grant / no restriction" from "explicitly empty allowlist". The
+   * grant schema treats an empty allowlist the same as no allowlist; if
+   * future revisions tighten that semantic, callers can switch on the
+   * returned value's length.
+   */
+  resolveAllowedFolders(clientId: string): string[] | undefined {
+    const grant = this.store.get(clientId);
+    const allow = grant?.conditions?.folderAllowlist;
+    if (!allow || allow.length === 0) return undefined;
+    return [...allow];
+  }
 }
 
 /**

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.48] — 2026-05-29
+
+### Fixed
+- **`fts_search` returned snippets from every indexed folder regardless of the caller's folder allowlist** (PARSE-002 from the 2026-05-28 audit). `searchAll` ran `MATCH` across the whole index and returned BM25 hits plus highlighted `snippet(...)` text from every folder, including Trash, Spam, and Archive. The per-agent grant gate already blocks the `folder` *argument* against the grant's allowlist — but when the caller omitted `folder` entirely, the grant gate had nothing to compare and let the call through; the response then carried decrypted body text from folders the agent had no business seeing. A sub-agent granted only `fts_search` + INBOX could read snippets of trashed password resets, sent drafts, or anything else still indexed. `FtsIndexService.search()` now accepts an optional `allowedFolders?: string[]`: `undefined` preserves the existing whole-index behavior for trusted/internal callers, a non-empty array narrows results via `folder IN (?, ?, …)` with bound parameters (no string interpolation, no SQL-injection surface even if a malicious grant slipped through), and an explicit empty array short-circuits to zero hits. The `fts_search` MCP tool resolves the caller's allowlist via a new `GrantManager.resolveAllowedFolders(clientId)` accessor exposed on the tool context as `getCallerAllowedFolders()` — stdio/static-bearer callers and grants without a folder restriction return `undefined`, so single-user setups see no behavior change.
+- Folder allowlist matching aligned with `GrantManager.checkFolderCondition` via `COLLATE NOCASE` so a grant stored as `inbox` returns hits from an index of `INBOX` — without this the agent passed the tool-side gate then silently read zero rows.
+- 7 new regression tests in `src/services/fts-service.test.ts` covering the allowlist contract (no allowlist returns every folder; `["INBOX"]` returns INBOX only with no Trash/Sent content; `[]` returns zero hits; allowlist + `folder` intersect to the single folder; `folder` outside the allowlist returns zero hits; case-insensitive matching via NOCASE; a SQL-injection payload smuggled through a folder name does not execute and the FTS table survives). Unit suite: 1646 passes.
+
 ## [3.0.47] — 2026-05-29
 
 ### Fixed

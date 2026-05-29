@@ -714,6 +714,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       reminderService,
       passService,
       getFts,
+      // Folder-allowlist accessor: trusted/stdio callers (no caller context)
+      // and static-bearer callers fall through to `undefined` (= no
+      // restriction), preserving existing behavior. OAuth callers with a
+      // folder-restricted grant return their allowlist for content-scoping.
+      getCallerAllowedFolders: () => {
+        if (!caller || caller.staticBearer) return undefined;
+        return grantManager.resolveAllowedFolders(caller.clientId);
+      },
       config,
       limits: _limits,
       ok,

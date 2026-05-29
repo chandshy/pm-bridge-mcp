@@ -66,6 +66,19 @@ export interface FtsSearchOptions {
   folder?: string;
   /** Unix-epoch seconds: messages older than this are excluded. */
   sinceEpoch?: number;
+  /**
+   * Restrict hits to this set of folders. Independent of `folder` (which
+   * narrows to a single folder by name). When supplied:
+   *  - `undefined` → no restriction (existing behavior).
+   *  - non-empty `string[]` → results limited via `folder IN (?, ?, ...)`,
+   *    bound parameters to keep SQL injection impossible.
+   *  - empty `[]` → zero hits returned (the caller's grant restricts to no
+   *    folders, so by construction it sees nothing).
+   *
+   * Used by the MCP tool surface to enforce per-agent folder allowlists on
+   * snippet content. Direct/internal callers can omit it.
+   */
+  allowedFolders?: string[];
 }
 
 export interface FtsStats {
@@ -191,9 +204,45 @@ export class FtsIndexService {
   search(opts: FtsSearchOptions): FtsHit[] {
     const limit = Math.min(Math.max(1, opts.limit ?? 20), 200);
     const folder = opts.folder?.trim();
-    const hits = folder
-      ? (this.stmts.searchFolder.all(opts.query, folder, limit) as unknown[])
-      : (this.stmts.searchAll.all(opts.query, limit) as unknown[]);
+    // Folder allowlist short-circuit: an explicit empty array means "the
+    // caller has no folder grants" — return zero hits without touching SQL.
+    if (Array.isArray(opts.allowedFolders) && opts.allowedFolders.length === 0) {
+      return [];
+    }
+    let hits: unknown[];
+    if (opts.allowedFolders && opts.allowedFolders.length > 0) {
+      // Build `folder IN (?, ?, …)` with bound parameters so folder names
+      // cannot inject SQL even if a malicious grant slipped through.
+      // better-sqlite3 prepares per call here; the IN-clause arity is
+      // grant-dependent and not amenable to the cached prepared-statement
+      // path. n is small (typically <10 folders per grant).
+      //
+      // COLLATE NOCASE mirrors the case-insensitive folder matching in
+      // `GrantManager.checkFolderCondition` (src/agents/grant-manager.ts:
+      // toLowerCase compare). Without this, a grant that lists `inbox`
+      // would pass the tool-side gate but return zero hits against an
+      // index of `INBOX` — silently dropping the agent's reads. Same
+      // collation applied to the optional `folder` arg.
+      const placeholders = opts.allowedFolders.map(() => "?").join(", ");
+      const single = folder ? " AND folder = ? COLLATE NOCASE" : "";
+      const sql =
+        `SELECT id, subject, "from", "to", folder, body, date_epoch,
+                bm25(messages) AS score,
+                snippet(messages, 5, '[[', ']]', '…', 12) AS snippet
+           FROM messages
+          WHERE messages MATCH ? AND folder COLLATE NOCASE IN (${placeholders})${single}
+          ORDER BY score
+          LIMIT ?`;
+      const stmt = this.db.prepare(sql);
+      const params: unknown[] = [opts.query, ...opts.allowedFolders];
+      if (folder) params.push(folder);
+      params.push(limit);
+      hits = stmt.all(...params) as unknown[];
+    } else {
+      hits = folder
+        ? (this.stmts.searchFolder.all(opts.query, folder, limit) as unknown[])
+        : (this.stmts.searchAll.all(opts.query, limit) as unknown[]);
+    }
     const rows = hits as Array<Record<string, unknown>>;
     let mapped: FtsHit[] = rows.map(r => ({
       id: String(r.id ?? ""),
