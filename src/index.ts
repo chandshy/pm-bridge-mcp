@@ -1856,6 +1856,12 @@ async function main() {
       const auxCreds = await loadAuxiliaryCredentialsFromKeychain();
       const effectiveSimpleloginKey = auxCreds?.simpleloginApiKey || cn.simpleloginApiKey || "";
       const effectivePassPat        = auxCreds?.passAccessToken   || cn.passAccessToken   || "";
+      // Storage source for the log line — `auxCreds.storage` is "keychain"
+      // when the secret came from the keychain entry, "config" when
+      // loadAuxiliaryCredentialsFromKeychain fell back to the disk file.
+      // Checking the value (e.g. `auxCreds?.simpleloginApiKey`) would
+      // overclaim "keychain" whenever the disk-fallback value was non-empty.
+      const auxSource = auxCreds?.storage ?? "config";
 
       // SimpleLogin client — populated from config; stays empty (isConfigured=false) if no key.
       if (effectiveSimpleloginKey) {
@@ -1863,7 +1869,7 @@ async function main() {
           effectiveSimpleloginKey,
           cn.simpleloginBaseUrl || undefined,
         );
-        logger.info(`SimpleLogin client configured (alias_* tools active, source=${auxCreds?.simpleloginApiKey ? "keychain" : "config"})`, "MCPServer");
+        logger.info(`SimpleLogin client configured (alias_* tools active, source=${auxSource})`, "MCPServer");
       }
       logger.setDebugMode(!!cn.debug);
       tracer.setEnabled(!!cn.debug);
@@ -1877,7 +1883,7 @@ async function main() {
           cliPath: cn.passCliPath || undefined,
           auditLogPath: PASS_AUDIT_PATH,
         });
-        logger.info(`Proton Pass client configured (pass_* tools active, source=${auxCreds?.passAccessToken ? "keychain" : "config"})`, "MCPServer");
+        logger.info(`Proton Pass client configured (pass_* tools active, source=${auxSource})`, "MCPServer");
       }
 
       // Password: keychain takes priority over config file plaintext

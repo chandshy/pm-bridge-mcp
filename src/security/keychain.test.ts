@@ -95,7 +95,7 @@ describe('Keychain (without keytar installed)', () => {
     expect(await saveAuxiliaryCredentials('pat-secret', 'sl-key')).toBe(false);
   });
 
-  it('migrateFromConfig should detect Pass PAT as a migration candidate (CRED-001)', async () => {
+  it('migrateFromConfig with only Pass PAT set leaves the secret on disk when keychain is unavailable (CRED-001)', async () => {
     const { migrateFromConfig } = await import('./keychain.js');
     const mockConfig = {
       configVersion: 1,
@@ -119,17 +119,21 @@ describe('Keychain (without keytar installed)', () => {
     } satisfies ServerConfig;
 
     const saveFn = vi.fn();
-    // Without keychain, return is false but the migration *path* was taken
-    // (vs. early "nothing to migrate" return). The pre-fix code would have
-    // returned false at the first guard because passAccessToken wasn't even
-    // checked; this assertion verifies the candidate set now includes it.
+    // Without keychain, return is false and the secret stays on disk —
+    // any successful keychain save would have blanked the field. This is
+    // the behaviour-preserving guard for the new aux-credential plumbing:
+    // we don't crash on the new fields, we don't lose them, and we don't
+    // pretend they migrated when keychain is unavailable. The harder
+    // assertion ("the migration code branched into the new aux block,
+    // not into the legacy 'nothing to migrate' early return") needs a
+    // keytar mock — TEST-005 in Batch 7 will add that positive-path harness.
     const result = await migrateFromConfig(mockConfig, saveFn);
-    expect(result).toBe(false); // keychain unavailable
-    // passAccessToken must still be on disk because we didn't actually migrate.
+    expect(result).toBe(false);
     expect(mockConfig.connection.passAccessToken).toBe('pat-secret-123');
+    expect(saveFn).not.toHaveBeenCalled();
   });
 
-  it('migrateFromConfig should detect SimpleLogin API key as a migration candidate (CRED-001)', async () => {
+  it('migrateFromConfig with only SimpleLogin API key set leaves the secret on disk when keychain is unavailable (CRED-001)', async () => {
     const { migrateFromConfig } = await import('./keychain.js');
     const mockConfig = {
       configVersion: 1,
@@ -156,5 +160,6 @@ describe('Keychain (without keytar installed)', () => {
     const result = await migrateFromConfig(mockConfig, saveFn);
     expect(result).toBe(false);
     expect(mockConfig.connection.simpleloginApiKey).toBe('sl-api-key-xyz');
+    expect(saveFn).not.toHaveBeenCalled();
   });
 });
