@@ -27,7 +27,18 @@ const MAX_HISTORY_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 /** Hard cap on non-pending records retained in history (safety valve). */
 const MAX_HISTORY_RECORDS = 1000;
 
-const VALID_STATUSES = new Set(["pending", "sent", "failed", "cancelled"]);
+const VALID_STATUSES = new Set(["pending", "sending", "sent", "failed", "cancelled"]);
+
+/**
+ * Result of cancelling a scheduled email.
+ *
+ * `{ ok: false, error: "in_flight" }` is the SMTP-002 signal: the send is
+ * already past the await-point in processDue. Callers must NOT treat this as
+ * a successful cancel — the message may already be on the wire.
+ */
+export type CancelResult =
+  | { ok: true }
+  | { ok: false, error: "not_found" | "already_final" | "in_flight" };
 
 /** Validate a deserialized ScheduledEmail record. Returns false if malformed. */
 function isValidRecord(r: unknown): r is import("../types/index.js").ScheduledEmail {
@@ -117,15 +128,39 @@ export class SchedulerService {
     }); // end tracer.spanSync('scheduler.schedule')
   }
 
-  /** Cancel a pending scheduled email. Returns false if not found or not pending. */
-  cancel(id: string): boolean {
+  /**
+   * Cancel a scheduled email.
+   *
+   * - `"pending"`: marked cancelled, persisted, returns `{ ok: true }`.
+   * - `"sending"`: the cooperative-stop signal — status is flipped to
+   *   `"cancelled"` so processDue's post-await guard will skip the
+   *   status-to-sent flip, but the SMTP send is already on the wire and may
+   *   succeed. Returns `{ ok: false, error: "in_flight" }` so the caller can
+   *   warn the user that the message may still be delivered.
+   * - `"sent" | "failed" | "cancelled"`: terminal state, no-op, returns
+   *   `{ ok: false, error: "already_final" }`.
+   * - unknown id: `{ ok: false, error: "not_found" }`.
+   */
+  cancel(id: string): CancelResult {
     return tracer.spanSync('scheduler.cancel', { id }, () => {
     const item = this.items.find(i => i.id === id);
-    if (!item || item.status !== "pending") return false;
-    item.status = "cancelled";
-    this.persist();
-    logger.info(`Scheduled email cancelled`, "Scheduler", { id });
-    return true;
+    if (!item) return { ok: false, error: "not_found" } as const;
+    if (item.status === "pending") {
+      item.status = "cancelled";
+      this.persist();
+      logger.info(`Scheduled email cancelled`, "Scheduler", { id });
+      return { ok: true } as const;
+    }
+    if (item.status === "sending") {
+      // Cooperative-stop signal — processDue's post-await guard reads this
+      // and skips the status-to-sent flip. Persist so a crash mid-send still
+      // reflects the user's intent on next start().
+      item.status = "cancelled";
+      this.persist();
+      logger.warn(`Cancel arrived while send was in flight; message may still be delivered`, "Scheduler", { id });
+      return { ok: false, error: "in_flight" } as const;
+    }
+    return { ok: false, error: "already_final" } as const;
     }); // end tracer.spanSync('scheduler.cancel')
   }
 
@@ -172,8 +207,20 @@ export class SchedulerService {
       logger.info(`Processing ${due.length} due scheduled email(s)`, "Scheduler");
 
       for (const item of due) {
+        // SMTP-002: flip to "sending" + persist BEFORE the await so a
+        // concurrent cancel() can distinguish "still pending" from
+        // "already on the wire" and return the in_flight signal.
+        item.status = "sending";
+        this.persist();
         try {
           const result = await this.smtpService.sendEmail(item.options);
+          // SMTP-001: a cancel() landing between the await and this assignment
+          // flips item.status to "cancelled" — respect that signal and don't
+          // clobber it back to "sent"/"failed".
+          if (item.status !== "sending") {
+            logger.info(`Scheduled send completed but state changed mid-flight; preserving ${item.status}`, "Scheduler", { id: item.id, finalStatus: item.status });
+            continue;
+          }
           if (result.success) {
             item.status = "sent";
             logger.info(`Scheduled email sent`, "Scheduler", { id: item.id, messageId: result.messageId });
@@ -184,10 +231,17 @@ export class SchedulerService {
               item.status = "failed";
               logger.warn(`Scheduled email permanently failed after ${MAX_RETRIES} attempts`, "Scheduler", { id: item.id, error: result.error });
             } else {
+              item.status = "pending";
               logger.warn(`Scheduled email send failed (attempt ${item.retryCount}/${MAX_RETRIES}), will retry`, "Scheduler", { id: item.id, error: result.error });
             }
           }
         } catch (err: unknown) {
+          // Same post-await guard for the throw path.
+          if (item.status !== "sending") {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            logger.info(`Scheduled send threw but state changed mid-flight; preserving ${item.status}`, "Scheduler", { id: item.id, finalStatus: item.status, error: errMsg });
+            continue;
+          }
           item.retryCount = (item.retryCount ?? 0) + 1;
           const errMsg = err instanceof Error ? err.message : String(err);
           item.error = errMsg;
@@ -195,6 +249,7 @@ export class SchedulerService {
             item.status = "failed";
             logger.error(`Scheduled email permanently failed after ${MAX_RETRIES} attempts`, "Scheduler", { id: item.id, error: errMsg });
           } else {
+            item.status = "pending";
             logger.warn(`Scheduled email threw (attempt ${item.retryCount}/${MAX_RETRIES}), will retry`, "Scheduler", { id: item.id, error: errMsg });
           }
         }
