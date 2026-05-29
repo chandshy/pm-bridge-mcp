@@ -58,7 +58,14 @@ import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./uti
 import { permissions } from "./permissions/manager.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName } from "./config/schema.js";
-import { DESTRUCTIVE_TOOLS, toolsForTier, parseToolTier } from "./config/schema.js";
+import {
+  DESTRUCTIVE_TOOLS,
+  DESTRUCTIVE_DESTINATIONS,
+  MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET,
+  canonicalToolName,
+  toolsForTier,
+  parseToolTier,
+} from "./config/schema.js";
 
 /**
  * Build a short, user-readable preview of what a destructive tool call would
@@ -476,7 +483,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // These tools let the agent REQUEST more access — but they can never GRANT it.
   // Approval is strictly out-of-band (settings UI browser click or terminal).
   if (_escalationHandlers[name]) {
-    return _escalationHandlers[name]({ args, config });
+    // PERM-002: thread the requesting caller's identity into the escalation
+    // record so the approval card can surface it. Stdio (no OAuth client)
+    // becomes the literal string "stdio" — distinguishable from a real
+    // client id so the UI can flag which approval flow this is.
+    const earlyCaller = currentCaller();
+    const escalationCaller = earlyCaller && !earlyCaller.staticBearer
+      ? { clientId: earlyCaller.clientId, clientName: earlyCaller.clientName }
+      : { clientId: "stdio", clientName: undefined };
+    return _escalationHandlers[name]({ args, config, caller: escalationCaller });
   }
 
   // ── Per-tool account routing ─────────────────────────────────────────────
@@ -598,7 +613,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   //   2. { confirmed: true } fallback — preview-then-retry for clients that do
   //      not support elicitation yet. Disable the whole guard by setting
   //      requireDestructiveConfirm: false in the config.
-  if (DESTRUCTIVE_TOOLS.has(name) && (loadConfig() ?? defaultConfig()).requireDestructiveConfirm !== false) {
+  // PERM-003: alias-canonicalize before the destructive check so calling
+  // `bulk_delete` exercises the same gate as `bulk_delete_emails`.
+  // PERM-004: move_email / bulk_move_emails / move_to_folder count as
+  // destructive when their target folder name matches a destructive
+  // destination (Trash, Spam). Without this, an agent could bypass
+  // destructive-confirm by routing the delete through `move_email` with
+  // `targetFolder: "Trash"` instead of calling `move_to_trash` directly.
+  const canonicalName = canonicalToolName(name);
+  const moveTargetRaw = typeof args.targetFolder === "string"
+    ? args.targetFolder
+    : typeof args.folder === "string" ? args.folder : "";
+  const moveTargetIsDestructive =
+    MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has(canonicalName)
+    && DESTRUCTIVE_DESTINATIONS.has(moveTargetRaw.trim().toLowerCase());
+  const isDestructive = DESTRUCTIVE_TOOLS.has(canonicalName) || moveTargetIsDestructive;
+  if (isDestructive && (loadConfig() ?? defaultConfig()).requireDestructiveConfirm !== false) {
     if (args.confirmed !== true) {
       const preview = describeDestructivePreview(name, args);
       const caps = server.getClientCapabilities();

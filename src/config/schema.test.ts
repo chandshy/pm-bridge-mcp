@@ -3,6 +3,10 @@ import {
   ALL_TOOLS,
   TOOL_CATEGORIES,
   DESTRUCTIVE_TOOLS,
+  DESTRUCTIVE_DESTINATIONS,
+  MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET,
+  TOOL_ALIASES,
+  canonicalToolName,
   CONFIG_VERSION,
   DEFAULT_RESPONSE_LIMITS,
   toolsForTier,
@@ -201,5 +205,44 @@ describe("Tool tiering", () => {
       expect(parseToolTier(null)).toBe("complete");
       expect(parseToolTier(42)).toBe("complete");
     });
+  });
+});
+
+describe("PERM-003 tool aliases", () => {
+  it("canonicalToolName resolves bulk_delete to bulk_delete_emails", () => {
+    expect(canonicalToolName("bulk_delete")).toBe("bulk_delete_emails");
+  });
+
+  it("canonicalToolName is identity for unknown tool names", () => {
+    expect(canonicalToolName("send_email")).toBe("send_email");
+    expect(canonicalToolName("get_emails")).toBe("get_emails");
+  });
+
+  it("TOOL_ALIASES values are themselves real tools (no dangling aliases)", () => {
+    for (const canonical of Object.values(TOOL_ALIASES)) {
+      expect(ALL_TOOLS).toContain(canonical);
+    }
+  });
+});
+
+describe("PERM-004 move-to-destructive destinations", () => {
+  it("MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET names the three movers", () => {
+    expect(MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has("move_email")).toBe(true);
+    expect(MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has("bulk_move_emails")).toBe(true);
+    expect(MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has("move_to_folder")).toBe(true);
+  });
+
+  it("DESTRUCTIVE_DESTINATIONS is lowercase for case-insensitive comparison", () => {
+    expect(DESTRUCTIVE_DESTINATIONS.has("trash")).toBe(true);
+    expect(DESTRUCTIVE_DESTINATIONS.has("spam")).toBe(true);
+    // The set stores lowercase; the gate calls .toLowerCase() on the arg.
+    expect(DESTRUCTIVE_DESTINATIONS.has("Trash")).toBe(false);
+    expect(DESTRUCTIVE_DESTINATIONS.has("Spam")).toBe(false);
+  });
+
+  it("every mover is in ALL_TOOLS (the gate should match against real tool names)", () => {
+    for (const t of MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET) {
+      expect(ALL_TOOLS).toContain(t);
+    }
   });
 });

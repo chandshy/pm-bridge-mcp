@@ -31,6 +31,28 @@ import { constantTimeEqual } from "../utils/crypto.js";
 
 const SCOPES = ["mcp:full"] as const;
 
+/** XPORT-002 max client_name length on the DCR registration record. */
+const DCR_CLIENT_NAME_MAX = 100;
+
+/**
+ * Strip control characters / ANSI escapes and length-cap a DCR-supplied
+ * client_name (XPORT-002 from the 2026-05-28 audit). Exported for tests
+ * — production callers go through `handleRegister` which uses it inline.
+ * Returns undefined for empty/missing input so the consent page falls
+ * back to "(unnamed client)" rather than rendering an empty string.
+ */
+export function sanitizeDcrClientName(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  // Order matters: try the ANSI escape sequence first so a leading `\x1b`
+  // followed by `[NN m`-style payload consumes the whole sequence. The
+  // bare control-char class catches the rest (NUL, BEL, DEL, lone ESC).
+  const cleaned = raw
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f]/g, "")
+    .trim()
+    .slice(0, DCR_CLIENT_NAME_MAX);
+  return cleaned || undefined;
+}
+
 export interface OAuthEndpointsConfig {
   /** Externally-visible base URL of the server, e.g. https://mcp.example.com. */
   issuer: string;
@@ -208,8 +230,20 @@ export class OAuthHandlers {
       }
     }
 
+    // XPORT-002 (audit 2026-05-28): the DCR endpoint is public and
+    // unauthenticated, so client_name is fully attacker-controlled. An
+    // attacker who can reach the OAuth endpoints (the whole point of
+    // remote mode) registers a client called "Claude Desktop" or
+    // "mailpouch internal" and a redirect_uri of "https://attacker..." —
+    // the consent screen then renders that familiar name and a human
+    // admin types the admin password. Length-cap + strip control chars
+    // at registration; the consent page additionally shows an
+    // "Untrusted client" badge for every DCR-registered name.
+    const sanitizedName = sanitizeDcrClientName(
+      typeof body.client_name === "string" ? body.client_name : undefined,
+    );
     const client = this.store.registerClient({
-      client_name: typeof body.client_name === "string" ? body.client_name : undefined,
+      client_name: sanitizedName,
       redirect_uris: uris,
       grant_types: ["authorization_code"],
       response_types: ["code"],
@@ -254,6 +288,12 @@ export class OAuthHandlers {
       return { handled: true };
     }
 
+    // XPORT-002: every DCR-registered client is, by definition, untrusted
+    // until an admin has reviewed it. Mark on the consent payload so the
+    // page can render a visible badge. Token-endpoint-auth-method "none"
+    // is the canonical signal — pre-trusted clients (none today, but
+    // future-proofing) would auth differently.
+    const isUntrustedDcrClient = client.token_endpoint_auth_method === "none";
     const html = this.consentPage({
       clientId,
       clientName: client.client_name ?? "(unnamed client)",
@@ -262,6 +302,7 @@ export class OAuthHandlers {
       state,
       resource,
       scope,
+      isUntrustedDcrClient,
     });
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -399,8 +440,19 @@ export class OAuthHandlers {
     state: string;
     resource: string;
     scope: string;
+    isUntrustedDcrClient?: boolean;
   }): string {
-    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    // Strict 5-replacement HTML escape — handles both attribute-context
+    // and body-text contexts safely. The previous 3-replacement form
+    // missed `>` and `'` which is fine for attribute values quoted with
+    // `"`, but our DD/DT body cells render text directly. Audit-aligned
+    // with `escHtml` used in src/settings/shell.ts.
+    const esc = (s: string) => s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
     return `<!doctype html>
 <html lang="en">
   <head>
@@ -424,7 +476,13 @@ export class OAuthHandlers {
   <body>
     <div class="card">
       <h1>Authorize mailpouch</h1>
-      <p>An MCP client is requesting access to your Proton Mail via this server.</p>
+      <p>An MCP client is requesting access to your Proton Mail via this server.</p>${ctx.isUntrustedDcrClient ? `
+      <p style="background:#5a1d1d; color:#ffd8d8; padding:10px 12px; border-radius:6px; font-size:13px; line-height:1.4;">
+        <strong>⚠ Untrusted client.</strong> This client registered itself via the public
+        <code>/oauth/register</code> endpoint and chose its own display name. Treat the
+        name shown below as attacker-controlled. Verify the redirect URI matches a host
+        you trust before entering the admin password.
+      </p>` : ""}
       <dl>
         <dt>Client</dt><dd>${esc(ctx.clientName)} (${esc(ctx.clientId)})</dd>
         <dt>Will redirect to</dt><dd>${esc(ctx.redirectUri)}</dd>

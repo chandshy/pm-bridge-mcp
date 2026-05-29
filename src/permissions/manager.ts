@@ -9,7 +9,7 @@
  */
 
 import { loadConfig, defaultConfig } from "../config/loader.js";
-import { DEFAULT_RESPONSE_LIMITS, type RateLimitWindow, type ToolName, type ResponseLimits } from "../config/schema.js";
+import { DEFAULT_RESPONSE_LIMITS, canonicalToolName, type RateLimitWindow, type ToolName, type ResponseLimits } from "../config/schema.js";
 import { logger } from "../utils/logger.js";
 import { tracer } from "../utils/tracer.js";
 
@@ -56,7 +56,14 @@ export class PermissionManager {
     // Fall back to read-only defaults when no config file is present.
     const config = this.cachedConfig ?? defaultConfig();
 
-    const perm = config.permissions?.tools?.[tool];
+    // PERM-003: canonicalize aliases so a single rate-bucket / enabled-flag
+    // applies to every name that resolves to the same handler. Without this,
+    // alternating between `bulk_delete` and `bulk_delete_emails` doubled the
+    // destruction throughput the operator configured. The reason strings
+    // still name the canonical tool so the operator sees the right name in
+    // the settings UI.
+    const canonical = canonicalToolName(tool) as ToolName;
+    const perm = config.permissions?.tools?.[canonical] ?? config.permissions?.tools?.[tool];
     if (!perm) {
       resultTags.allowed = true;
       resultTags.reason = '';
@@ -64,7 +71,7 @@ export class PermissionManager {
     }
 
     if (!perm.enabled) {
-      const reason = `'${tool}' is disabled in server settings. Enable it in the settings UI to allow agentic access.`;
+      const reason = `'${canonical}' is disabled in server settings. Enable it in the settings UI to allow agentic access.`;
       resultTags.allowed = false;
       resultTags.reason = reason;
       return { allowed: false, reason };
@@ -73,9 +80,9 @@ export class PermissionManager {
     const limit = perm.rateLimit;
     if (limit !== null && limit !== undefined && limit > 0) {
       const window: RateLimitWindow = perm.rateLimitWindow ?? 'hour';
-      if (!this.consumeRateSlot(tool, limit, window)) {
-        logger.warn(`Rate limit reached for tool '${tool}' (limit: ${limit}/${window})`, "PermissionManager");
-        const reason = `'${tool}' rate limit of ${limit} calls/${window} has been reached. Try again later or raise the limit in settings.`;
+      if (!this.consumeRateSlot(canonical, limit, window)) {
+        logger.warn(`Rate limit reached for tool '${canonical}' (limit: ${limit}/${window})`, "PermissionManager");
+        const reason = `'${canonical}' rate limit of ${limit} calls/${window} has been reached. Try again later or raise the limit in settings.`;
         resultTags.allowed = false;
         resultTags.reason = reason;
         return { allowed: false, reason };
