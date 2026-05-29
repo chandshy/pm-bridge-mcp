@@ -218,6 +218,18 @@ describeMaybe("FtsIndexService", () => {
       expect(hits).toEqual([]);
     });
 
+    it("matches folder names case-insensitively to align with GrantManager (NOCASE)", () => {
+      seedAcrossFolders();
+      // GrantManager.checkFolderCondition compares via toLowerCase(); the
+      // FTS filter mirrors that with COLLATE NOCASE so a grant stored as
+      // "inbox" still returns hits against an index of "INBOX". Without
+      // this, the agent passes the tool-side gate but reads zero — silent
+      // data scoping drop.
+      const hits = svc.search({ query: "password", allowedFolders: ["inbox"] });
+      expect(hits.length).toBeGreaterThan(0);
+      for (const h of hits) expect(h.folder.toLowerCase()).toBe("inbox");
+    });
+
     it("does not execute a SQL-injection payload smuggled through a folder name", () => {
       seedAcrossFolders();
       // The payload is bound as a parameter, not concatenated into SQL.

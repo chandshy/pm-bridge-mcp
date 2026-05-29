@@ -216,14 +216,21 @@ export class FtsIndexService {
       // better-sqlite3 prepares per call here; the IN-clause arity is
       // grant-dependent and not amenable to the cached prepared-statement
       // path. n is small (typically <10 folders per grant).
+      //
+      // COLLATE NOCASE mirrors the case-insensitive folder matching in
+      // `GrantManager.checkFolderCondition` (src/agents/grant-manager.ts:
+      // toLowerCase compare). Without this, a grant that lists `inbox`
+      // would pass the tool-side gate but return zero hits against an
+      // index of `INBOX` — silently dropping the agent's reads. Same
+      // collation applied to the optional `folder` arg.
       const placeholders = opts.allowedFolders.map(() => "?").join(", ");
-      const single = folder ? " AND folder = ?" : "";
+      const single = folder ? " AND folder = ? COLLATE NOCASE" : "";
       const sql =
         `SELECT id, subject, "from", "to", folder, body, date_epoch,
                 bm25(messages) AS score,
                 snippet(messages, 5, '[[', ']]', '…', 12) AS snippet
            FROM messages
-          WHERE messages MATCH ? AND folder IN (${placeholders})${single}
+          WHERE messages MATCH ? AND folder COLLATE NOCASE IN (${placeholders})${single}
           ORDER BY score
           LIMIT ?`;
       const stmt = this.db.prepare(sql);
