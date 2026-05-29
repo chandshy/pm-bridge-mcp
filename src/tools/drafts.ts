@@ -440,11 +440,19 @@ export const handlers: Record<string, ToolHandler> = {
     ) {
       throw new McpError(ErrorCode.InvalidParams, "id must be a valid UUID (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
     }
-    const cancelled = schedulerService.cancel(rawCancelId);
-    if (!cancelled) {
-      return { content: [{ type: "text" as const, text: "Not found or not pending" }], isError: true };
+    const result = schedulerService.cancel(rawCancelId);
+    if (result.ok) {
+      return actionOk();
     }
-    return actionOk();
+    // SMTP-002: distinguish "send already on the wire" from terminal-state /
+    // unknown-id so callers can warn the user that the message may still be
+    // delivered.
+    const msg = result.error === "in_flight"
+      ? "Send is already in flight; message may still be delivered. Status updated to cancelled to suppress retries."
+      : result.error === "not_found"
+        ? "Not found"
+        : "Not pending (already sent, failed, or cancelled)";
+    return { content: [{ type: "text" as const, text: msg }], isError: true };
   },
 
   remind_if_no_reply: async (ctx) => {

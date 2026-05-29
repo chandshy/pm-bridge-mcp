@@ -79,26 +79,26 @@ describe("SchedulerService", () => {
 
   // ── cancel ──────────────────────────────────────────────────────────────────
 
-  it("cancel() marks item as cancelled and returns true", () => {
+  it("cancel() marks item as cancelled and returns ok:true", () => {
     const svc = new SchedulerService(makeSMTP(), storePath);
     const id = svc.schedule(makeOptions(), futureDate(120));
     const result = svc.cancel(id);
-    expect(result).toBe(true);
+    expect(result).toEqual({ ok: true });
     expect(svc.list()[0].status).toBe("cancelled");
   });
 
-  it("cancel() returns false for unknown id", () => {
+  it("cancel() returns not_found for unknown id", () => {
     const svc = new SchedulerService(makeSMTP(), storePath);
-    expect(svc.cancel("unknown-id")).toBe(false);
+    expect(svc.cancel("unknown-id")).toEqual({ ok: false, error: "not_found" });
   });
 
-  it("cancel() returns false for already-sent item", async () => {
+  it("cancel() returns already_final for already-sent item", async () => {
     const smtp = makeSMTP();
     const svc = new SchedulerService(smtp, storePath);
     const id = svc.schedule(makeOptions(), futureDate(120));
     // Force the item to sent status
     (svc as any).items[0].status = "sent";
-    expect(svc.cancel(id)).toBe(false);
+    expect(svc.cancel(id)).toEqual({ ok: false, error: "already_final" });
   });
 
   // ── list ────────────────────────────────────────────────────────────────────
@@ -421,5 +421,94 @@ describe("SchedulerService", () => {
     const ids = loaded.map((i: any) => i.id);
     expect(ids).toContain(idPending);
     expect(ids).toContain(idSent);
+  });
+
+  // ── SMTP-001 / SMTP-002 regression tests ────────────────────────────────────
+
+  it("SMTP-001: cancel() landing mid-send is not clobbered to 'sent' by post-await flip", async () => {
+    // Pause sendEmail so we can cancel between the await and the status flip.
+    let resolveSend!: (val: { success: boolean; messageId?: string }) => void;
+    const sendPromise = new Promise<{ success: boolean; messageId?: string }>(res => { resolveSend = res; });
+    const smtp = {
+      sendEmail: vi.fn().mockReturnValue(sendPromise),
+    } as unknown as SMTPService;
+
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    // Kick off processDue — it flips status to "sending" + persists, then awaits.
+    const processing = svc.processDue();
+    // Yield a microtask so processDue reaches the await.
+    await Promise.resolve();
+
+    // While paused, the item should be in the "sending" state.
+    expect((svc as any).items.find((i: any) => i.id === id).status).toBe("sending");
+
+    // Cancel while the send is in flight — SMTP-002 path: flips status to
+    // "cancelled" and returns the in_flight signal.
+    const cancelResult = svc.cancel(id);
+    expect(cancelResult).toEqual({ ok: false, error: "in_flight" });
+
+    // Resolve the send successfully — the post-await guard must NOT flip back
+    // to "sent" (that was the SMTP-001 bug).
+    resolveSend({ success: true, messageId: "msg-1" });
+    await processing;
+
+    const finalItem = svc.list().find(i => i.id === id)!;
+    expect(finalItem.status).toBe("cancelled");
+  });
+
+  it("SMTP-002: cancel() returns in_flight error while sendEmail is awaited", async () => {
+    let resolveSend!: (val: { success: boolean; messageId?: string }) => void;
+    const sendPromise = new Promise<{ success: boolean; messageId?: string }>(res => { resolveSend = res; });
+    const smtp = {
+      sendEmail: vi.fn().mockReturnValue(sendPromise),
+    } as unknown as SMTPService;
+
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    const processing = svc.processDue();
+    // Yield so processDue reaches the await on sendEmail.
+    await Promise.resolve();
+
+    // cancel() must return the in_flight discriminant — the user has been told
+    // the send was already on the wire.
+    expect(svc.cancel(id)).toEqual({ ok: false, error: "in_flight" });
+
+    // Resolve the send — because cancel() set status to "cancelled" mid-flight,
+    // the post-await guard preserves "cancelled" rather than flipping to "sent".
+    resolveSend({ success: true, messageId: "msg-1" });
+    await processing;
+
+    // Verify the final persisted state reflects the cancel, not the send.
+    expect(svc.list().find(i => i.id === id)!.status).toBe("cancelled");
+  });
+
+  it("SMTP-002: cancel() returns in_flight even when the send subsequently fails", async () => {
+    // The cooperative-stop signal must fire regardless of how sendEmail resolves.
+    let rejectSend!: (err: unknown) => void;
+    const sendPromise = new Promise<{ success: boolean }>((_res, rej) => { rejectSend = rej; });
+    const smtp = {
+      sendEmail: vi.fn().mockReturnValue(sendPromise),
+    } as unknown as SMTPService;
+
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    const processing = svc.processDue();
+    await Promise.resolve();
+
+    expect(svc.cancel(id)).toEqual({ ok: false, error: "in_flight" });
+
+    rejectSend(new Error("Connection refused"));
+    await processing;
+
+    // Even on send failure, the user-initiated cancel wins — no retry, no
+    // "failed" state, the record is honestly "cancelled".
+    expect(svc.list().find(i => i.id === id)!.status).toBe("cancelled");
   });
 });
