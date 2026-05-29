@@ -1962,8 +1962,12 @@ describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
 
   it("bulkMoveEmails per-chunk failure falls back per-UID for that chunk only", async () => {
     const svc = new SimpleIMAPService();
-    // Force a single deterministic chunk boundary by making the wire-budget
-    // tight enough that 3 UIDs land in chunk 1, the rest in chunk 2.
+    // 5 short UIDs fit comfortably under the 7500-byte default, so they land
+    // in a single chunked call. We force that chunked call to fail and assert
+    // the fallback runs per-UID for every UID in the failing chunk (5 calls)
+    // plus the original chunked call = 6 total. Multi-chunk splitting itself
+    // is covered by the 2000-UID `bulkDeleteEmails` test above and by the
+    // `chunkUidsForWire` boundary tests.
     const uids = ["1", "2", "3", "4", "5"];
     let call = 0;
     const messageMove = vi.fn().mockImplementation(async (arg: unknown) => {

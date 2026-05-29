@@ -114,14 +114,18 @@ export function chunkUidsForWire(uids: string[], maxLen: number = 7500): string[
   let cur: string[] = [];
   let curLen = 0;
   for (const id of uids) {
-    const idLen = id.length + (cur.length === 0 ? 0 : 1); // +1 for separating ','
-    if (cur.length > 0 && curLen + idLen > maxLen) {
+    // Project the cost of adding this UID to the current chunk: the UID's
+    // own length plus a leading comma if the chunk already has content.
+    const sep = cur.length === 0 ? 0 : 1;
+    if (cur.length > 0 && curLen + sep + id.length > maxLen) {
       chunks.push(cur.join(','));
       cur = [];
       curLen = 0;
     }
+    // Recompute the separator *after* a potential flush so the first UID in
+    // a fresh chunk doesn't carry the previous chunk's comma cost.
+    curLen += (cur.length === 0 ? 0 : 1) + id.length;
     cur.push(id);
-    curLen += idLen === 0 ? id.length : idLen;
   }
   if (cur.length > 0) chunks.push(cur.join(','));
   return chunks;
@@ -368,7 +372,7 @@ export class SimpleIMAPService {
           } catch (e: unknown) {
             const m = e instanceof Error ? e.message : String(e);
             onFailure(id, m);
-            logger.warn(`${opName} failed for UID ${id}: ${m}`, 'IMAPService');
+            logger.warn(`${opName} failed for UID ${id} in folder ${folder}`, 'IMAPService', e);
           }
         }
       }
