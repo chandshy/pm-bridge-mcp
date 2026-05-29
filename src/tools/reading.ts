@@ -779,15 +779,23 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   fts_search: async (ctx) => {
-    const { args, ok, getFts } = ctx;
+    const { args, ok, getFts, getCallerAllowedFolders } = ctx;
     const q = typeof args.query === "string" ? args.query.trim() : "";
     if (!q) throw new McpError(ErrorCode.InvalidParams, "query must be a non-empty string.");
     const fts = getFts();
+    // Scope snippet content to the caller's grant. The grant gate in
+    // index.ts already blocks the per-call `folder` arg outside the
+    // allowlist, but `searchAll` returns hits + snippets from every
+    // indexed folder when no `folder` arg is supplied — leaking decrypted
+    // bodies from Trash/Spam/Archive that the caller has no business
+    // seeing. PARSE-002 (audit-2026-05-28).
+    const allowedFolders = getCallerAllowedFolders();
     const hits = fts.search({
       query: q,
       limit: typeof args.limit === "number" ? args.limit : undefined,
       folder: typeof args.folder === "string" ? args.folder : undefined,
       sinceEpoch: typeof args.sinceEpoch === "number" ? args.sinceEpoch : undefined,
+      allowedFolders,
     }).map(h => ({
       id: h.id,
       subject: h.subject,

@@ -92,6 +92,20 @@ export interface ToolCallContext {
   /** Lazy accessor for the FTS index — may throw FtsUnavailableError. */
   getFts: () => FtsIndexService;
 
+  /**
+   * Resolve the current caller's folder allowlist from their grant.
+   *  - Returns `undefined` for trusted/stdio callers, missing grants, or
+   *    grants without a folder restriction → tools should treat as
+   *    "no restriction" and preserve existing behavior.
+   *  - Returns a non-empty `string[]` when the grant restricts the caller
+   *    to a specific set of folders → folder-bearing tools (e.g.,
+   *    `fts_search`) must scope their results to that set.
+   * The grant gate in `index.ts` already blocks per-call `folder` args
+   * outside the allowlist; this accessor is for tools whose response
+   * content (not args) is folder-bearing.
+   */
+  getCallerAllowedFolders: () => string[] | undefined;
+
   /** Live server config (SMTP host/port/username for reply-to, etc.). */
   config: ProtonMailConfig;
 
