@@ -46,9 +46,11 @@ if (!isRootInstall || !hasGitDir) {
   process.exit(0);
 }
 
-// Local dev path: run the simple-git-hooks CLI. Use spawnSync so that any
-// non-zero exit propagates to npm, and so we surface the CLI's output
-// verbatim (it's already concise).
+// Local dev path: run the simple-git-hooks CLI. spawnSync inherits stdio so
+// the CLI's output is surfaced verbatim (it's already concise). A non-zero
+// exit is intentionally caught below and downgraded to a warning so a
+// hook-install hiccup never fails `npm install` for a contributor — they
+// can re-run `npx simple-git-hooks` by hand.
 const result = spawnSync(process.execPath, [
   join(here, 'node_modules', 'simple-git-hooks', 'cli.js'),
 ], {
