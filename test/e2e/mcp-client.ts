@@ -164,8 +164,20 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     imapUser = greenmailUser.username;
     imapPass = greenmailUser.password;
   } else {
-    configPath = resolveBridgeConfig();
-    const bridge = readBridgeConnection(configPath);
+    // Clone the operator-supplied Bridge config to a unique temp path with
+    // `credentialStorage: "config"` baked in. Without this, mailpouch's
+    // startup migration (CRED-001) routes the on-disk password to keychain
+    // and blanks the disk field — the next test in the same run then sees
+    // an empty password and throws "missing connection.password". The clone
+    // also keeps the operator's durable bridge-test config from being
+    // mutated by the test harness at all.
+    const sourcePath = resolveBridgeConfig();
+    const bridge = readBridgeConnection(sourcePath);
+    const raw = JSON.parse(readFileSync(sourcePath, "utf-8")) as Record<string, unknown>;
+    (raw as { credentialStorage?: string }).credentialStorage = "config";
+    configPath = join(HOME, `.mailpouch-e2e-bridge-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(configPath, JSON.stringify(raw, null, 2), { mode: 0o600 });
+    isTempConfig = true;
     imapHost = bridge.imapHost;
     imapPort = bridge.imapPort;
     imapUser = bridge.username;

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "crypto";
 import { hostname, platform, homedir } from "os";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { spawnSync } from "child_process";
@@ -13,6 +13,13 @@ export interface EncryptedCredential {
   encryptedData: string;
   /** GCM authentication tag, base64-encoded. Prevents tampering. */
   authTag: string;
+  /**
+   * Per-blob random 16-byte salt for scrypt-based key derivation.
+   * Present from v3 onwards (CRED-003 fix). v1/v2 blobs derive the key
+   * deterministically from host material with no per-file salt — readable
+   * for back-compat but never written.
+   */
+  salt?: string;
 }
 
 /**
@@ -108,28 +115,54 @@ function resolveMachineSecret(): string {
 export class CredentialEncryption {
   private static readonly APP_SALT = "/mailpouch/credential-encryption/v1";
   /** Always write the current version. Older versions remain readable. */
-  static readonly CURRENT_VERSION = 2;
+  static readonly CURRENT_VERSION = 3;
+  /** scrypt cost params — N=2^14 keeps key derivation under ~50ms on 2020+
+   *  hardware while raising the per-blob attack cost from a single SHA-256
+   *  to ~16k rounds + 16MB memory. */
+  private static readonly SCRYPT_N = 1 << 14;
+  private static readonly SCRYPT_r = 8;
+  private static readonly SCRYPT_p = 1;
+  private static readonly SCRYPT_MAXMEM = 64 * 1024 * 1024;
 
   /**
    * Derive a 32-byte AES key for the given blob version.
-   * v1: hostname || salt || platform                (legacy, portable across clones)
-   * v2: machine-id || hostname || salt || platform  (per-system, blocks clone re-decrypt)
+   * v1: sha256(hostname || salt || platform)                — legacy, portable across clones
+   * v2: sha256(machine-id || hostname || salt || platform)  — per-system, blocks clone re-decrypt
+   * v3: scrypt(machine-id || hostname || platform, perBlobSalt, N=16384, r=8, p=1, 32 bytes)
+   *     — per-blob salt + memory-hard KDF. Resists pre-computation and
+   *       cheap brute-force against the (low-entropy) host material.
+   *     — Closes CRED-003 from the 2026-05-28 audit. v1/v2 stay readable
+   *       so existing blobs continue to decrypt; the next `encrypt()` call
+   *       upgrades them to v3.
    */
-  private static deriveKey(version: number): Buffer {
-    let material: string;
+  private static deriveKey(version: number, salt?: Buffer): Buffer {
     if (version === 1) {
-      material = `${hostname()}|${CredentialEncryption.APP_SALT}|${platform()}`;
-    } else if (version === 2) {
-      material = `${getMachineSecret()}|${hostname()}|${CredentialEncryption.APP_SALT}|${platform()}`;
-    } else {
-      throw new Error(`Unsupported encryption version: ${version}`);
+      const material = `${hostname()}|${CredentialEncryption.APP_SALT}|${platform()}`;
+      return createHash("sha256").update(material, "utf8").digest();
     }
-    return createHash("sha256").update(material, "utf8").digest();
+    if (version === 2) {
+      const material = `${getMachineSecret()}|${hostname()}|${CredentialEncryption.APP_SALT}|${platform()}`;
+      return createHash("sha256").update(material, "utf8").digest();
+    }
+    if (version === 3) {
+      if (!salt || salt.length < 16) {
+        throw new Error("v3 credential decrypt requires a 16-byte salt");
+      }
+      const material = `${getMachineSecret()}|${hostname()}|${platform()}`;
+      return scryptSync(material, salt, 32, {
+        N: CredentialEncryption.SCRYPT_N,
+        r: CredentialEncryption.SCRYPT_r,
+        p: CredentialEncryption.SCRYPT_p,
+        maxmem: CredentialEncryption.SCRYPT_MAXMEM,
+      });
+    }
+    throw new Error(`Unsupported encryption version: ${version}`);
   }
 
   static encrypt(plaintext: string): EncryptedCredential {
     const version = CredentialEncryption.CURRENT_VERSION;
-    const key = CredentialEncryption.deriveKey(version);
+    const salt = randomBytes(16);
+    const key = CredentialEncryption.deriveKey(version, salt);
     const iv = randomBytes(16);
     const cipher = createCipheriv("aes-256-gcm", key, iv);
     let encryptedData = cipher.update(plaintext, "utf8", "base64");
@@ -141,11 +174,13 @@ export class CredentialEncryption {
       iv: iv.toString("base64"),
       encryptedData,
       authTag: authTag.toString("base64"),
+      salt: salt.toString("base64"),
     };
   }
 
   static decrypt(encrypted: EncryptedCredential): string {
-    const key = CredentialEncryption.deriveKey(encrypted.version);
+    const saltBuf = encrypted.salt ? Buffer.from(encrypted.salt, "base64") : undefined;
+    const key = CredentialEncryption.deriveKey(encrypted.version, saltBuf);
     const iv = Buffer.from(encrypted.iv, "base64");
     const authTag = Buffer.from(encrypted.authTag, "base64");
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
@@ -158,13 +193,20 @@ export class CredentialEncryption {
   static isValidEncrypted(obj: unknown): obj is EncryptedCredential {
     if (!obj || typeof obj !== "object") return false;
     const e = obj as Record<string, unknown>;
-    return (
-      e.algorithm === "aes-256-gcm" &&
-      typeof e.version === "number" &&
-      typeof e.iv === "string" && e.iv.length > 0 &&
-      typeof e.encryptedData === "string" &&
-      typeof e.authTag === "string" && e.authTag.length > 0
-    );
+    if (
+      e.algorithm !== "aes-256-gcm" ||
+      typeof e.version !== "number" ||
+      typeof e.iv !== "string" || (e.iv as string).length === 0 ||
+      typeof e.encryptedData !== "string" ||
+      typeof e.authTag !== "string" || (e.authTag as string).length === 0
+    ) {
+      return false;
+    }
+    // v3 mandates the per-blob salt; earlier versions never wrote one.
+    if (e.version === 3 && (typeof e.salt !== "string" || (e.salt as string).length === 0)) {
+      return false;
+    }
+    return true;
   }
 
   /** Is this blob written with an older format that should be re-encrypted? */
