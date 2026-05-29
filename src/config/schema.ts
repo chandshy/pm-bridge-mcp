@@ -418,6 +418,46 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "restart_server",
 ]);
 
+/**
+ * Tool-name aliases. PERM-003 (audit 2026-05-28): `bulk_delete` and
+ * `bulk_delete_emails` resolve to the same handler in src/tools/deletion.ts,
+ * but the permission gate keys rate buckets by raw tool name — letting an
+ * agent double the destruction throughput the operator configured by
+ * alternating between the two names. Canonicalize at every gate
+ * (rate-limit bucket, destructive-confirm, per-tool enabled flag) so the
+ * operator's intent applies regardless of which alias the caller used.
+ *
+ * Keys are aliases; values are the canonical name. Stays small — only add
+ * an entry when two tool names truly share a handler.
+ */
+export const TOOL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  bulk_delete: "bulk_delete_emails",
+});
+
+/** Resolve a tool name through TOOL_ALIASES; returns the canonical name. */
+export function canonicalToolName(name: string): string {
+  return TOOL_ALIASES[name] ?? name;
+}
+
+/**
+ * Move-style tools that, when their target folder is destructive (Trash or
+ * Spam), should be gated by the destructive-confirm flow the same way
+ * `move_to_trash` / `move_to_spam` already are. PERM-004 (audit 2026-05-28):
+ * without this, calling `move_email { targetFolder: "Trash" }` bypassed
+ * destructive-confirm even though `move_to_trash` did not.
+ */
+export const MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET: ReadonlySet<string> = new Set<string>([
+  "move_email",
+  "bulk_move_emails",
+  "move_to_folder",
+]);
+
+/** Destination folder names that count as destructive. Case-insensitive comparison. */
+export const DESTRUCTIVE_DESTINATIONS: ReadonlySet<string> = new Set<string>([
+  "trash",
+  "spam",
+]);
+
 // ─── Tool Tiers ────────────────────────────────────────────────────────────────
 //
 // Every connected MCP server contributes its ListTools response to the client's

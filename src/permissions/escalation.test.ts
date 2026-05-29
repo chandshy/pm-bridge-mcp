@@ -531,4 +531,37 @@ describe('escalation workflow', () => {
     const record = getEscalationStatus(req.id);
     expect(record!.status).toBe('expired');
   });
+
+  // ─── PERM-002: requester identity surfaced on the escalation record ────
+
+  it('PERM-002: requestEscalation captures requestedByClientId when supplied', () => {
+    const req = requestEscalation('supervised', 'read_only', 'Need send', {
+      clientId: 'pmc_agent-alpha',
+      clientName: 'Agent Alpha',
+    });
+    if (!req.ok) throw new Error('request failed');
+    const record = getEscalationStatus(req.id)!;
+    expect(record.requestedByClientId).toBe('pmc_agent-alpha');
+    expect(record.requestedByClientName).toBe('Agent Alpha');
+  });
+
+  it('PERM-002: requestEscalation strips control chars + caps length on client identity', () => {
+    const req = requestEscalation('supervised', 'read_only', 'Need send', {
+      clientId: 'pmc_' + 'x'.repeat(500),
+      clientName: '\x1b[31mClaude\x00Desktop\x1b[0m' + 'y'.repeat(500),
+    });
+    if (!req.ok) throw new Error('request failed');
+    const record = getEscalationStatus(req.id)!;
+    expect(record.requestedByClientId!.length).toBeLessThanOrEqual(200);
+    expect(record.requestedByClientName).not.toMatch(/[\x00-\x1f]/);
+    expect(record.requestedByClientName!.length).toBeLessThanOrEqual(200);
+  });
+
+  it('PERM-002: requestEscalation without identity options omits the fields (back-compat)', () => {
+    const req = requestEscalation('supervised', 'read_only', 'Internal call');
+    if (!req.ok) throw new Error('request failed');
+    const record = getEscalationStatus(req.id)!;
+    expect(record.requestedByClientId).toBeUndefined();
+    expect(record.requestedByClientName).toBeUndefined();
+  });
 });

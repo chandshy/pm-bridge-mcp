@@ -96,6 +96,23 @@ export interface EscalationRecord {
   newTools: string[];
   /** Tools whose rate limit will be relaxed (computed at request time). */
   unthrottledTools: string[];
+  /**
+   * OAuth/MCP client id of the agent that requested this escalation.
+   * PERM-002 (audit 2026-05-28): the approval card used to omit this, so a
+   * human approving challenge X (intended for Agent A) silently raised the
+   * global preset ceiling for every connected agent. Surfacing the
+   * requester lets the operator decide whether to approve. Optional for
+   * back-compat with pre-v3.0.50 pending files. May be the literal string
+   * "stdio" for the local stdio transport (no OAuth client identity).
+   */
+  requestedByClientId?: string;
+  /**
+   * Display-friendly name of the requesting client, as recorded in the
+   * agent-grants store. Rendered next to the client id on the approval
+   * card. Sanitized to printable ASCII + length-capped at request time
+   * (mirrors XPORT-002's client_name handling).
+   */
+  requestedByClientName?: string;
 }
 
 export interface AuditEntry {
@@ -281,6 +298,13 @@ export function requestEscalation(
   targetPreset: PermissionPreset,
   currentPreset: PermissionPreset,
   reason: string,
+  /**
+   * PERM-002: capture the requesting agent's identity so the approval card
+   * can render it. Pass "stdio" (or another stable identifier) when no
+   * OAuth client id is available. Optional for back-compat with internal
+   * callers that don't have a client context.
+   */
+  options?: { clientId?: string; clientName?: string },
 ): RequestResult {
   const data = loadPendingFile();
   if (evictExpired(data)) savePendingFile(data);
@@ -335,7 +359,15 @@ export function requestEscalation(
   const newTools         = computeNewTools(currentPreset, targetPreset);
   const unthrottledTools = computeUnthrottledTools(currentPreset, targetPreset);
 
-  const sanitizedReason = reason.replace(/[\x00-\x1f\x7f]|\x1b\[[0-9;]*[a-zA-Z]/g, "").slice(0, 500);
+  // Strip ANSI escapes first, then bare control chars — the alternation
+  // order matters so a leading `\x1b[Nm`-style escape consumes the whole
+  // sequence before the control-char class would eat just the ESC byte.
+  const sanitizedReason = reason.replace(/\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f]/g, "").slice(0, 500);
+  // PERM-002 + XPORT-002 alignment: client_name on consent surfaces is
+  // attacker-controlled in the DCR flow. Strip control chars + cap length
+  // before storing so the approval card can render it raw-but-bounded.
+  const sanitizeIdentifier = (s: string | undefined): string | undefined =>
+    s ? s.replace(/\x1b\[[0-9;]*[a-zA-Z]|[\x00-\x1f\x7f]/g, "").slice(0, 200) : undefined;
   const record: EscalationRecord = {
     id,
     requestedAt:      now.toISOString(),
@@ -348,6 +380,8 @@ export function requestEscalation(
     resolvedBy:       null,
     newTools,
     unthrottledTools,
+    requestedByClientId:   sanitizeIdentifier(options?.clientId),
+    requestedByClientName: sanitizeIdentifier(options?.clientName),
   };
 
   data.escalations.push(record);

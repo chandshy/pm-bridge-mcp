@@ -285,4 +285,44 @@ describe("PermissionManager", () => {
       expect(typeof limits.maxResponseBytes).toBe("number");
     });
   });
+
+  // ─── PERM-003: alias canonicalization ───────────────────────────────────
+
+  describe("PERM-003 alias canonicalization", () => {
+    it("bulk_delete shares a rate bucket with bulk_delete_emails (no double-throughput bypass)", () => {
+      const config = makeConfig({
+        bulk_delete_emails: { enabled: true, rateLimit: 2 },
+        // bulk_delete intentionally NOT configured — should canonicalize.
+      });
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      // Two calls under bulk_delete_emails consume the bucket.
+      expect(manager.check("bulk_delete_emails").allowed).toBe(true);
+      expect(manager.check("bulk_delete_emails").allowed).toBe(true);
+      // Third call via the alias must be denied — same bucket.
+      const third = manager.check("bulk_delete" as never);
+      expect(third.allowed).toBe(false);
+      expect(third.reason).toContain("bulk_delete_emails");
+    });
+
+    it("disabling bulk_delete_emails also blocks the bulk_delete alias", () => {
+      const config = makeConfig({
+        bulk_delete_emails: { enabled: false, rateLimit: null },
+      });
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      const result = manager.check("bulk_delete" as never);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain("bulk_delete_emails");
+    });
+
+    it("non-alias tool names pass through unchanged", () => {
+      const config = makeConfig({
+        send_email: { enabled: true, rateLimit: null },
+      });
+      mockedLoadConfig.mockReturnValue(config);
+      const manager = new PermissionManager();
+      expect(manager.check("send_email").allowed).toBe(true);
+    });
+  });
 });

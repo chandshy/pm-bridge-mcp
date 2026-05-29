@@ -27,6 +27,14 @@ void logger;
 export interface EscalationContext {
   args: Record<string, unknown>;
   config: ProtonMailConfig;
+  /**
+   * PERM-002: identity of the agent making the escalation request, so the
+   * approval card can surface it. `clientId === "stdio"` for the local
+   * stdio transport (no OAuth identity); for HTTP/OAuth callers, this is
+   * the real client id and (optionally) the human-readable client name.
+   * Optional for back-compat with any test harness that doesn't supply it.
+   */
+  caller?: { clientId: string; clientName?: string };
 }
 
 export type EscalationHandler = (ctx: EscalationContext) => Promise<ToolResult>;
@@ -128,7 +136,10 @@ export const handlers: Record<string, EscalationHandler> = {
         isError: false,
       };
     }
-    const result = requestEscalation(validatedPreset, currentPreset, reason);
+    const result = requestEscalation(validatedPreset, currentPreset, reason, {
+      clientId:   ctx.caller?.clientId,
+      clientName: ctx.caller?.clientName,
+    });
     if (!result.ok) {
       return { content: [{ type: "text" as const, text: result.error }], isError: true };
     }
