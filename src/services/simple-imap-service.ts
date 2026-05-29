@@ -95,6 +95,42 @@ function truncateBody(body: string, maxLength: number = 300): string {
   return truncated + '...';
 }
 
+/**
+ * Split a list of UID strings into wire-bounded chunks suitable for a single
+ * IMAP command. Proton Bridge (and other servers) cap command lines around
+ * 8 KB; ~800 nine-digit UIDs already exceed that, and IMAP-002 from the
+ * 2026-05-28 audit observed the bulk paths silently degrading to per-UID
+ * fallback (and minutes of held mailbox lock). This helper caps each chunk
+ * at `maxLen` bytes of `,`-joined UIDs, leaving headroom for the IMAP tag,
+ * command verb, and surrounding syntax.
+ *
+ * No sequence-set compression (`1:5,10`) — the runs aren't usually present
+ * in production UID lists and the simpler flat representation keeps the
+ * fallback behaviour identical.
+ */
+export function chunkUidsForWire(uids: string[], maxLen: number = 7500): string[] {
+  if (uids.length === 0) return [];
+  const chunks: string[] = [];
+  let cur: string[] = [];
+  let curLen = 0;
+  for (const id of uids) {
+    // Project the cost of adding this UID to the current chunk: the UID's
+    // own length plus a leading comma if the chunk already has content.
+    const sep = cur.length === 0 ? 0 : 1;
+    if (cur.length > 0 && curLen + sep + id.length > maxLen) {
+      chunks.push(cur.join(','));
+      cur = [];
+      curLen = 0;
+    }
+    // Recompute the separator *after* a potential flush so the first UID in
+    // a fresh chunk doesn't carry the previous chunk's comma cost.
+    curLen += (cur.length === 0 ? 0 : 1) + id.length;
+    cur.push(id);
+  }
+  if (cur.length > 0) chunks.push(cur.join(','));
+  return chunks;
+}
+
 function expandImapSequence(range: string): number[] {
   const nums: number[] = [];
   for (const part of range.split(',')) {
@@ -300,13 +336,60 @@ export class SimpleIMAPService {
    * check" — collapsing both into `failed` lies to the caller and recreates
    * the v3.0.41 false-success pattern (IMAP-006 from the 2026-05-28 audit).
    */
+  /**
+   * Chunked batch IMAP op + per-UID fallback. Centralises the IMAP-002
+   * wire-line-cap handling so every bulk path (move/delete/copy/flag) shares
+   * one chunking implementation. The per-chunk `perChunk` callback receives
+   * a comma-joined UID set bounded by `chunkUidsForWire`; if a chunk fails,
+   * its UIDs fall back to the per-UID `perUid` callback. `onSuccess` /
+   * `onFailure` let callers update their own counters and cache.
+   */
+  private async chunkedBatchOp(
+    present: string[],
+    perChunk: (uidSet: string) => Promise<unknown>,
+    perUid: (uid: string) => Promise<unknown>,
+    onSuccess: (uid: string) => void,
+    onFailure: (uid: string, msg: string) => void,
+    opName: string,
+    folder: string,
+  ): Promise<void> {
+    const chunks = chunkUidsForWire(present);
+    for (const uidSet of chunks) {
+      const chunkUids = uidSet.split(',');
+      try {
+        await perChunk(uidSet);
+        for (const id of chunkUids) onSuccess(id);
+      } catch (batchErr: unknown) {
+        logger.warn(
+          `${opName} batch failed for folder ${folder} (chunk size=${chunkUids.length}), falling back to per-email`,
+          'IMAPService',
+          batchErr
+        );
+        for (const id of chunkUids) {
+          try {
+            await perUid(id);
+            onSuccess(id);
+          } catch (e: unknown) {
+            const m = e instanceof Error ? e.message : String(e);
+            onFailure(id, m);
+            logger.warn(`${opName} failed for UID ${id} in folder ${folder}`, 'IMAPService', e);
+          }
+        }
+      }
+    }
+  }
+
   private async findExistingUidsInLockedFolder(uids: string[]): Promise<Set<string>> {
     const found = new Set<string>();
     if (!this.client || uids.length === 0) return found;
-    const uidSet = uids.join(',');
-    for await (const msg of this.client.fetch(uidSet, { uid: true }, { uid: true })) {
-      if (msg && typeof msg.uid === 'number') {
-        found.add(msg.uid.toString());
+    // IMAP-002: chunk the UID set so a 2000-element preflight doesn't trip
+    // Bridge's command-line cap (which would otherwise be misreported by the
+    // bulk caller as "every UID missing").
+    for (const chunk of chunkUidsForWire(uids)) {
+      for await (const msg of this.client.fetch(chunk, { uid: true }, { uid: true })) {
+        if (msg && typeof msg.uid === 'number') {
+          found.add(msg.uid.toString());
+        }
       }
     }
     return found;
@@ -1931,27 +2014,15 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        const uidSet = present.join(',');
-        try {
-          await this.client.messageMove(uidSet, targetFolder, { uid: true });
-          for (const emailId of present) {
-            this.evictCacheEntry(`${folder}:${emailId}`);
-            results.success++;
-          }
-        } catch (batchError: unknown) {
-          logger.warn(`Batch move failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchError);
-          for (const emailId of present) {
-            try {
-              await this.client.messageMove(emailId, targetFolder, { uid: true });
-              this.evictCacheEntry(`${folder}:${emailId}`);
-              results.success++;
-            } catch (error: unknown) {
-              results.failed++;
-              results.errors.push(`Failed to move email ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-              logger.warn(`Failed to move email ${emailId}`, 'IMAPService', error);
-            }
-          }
-        }
+        await this.chunkedBatchOp(
+          present,
+          (uidSet) => this.client!.messageMove(uidSet, targetFolder, { uid: true }),
+          (id) => this.client!.messageMove(id, targetFolder, { uid: true }),
+          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
+          (id, msg) => { results.failed++; results.errors.push(`Failed to move email ${id}: ${msg}`); },
+          'Bulk move',
+          folder,
+        );
       } finally {
         lock.release();
       }
@@ -2105,27 +2176,15 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        const uidSet = present.join(',');
-        try {
-          await this.client.messageDelete(uidSet, { uid: true });
-          for (const emailId of present) {
-            this.evictCacheEntry(`${folder}:${emailId}`);
-            results.success++;
-          }
-        } catch (batchError: unknown) {
-          logger.warn(`Batch delete failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchError);
-          for (const emailId of present) {
-            try {
-              await this.client.messageDelete(emailId, { uid: true });
-              this.evictCacheEntry(`${folder}:${emailId}`);
-              results.success++;
-            } catch (error: unknown) {
-              results.failed++;
-              results.errors.push(`Failed to delete email ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-              logger.warn(`Failed to delete email ${emailId}`, 'IMAPService', error);
-            }
-          }
-        }
+        await this.chunkedBatchOp(
+          present,
+          (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
+          (id) => this.client!.messageDelete(id, { uid: true }),
+          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
+          (id, msg) => { results.failed++; results.errors.push(`Failed to delete email ${id}: ${msg}`); },
+          'Bulk delete',
+          folder,
+        );
       } finally {
         lock.release();
       }
@@ -2225,28 +2284,22 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        const uidSet = present.join(',');
-        try {
-          if (isRead) await this.client.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true });
-          else        await this.client.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true });
-          for (const id of present) {
+        await this.chunkedBatchOp(
+          present,
+          (uidSet) => isRead
+            ? this.client!.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true })
+            : this.client!.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true }),
+          (id) => isRead
+            ? this.client!.messageFlagsAdd(id, ['\\Seen'], { uid: true })
+            : this.client!.messageFlagsRemove(id, ['\\Seen'], { uid: true }),
+          (id) => {
             const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
             results.success++;
-          }
-        } catch (batchErr: unknown) {
-          logger.warn(`Batch mark-read failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchErr);
-          for (const id of present) {
-            try {
-              if (isRead) await this.client.messageFlagsAdd(id, ['\\Seen'], { uid: true });
-              else        await this.client.messageFlagsRemove(id, ['\\Seen'], { uid: true });
-              const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
-              results.success++;
-            } catch (e: unknown) {
-              results.failed++;
-              results.errors.push(`Failed to mark ${id}: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
-        }
+          },
+          (id, msg) => { results.failed++; results.errors.push(`Failed to mark ${id}: ${msg}`); },
+          'Bulk mark-read',
+          folder,
+        );
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
@@ -2333,28 +2386,22 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        const uidSet = present.join(',');
-        try {
-          if (isStarred) await this.client.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true });
-          else           await this.client.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true });
-          for (const id of present) {
+        await this.chunkedBatchOp(
+          present,
+          (uidSet) => isStarred
+            ? this.client!.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true })
+            : this.client!.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true }),
+          (id) => isStarred
+            ? this.client!.messageFlagsAdd(id, ['\\Flagged'], { uid: true })
+            : this.client!.messageFlagsRemove(id, ['\\Flagged'], { uid: true }),
+          (id) => {
             const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
             results.success++;
-          }
-        } catch (batchErr: unknown) {
-          logger.warn(`Batch star failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchErr);
-          for (const id of present) {
-            try {
-              if (isStarred) await this.client.messageFlagsAdd(id, ['\\Flagged'], { uid: true });
-              else           await this.client.messageFlagsRemove(id, ['\\Flagged'], { uid: true });
-              const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
-              results.success++;
-            } catch (e: unknown) {
-              results.failed++;
-              results.errors.push(`Failed to star ${id}: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
-        }
+          },
+          (id, msg) => { results.failed++; results.errors.push(`Failed to star ${id}: ${msg}`); },
+          'Bulk star',
+          folder,
+        );
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
@@ -2443,22 +2490,15 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        const uidSet = present.join(',');
-        try {
-          await this.client.messageCopy(uidSet, targetFolder, { uid: true });
-          results.success += present.length;
-        } catch (batchErr: unknown) {
-          logger.warn(`Batch copy failed from ${folder}→${targetFolder}, falling back to per-email`, 'IMAPService', batchErr);
-          for (const id of present) {
-            try {
-              await this.client.messageCopy(id, targetFolder, { uid: true });
-              results.success++;
-            } catch (e: unknown) {
-              results.failed++;
-              results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
-        }
+        await this.chunkedBatchOp(
+          present,
+          (uidSet) => this.client!.messageCopy(uidSet, targetFolder, { uid: true }),
+          (id) => this.client!.messageCopy(id, targetFolder, { uid: true }),
+          () => { results.success++; },
+          (id, msg) => { results.failed++; results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${msg}`); },
+          `Bulk copy →${targetFolder}`,
+          folder,
+        );
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
@@ -2516,26 +2556,16 @@ export class SimpleIMAPService {
           results.errors.push(`UID ${id} not found in folder ${folder}`);
         }
       }
-      if (present.length === 0) {
-        // nothing to do — fall through to logging/return
-      } else {
-        const uidSet = present.join(',');
-        try {
-          await this.client.messageDelete(uidSet, { uid: true });
-          for (const id of present) { this.evictCacheEntry(`${folder}:${id}`); results.success++; }
-        } catch (batchErr: unknown) {
-          logger.warn(`Batch delete-from-folder failed for ${folder}, falling back to per-email`, 'IMAPService', batchErr);
-          for (const id of present) {
-            try {
-              await this.client.messageDelete(id, { uid: true });
-              this.evictCacheEntry(`${folder}:${id}`);
-              results.success++;
-            } catch (e: unknown) {
-              results.failed++;
-              results.errors.push(`Failed to delete ${id} from ${folder}: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }
-        }
+      if (present.length > 0) {
+        await this.chunkedBatchOp(
+          present,
+          (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
+          (id) => this.client!.messageDelete(id, { uid: true }),
+          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
+          (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
+          'Bulk delete-from-folder',
+          folder,
+        );
       }
     } finally { lock.release(); }
 
@@ -2678,7 +2708,15 @@ export class SimpleIMAPService {
     const cfg = this.connectionConfig;
     if (!cfg) return;
 
+    // IMAP-001 from the 2026-05-28 audit: the IDLE loop used to silently
+    // fall back to `rejectUnauthorized: false` when the cert load failed —
+    // ignoring `allowInsecureBridge`. The main connect() path correctly
+    // throws in the same situation. Mirror that contract here: if the
+    // operator pinned a cert OR set localhost without an insecure opt-in,
+    // refuse to bring up the IDLE socket downgraded.
     const isLocalhost = cfg.host === 'localhost' || cfg.host === '127.0.0.1';
+    const allowInsecure = cfg.allowInsecureBridge
+      || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
     let tlsOptions: Record<string, unknown> | undefined;
 
     if (isLocalhost) {
@@ -2688,10 +2726,38 @@ export class SimpleIMAPService {
           try { if (statSync(certPath).isDirectory()) certPath = pathJoin(certPath, 'cert.pem'); } catch {}
           const cert = readPinnedBridgeCert(certPath);
           tlsOptions = buildBridgeTlsOptions(cert);
-        } catch {
+        } catch (err) {
+          if (!allowInsecure) {
+            logger.error(
+              `IDLE: Bridge cert at "${cfg.bridgeCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
+              `Refusing to start IDLE with TLS validation disabled. Fix the cert path or set allowInsecureBridge: true.`,
+              'IMAPService',
+              err
+            );
+            this.idleActive = false;
+            return;
+          }
+          logger.warn(
+            `IDLE: Failed to load Bridge cert at "${cfg.bridgeCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set).`,
+            'IMAPService',
+            err
+          );
           tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
         }
       } else {
+        if (!allowInsecure) {
+          logger.error(
+            'IDLE: No Bridge certificate configured. Refusing to start IDLE with TLS validation disabled. ' +
+            "Set 'bridgeCertPath' or set allowInsecureBridge: true to opt into the legacy behavior.",
+            'IMAPService'
+          );
+          this.idleActive = false;
+          return;
+        }
+        logger.warn(
+          'IDLE: No Bridge certificate configured and allowInsecureBridge is set — TLS certificate validation DISABLED for localhost.',
+          'IMAPService'
+        );
         tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
       }
     } else {
