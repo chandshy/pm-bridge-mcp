@@ -209,15 +209,26 @@ const FOLDER_AGNOSTIC_TOOLS = new Set<string>([
   "save_draft", "schedule_email",
   "request_permission_escalation", "check_escalation_status",
   "sync_emails",
-  // PERM-011: email-ID-scoped tools (get_email_by_id, get_thread,
-  // mark_email_read, star_email, delete_email, download_attachment) used to
-  // be listed here as folder-agnostic on the theory that "the folder is
-  // implied by the UID". But UIDs ARE folder-scoped, and since v3.0.41 these
-  // tools carry the originating folder in `sourceFolder`. Leaving them
-  // agnostic let a grant pinned to INBOX delete a UID in Archive via
-  // `delete_email { sourceFolder: "Archive" }`. They are now enforced by the
-  // allowlist via extractFolderArg's `sourceFolder` recognition; a call that
-  // omits the folder fails closed (consistent with checkFolderCondition).
+  // PERM-011: email-ID-scoped mutators (delete_email, mark_email_read,
+  // star_email, get_email_by_id) used to be folder-agnostic on the theory that
+  // "the folder is implied by the UID". But UIDs ARE folder-scoped, and since
+  // v3.0.41 these tools carry+honor the originating folder in `sourceFolder`
+  // (get_email_by_id honors `folder`). Leaving them agnostic let a grant pinned
+  // to INBOX act on a UID in Archive via `{ sourceFolder: "Archive" }`. They are
+  // now enforced by the allowlist via extractFolderArg; a call that omits the
+  // folder fails closed (consistent with checkFolderCondition).
+  //
+  // get_thread and download_attachment are DELIBERATELY still agnostic here:
+  // gating them at this layer would be false enforcement, not real. get_thread
+  // takes a seed folder but then assembles related messages from INBOX+Sent
+  // unconditionally (src/tools/reading.ts), so a seed-folder check passes while
+  // results still come from outside the allowlist. download_attachment passes
+  // no folder to imapService.downloadAttachment at all, so the gate has nothing
+  // truthful to check and would simply fail-closed for every restricted grant.
+  // Both need service-level folder constraints (cross-folder thread assembly;
+  // attachment UID resolution) to be honestly scoped — tracked as a PERM-011
+  // residual; see the audit annotation.
+  "get_thread", "download_attachment",
 ]);
 
 /**

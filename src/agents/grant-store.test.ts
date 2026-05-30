@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { AgentGrantStore } from "./grant-store.js";
-import { rmSync, existsSync, readFileSync } from "fs";
+import { rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
@@ -28,6 +28,37 @@ describe("AgentGrantStore", () => {
 
     const s2 = new AgentGrantStore(path);
     expect(s2.get("pmc_1")?.status).toBe("pending");
+  });
+
+  it("a peer's status change is not reverted by a later local mutation (reloadMerge refresh)", () => {
+    // Two store instances over the same file (two processes). B holds a stale
+    // `pending` copy; A approves the grant; then B mutates an UNRELATED grant.
+    // Before the fix, B's whole-file persist() rewrote pmc_1 as pending again.
+    const a = new AgentGrantStore(path);
+    const b = new AgentGrantStore(path);
+    a.createPending({ clientId: "pmc_1", clientName: "X" });
+    b.createPending({ clientId: "pmc_2", clientName: "Y" }); // B now has pmc_1=pending in memory too
+    a.approve({ clientId: "pmc_1", preset: "supervised" });  // A: pmc_1 -> active on disk
+    b.approve({ clientId: "pmc_2", preset: "read_only" });   // B mutates -> reload+persist
+
+    const fresh = new AgentGrantStore(path);
+    expect(fresh.get("pmc_1")?.status).toBe("active");        // A's change survives
+    expect(fresh.get("pmc_2")?.status).toBe("active");
+  });
+
+  it("flushCounters preserves local call counts without reverting a peer's status change", () => {
+    const a = new AgentGrantStore(path);
+    const b = new AgentGrantStore(path);
+    a.createPending({ clientId: "pmc_1", clientName: "X" });
+    b.get("pmc_1");                      // B doesn't know pmc_1 yet; load it
+    const b2 = new AgentGrantStore(path); // B-process view that has pmc_1 loaded
+    b2.recordCall("pmc_1");              // local counter bump, unflushed
+    a.approve({ clientId: "pmc_1", preset: "full" }); // peer flips status on disk
+    b2.flushCounters();                  // must not revert status to pending
+
+    const fresh = new AgentGrantStore(path);
+    expect(fresh.get("pmc_1")?.status).toBe("active");
+    expect(fresh.get("pmc_1")?.totalCalls).toBe(1); // local increment preserved
   });
 
   it("createPending is idempotent for the same clientId", () => {
@@ -109,9 +140,12 @@ describe("AgentGrantStore", () => {
     const s = new AgentGrantStore(path);
     s.createPending({ clientId: "pmc_1", clientName: "A" });
     s.deny("pmc_1");
-    // Backdate the revoke so it falls outside the 30-day window.
-    const g = s.get("pmc_1")!;
-    g.revokedAt = new Date(Date.now() - 120 * 86_400_000).toISOString();
+    // Backdate the revoke ON DISK so it falls outside the 30-day window; prune()
+    // reloads from disk under the lock (disk is the source of truth), so an
+    // in-memory-only edit would be refreshed away before prune evaluates it.
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as { grants: { revokedAt?: string }[] };
+    raw.grants[0].revokedAt = new Date(Date.now() - 120 * 86_400_000).toISOString();
+    writeFileSync(path, JSON.stringify(raw, null, 2));
     const removed = s.prune(30);
     expect(removed).toBe(1);
     expect(s.get("pmc_1")).toBeUndefined();

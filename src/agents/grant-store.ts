@@ -81,23 +81,38 @@ export class AgentGrantStore {
   }
 
   /**
-   * Reload the file from disk and merge in any grant the in-memory Map does
-   * NOT already know about. This recovers grants another process created
-   * since we last loaded (the PERM-006 lost-grant case) without clobbering
-   * records we already hold — local state (including not-yet-persisted
-   * counter/field edits) stays authoritative for clientIds we know. The lock
-   * serializes the surrounding write so two processes never interleave the
-   * tmp→rename for the same file.
+   * Reload the file from disk under the lock so on-disk state is authoritative
+   * before we mutate + persist. This both recovers grants another process
+   * created (the PERM-006 lost-grant case) AND refreshes the *status* of grants
+   * we already hold — without this, a grant that process A approved/revoked
+   * while we held a stale `pending` copy would be silently reverted by our
+   * whole-file `persist()`. The one thing the disk is NOT authoritative for is
+   * the call counters (`totalCalls`/`lastCallAt`): `recordCall` bumps those in
+   * memory and defers the fsync, so if our in-memory count is ahead we carry it
+   * forward onto the disk record rather than losing the unflushed increments.
    */
   private reloadMerge(): void {
     if (!existsSync(this.path)) return;
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf-8")) as Partial<StoreFile>;
       const list = Array.isArray(parsed.grants) ? parsed.grants : [];
+      const seen = new Set<string>();
       for (const g of list) {
-        if (g && typeof g.clientId === "string" && !this.grants.has(g.clientId)) {
+        if (!g || typeof g.clientId !== "string") continue;
+        seen.add(g.clientId);
+        const mine = this.grants.get(g.clientId);
+        if (mine && mine.totalCalls > (g.totalCalls ?? 0)) {
+          // Preserve our not-yet-flushed call counters; disk wins for everything else.
+          this.grants.set(g.clientId, { ...g, totalCalls: mine.totalCalls, lastCallAt: mine.lastCallAt });
+        } else {
           this.grants.set(g.clientId, g);
         }
+      }
+      // Drop in-memory records that no longer exist on disk (pruned by a peer),
+      // but keep any we created this session that haven't been persisted yet
+      // (none, given mutate() persists under the lock — defensive only).
+      for (const clientId of [...this.grants.keys()]) {
+        if (!seen.has(clientId)) this.grants.delete(clientId);
       }
     } catch (err) {
       logger.warn(`AgentGrantStore: reloadMerge failed for ${this.path}`, "AgentGrantStore", err);
@@ -207,7 +222,10 @@ export class AgentGrantStore {
 
   /** Force-flush any in-memory call-count updates to disk. */
   flushCounters(): void {
-    this.persist();
+    // Go through mutate() so we reload + reconcile on-disk status first; a bare
+    // persist() here would blind-write our whole map and could revert a status
+    // change a peer process made (the same hazard reloadMerge guards against).
+    this.mutate(() => this.persist());
   }
 
   get(clientId: string): AgentGrant | undefined {

@@ -194,6 +194,20 @@ describe("GrantManager.check", () => {
     expect(r.allowed).toBe(false);
   });
 
+  it("leaves get_thread/download_attachment folder-agnostic (gating them here would be false enforcement)", () => {
+    // PERM-011 residual: their services don't honor a folder constraint
+    // (get_thread assembles INBOX+Sent; download_attachment passes no folder),
+    // so they are deliberately NOT gated at this layer — gating would be theatre
+    // and download_attachment would fail-closed for every restricted grant.
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({ clientId: "pmc_1", preset: "full", conditions: { folderAllowlist: ["INBOX"] } });
+    for (const tool of ["get_thread", "download_attachment"]) {
+      expect(
+        mgr.check({ clientId: "pmc_1", tool, globalPreset: "full", args: { emailId: "42" } }).allowed,
+      ).toBe(true);
+    }
+  });
+
   // ── PERM-013: custom preset must not widen via intersection ─────────────────
   it("does not let a custom grant preset inherit another preset's enabled map", () => {
     store.createPending({ clientId: "pmc_1", clientName: "A" });
