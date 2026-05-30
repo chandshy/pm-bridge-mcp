@@ -184,12 +184,18 @@ export class SMTPService {
     // requireTLS forces nodemailer to issue STARTTLS and reject the
     // connection if the server doesn't advertise it. For real Bridge this
     // is always correct (Bridge advertises STARTTLS on its localhost
-    // socket); for the Greenmail E2E harness the embedded SMTP server does
-    // NOT advertise STARTTLS, so respect the existing insecure opt-in
-    // signal (allowInsecureBridge / MAILPOUCH_INSECURE_BRIDGE=1) for both
-    // sides of the TLS contract — pinning verification AND the upgrade
-    // requirement. This keeps production behaviour identical (those flags
-    // are unset in real deployments) while making the test harness usable.
+    // socket). The Greenmail E2E harness's embedded SMTP server does NOT
+    // advertise STARTTLS, so the no-STARTTLS path is gated on a dedicated,
+    // test-only signal — `MAILPOUCH_SMTP_ALLOW_PLAINTEXT=1` — NOT on
+    // `allowInsecureBridge`. Critical distinction (Copilot review on #146):
+    // `allowInsecureBridge` is a *production* opt-in that disables cert
+    // PINNING for localhost while STILL requiring STARTTLS encryption.
+    // Overloading it to also drop requireTLS would silently downgrade a
+    // real insecure-cert deployment to plaintext send. Keeping the two
+    // concerns on separate switches means production insecure-cert mode
+    // keeps its encrypted-transport guarantee; only the explicit
+    // E2E-plaintext env (which no real deployment sets) relaxes STARTTLS.
+    const allowPlaintextSmtp = process.env.MAILPOUCH_SMTP_ALLOW_PLAINTEXT === "1";
     this.transporter = nodemailer.createTransport({
       host: this.config.smtp.host,
       port: this.config.smtp.port,
@@ -198,7 +204,7 @@ export class SMTPService {
         user: this.config.smtp.username,
         pass: authPassword,
       },
-      requireTLS: isLocalhost && !allowInsecure,
+      requireTLS: isLocalhost && !allowPlaintextSmtp,
       tls: tlsOptions,
     });
 

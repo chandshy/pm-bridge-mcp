@@ -200,6 +200,12 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
       MAILPOUCH_CONFIG: configPath,
       MAILPOUCH_INSECURE_BRIDGE: "1",
       MAILPOUCH_TIER: "complete",
+      // Greenmail's embedded SMTP does not advertise STARTTLS. This
+      // test-only switch relaxes the requireTLS upgrade for the Greenmail
+      // lane WITHOUT touching the production insecure-cert path (which keeps
+      // STARTTLS required). Bridge mode leaves it unset — real Bridge
+      // advertises STARTTLS, so requireTLS stays on there.
+      ...(mode === "greenmail" ? { MAILPOUCH_SMTP_ALLOW_PLAINTEXT: "1" } : {}),
       ...(smtpFromOverride ? { MAILPOUCH_SMTP_FROM: smtpFromOverride } : {}),
     },
   });

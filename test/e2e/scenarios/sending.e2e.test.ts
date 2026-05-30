@@ -237,11 +237,16 @@ describe.skipIf(!SIMPLELOGIN_ENABLED)(
   "alias_*.e2e — SimpleLogin alias management (requires MAILPOUCH_E2E_SIMPLELOGIN=1)",
   () => {
     it("placeholder — alias_list / alias_create / alias_toggle / alias_delete", () => {
-      // Implementation: requires SIMPLELOGIN_API_KEY env wire-up + a real
-      // SimpleLogin sandbox account. When the gate flips on, replace this
-      // with: list aliases, create, toggle enabled, delete; assert each
-      // step via tool response + a follow-up alias_list verification.
-      expect(SIMPLELOGIN_ENABLED).toBe(true);
+      // The lane is enabled (MAILPOUCH_E2E_SIMPLELOGIN=1) but no alias_* tool
+      // is exercised yet — fail loudly rather than report false coverage
+      // (Copilot review on #146). Default (env unset) stays skipped via the
+      // describe.skipIf above. When implementing: list aliases, create,
+      // toggle enabled, delete; assert each step via tool response + a
+      // follow-up alias_list verification, then remove this expect.fail.
+      expect.fail(
+        "SimpleLogin E2E lane enabled but alias_* scenarios are not implemented — " +
+        "this placeholder must stay red until real assertions land.",
+      );
     });
   },
 );
@@ -257,11 +262,15 @@ describe.skipIf(!PASS_ENABLED)(
   "pass_*.e2e — Proton Pass credential vault (requires MAILPOUCH_E2E_PASS=1)",
   () => {
     it("placeholder — pass_list / pass_get / pass_search", () => {
-      // Implementation: requires PASS_ACCESS_TOKEN + a populated Pass vault.
-      // When the gate flips on, replace with: list items, fetch by id, run
-      // a search; assert each tool returns the expected shape and the audit
-      // log records the read.
-      expect(PASS_ENABLED).toBe(true);
+      // Lane enabled (MAILPOUCH_E2E_PASS=1) but no pass_* tool is exercised
+      // yet — fail loudly rather than report false coverage (Copilot review
+      // on #146). Default (env unset) stays skipped. When implementing: list
+      // items, fetch by id, run a search; assert each tool returns the
+      // expected shape and the audit log records the read, then remove this.
+      expect.fail(
+        "Proton Pass E2E lane enabled but pass_* scenarios are not implemented — " +
+        "this placeholder must stay red until real assertions land.",
+      );
     });
   },
 );
