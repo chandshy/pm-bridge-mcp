@@ -7,8 +7,7 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { isValidEmail, optionalFolderHint, validateAttachments, requireNumericEmailId } from "../utils/helpers.js";
-import type { EmailAttachment } from "../types/index.js";
+import { isValidEmail, optionalFolderHint, validateAttachments, sanitizeAttachments, requireNumericEmailId } from "../utils/helpers.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
@@ -156,7 +155,7 @@ export const handlers: Record<string, ToolHandler> = {
       isHtml: args.isHtml as boolean | undefined,
       priority: args.priority as "high" | "normal" | "low" | undefined,
       replyTo: args.replyTo as string | undefined,
-      attachments: args.attachments as EmailAttachment[] | undefined,
+      attachments: sanitizeAttachments(args.attachments),
     });
     if (!result.success) {
       return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };

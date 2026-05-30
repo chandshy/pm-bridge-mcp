@@ -290,13 +290,14 @@ describe('validateFolderName edge cases', () => {
   it('throws when folder name is empty (line 240)', async () => {
     const svc = new SimpleIMAPService();
     await svc.connect('localhost', 1143, 'user', 'pass');
-    await expect(svc.createFolder('')).rejects.toThrow('Folder name must not be empty');
+    // VALID-003: message now comes from the shared validateImapPath().
+    await expect(svc.createFolder('')).rejects.toThrow(/non-empty string/i);
   });
 
   it('throws when folder name exceeds 1000 chars (line 244)', async () => {
     const svc = new SimpleIMAPService();
     await svc.connect('localhost', 1143, 'user', 'pass');
-    await expect(svc.createFolder('a'.repeat(1001))).rejects.toThrow('Folder name is too long');
+    await expect(svc.createFolder('a'.repeat(1001))).rejects.toThrow(/exceeds maximum length/i);
   });
 });
 

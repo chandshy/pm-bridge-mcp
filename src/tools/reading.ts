@@ -603,9 +603,21 @@ export const handlers: Record<string, ToolHandler> = {
         throw new McpError(ErrorCode.InvalidParams, "'dateFrom' must not be later than 'dateTo'.");
       }
     }
+    // VALID-002: length-cap body/text/bcc at MAX_SEARCH_TEXT like from/to/subject.
+    // These were previously read with only a typeof check and forwarded unbounded,
+    // letting a multi-MB filter burn server memory.
     const body     = typeof args.body === 'string' ? args.body : undefined;
     const text     = typeof args.text === 'string' ? args.text : undefined;
     const bcc      = typeof args.bcc === 'string' ? args.bcc : undefined;
+    if (body !== undefined && body.length > MAX_SEARCH_TEXT) {
+      throw new McpError(ErrorCode.InvalidParams, `'body' filter must not exceed ${MAX_SEARCH_TEXT} characters.`);
+    }
+    if (text !== undefined && text.length > MAX_SEARCH_TEXT) {
+      throw new McpError(ErrorCode.InvalidParams, `'text' filter must not exceed ${MAX_SEARCH_TEXT} characters.`);
+    }
+    if (bcc !== undefined && bcc.length > MAX_SEARCH_TEXT) {
+      throw new McpError(ErrorCode.InvalidParams, `'bcc' filter must not exceed ${MAX_SEARCH_TEXT} characters.`);
+    }
     const answered = typeof args.answered === 'boolean' ? args.answered : undefined;
     const isDraft  = typeof args.isDraft === 'boolean' ? args.isDraft : undefined;
     const larger   = typeof args.larger === 'number' ? args.larger : undefined;
@@ -856,8 +868,11 @@ export const handlers: Record<string, ToolHandler> = {
     try {
       const fts = getFts();
       const { inbox, sent } = await getAnalyticsEmails();
-      fts.clear();
-      const indexed = fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
+      // PARSE-003: atomic clear+repopulate in one transaction. A bare
+      // clear()+upsertMany() committed the DELETE immediately, so a throw mid-map
+      // (e.g. a malformed record) left the index wiped. rebuild() rolls back to
+      // the prior index on any throw.
+      const indexed = fts.rebuild([...inbox, ...sent].map(recordFromEmail));
       const stats = fts.stats();
       return ok({ indexed, messageCount: stats.messageCount, dbPath: stats.dbPath });
     } finally {

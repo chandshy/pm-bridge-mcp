@@ -6,8 +6,8 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { isValidEmail, requireNumericEmailId, validateAttachments } from "../utils/helpers.js";
-import type { EmailAttachment, EmailMessage } from "../types/index.js";
+import { isValidEmail, requireNumericEmailId, validateAttachments, sanitizeAttachments } from "../utils/helpers.js";
+import type { EmailMessage } from "../types/index.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
@@ -309,7 +309,7 @@ export const handlers: Record<string, ToolHandler> = {
       subject: args.subject as string | undefined,
       body: args.body as string | undefined,
       isHtml: args.isHtml as boolean | undefined,
-      attachments: args.attachments as EmailAttachment[] | undefined,
+      attachments: sanitizeAttachments(args.attachments),
       inReplyTo: args.inReplyTo as string | undefined,
       references: args.references as string[] | undefined,
     });
@@ -370,7 +370,7 @@ export const handlers: Record<string, ToolHandler> = {
         isHtml: args.isHtml as boolean | undefined,
         priority: args.priority as "high" | "normal" | "low" | undefined,
         replyTo: args.replyTo as string | undefined,
-        attachments: args.attachments as EmailAttachment[] | undefined,
+        attachments: sanitizeAttachments(args.attachments),
       }, sendAt);
       return ok({ success: true, id: schedId, scheduledAt: sendAt.toISOString() },
         `Scheduled for ${sendAt.toISOString()} (ID: ${schedId})`);

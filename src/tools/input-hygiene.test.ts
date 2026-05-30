@@ -69,6 +69,30 @@ describe("tool input hygiene (v3.0.53)", () => {
     });
   });
 
+  // ── VALID-002 — search_emails length-caps body/text/bcc ────────────────
+  describe("VALID-002 search_emails body/text/bcc length cap", () => {
+    const over = "x".repeat(501);
+    for (const field of ["body", "text", "bcc"] as const) {
+      it(`rejects an over-long '${field}' filter`, async () => {
+        const ctx = makeCtx({
+          args: { [field]: over },
+          imapService: { searchEmails: vi.fn() } as never,
+        });
+        await expect(readingHandlers.search_emails(ctx)).rejects.toBeInstanceOf(McpError);
+      });
+    }
+
+    it("accepts body/text/bcc filters at the 500-char boundary", async () => {
+      const searchEmails = vi.fn().mockResolvedValue([]);
+      const ctx = makeCtx({
+        args: { body: "x".repeat(500), text: "y".repeat(500), bcc: "z".repeat(500) },
+        imapService: { searchEmails } as never,
+      });
+      await expect(readingHandlers.search_emails(ctx)).resolves.toBeDefined();
+      expect(searchEmails).toHaveBeenCalledOnce();
+    });
+  });
+
   // ── TOOL-002 — request_permission_escalation reason required ───────────
   describe("TOOL-002 escalation reason", () => {
     const escCtx = (args: Record<string, unknown>): EscalationContext =>
@@ -242,6 +266,31 @@ describe("tool input hygiene (v3.0.53)", () => {
     it("rejects a NaN sinceEpoch", async () => {
       const ctx = ftsCtx({ query: "x", sinceEpoch: Number.NaN });
       await expect(readingHandlers.fts_search(ctx)).rejects.toBeInstanceOf(McpError);
+    });
+  });
+
+  // ── PARSE-003 — fts_rebuild uses the atomic rebuild(), not clear()+upsertMany() ─
+  describe("PARSE-003 fts_rebuild wiring", () => {
+    it("calls rebuild() and never the non-atomic clear()/upsertMany() pair", async () => {
+      const rebuild = vi.fn().mockReturnValue(3);
+      const clear = vi.fn();
+      const upsertMany = vi.fn();
+      const stats = vi.fn().mockReturnValue({ messageCount: 3, dbPath: "/tmp/x.db" });
+      const ctx = makeCtx({
+        args: {},
+        getFts: () => ({ rebuild, clear, upsertMany, stats }) as never,
+        getAnalyticsEmails: async () => ({
+          inbox: [{ id: "1" }] as never,
+          sent: [{ id: "2" }, { id: "3" }] as never,
+        }),
+        recordFromEmail: ((e: { id: string }) => ({ id: e.id })) as never,
+      });
+      const res = await readingHandlers.fts_rebuild(ctx);
+      expect(rebuild).toHaveBeenCalledOnce();
+      expect(rebuild.mock.calls[0][0]).toHaveLength(3);
+      expect(clear).not.toHaveBeenCalled();
+      expect(upsertMany).not.toHaveBeenCalled();
+      expect((res.structuredContent as { indexed: number }).indexed).toBe(3);
     });
   });
 

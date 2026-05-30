@@ -5,6 +5,29 @@
 import { randomUUID } from "crypto";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "./logger.js";
+import type { EmailAttachment } from "../types/index.js";
+
+/**
+ * Shared attachment caps. The SMTP send path (smtp-service.ts) and the IMAP
+ * draft path (simple-imap-service.ts) MUST enforce the same limits — VALID-005
+ * tracked the asymmetry where saveDraft mirrored sanitisation but not the caps.
+ * Bytes match Proton's own 25 MB per-message limit.
+ */
+export const MAX_ATTACHMENT_COUNT = 20;
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Best-effort decoded byte size of an attachment `content` value.
+ * base64 strings decode to ~3/4 of their character length; Buffers are exact.
+ * Returns `null` for anything that is neither (e.g. a Readable stream), which
+ * callers treat as "unsizable → reject".
+ */
+export function attachmentByteSize(content: unknown): number | null {
+  if (Buffer.isBuffer(content)) return content.length;
+  if (typeof content === "string") return Math.ceil(content.length * 0.75);
+  return null;
+}
 
 /**
  * Validate email address format.
@@ -241,6 +264,35 @@ export function validateTargetFolder(targetFolder: unknown): string | null {
 }
 
 /**
+ * Validate an IMAP folder *path* (full path, separators allowed) before it is
+ * serialised into an IMAP command literal. Unlike the leaf-only
+ * `validateFolderName`/`validateLabelName`, a forward slash IS permitted here
+ * because the value is a complete path (e.g. `Folders/Work`).
+ *
+ * Returns `null` on success or an error message string on failure. Rules:
+ *   - Must be a non-empty string after trimming
+ *   - Must not contain `..` (path traversal)
+ *   - Must not contain C0 control characters (U+0000–U+001F)
+ *   - Must not exceed 1000 characters
+ *
+ * VALID-003: single source of truth for the full-path check. The IMAP service's
+ * private `validateFolderName(name)` delegates here (rethrowing the message as
+ * an Error) so the two no longer diverge.
+ */
+export function validateImapPath(path: unknown): string | null {
+  if (!path || typeof path !== "string" || !path.trim()) {
+    return "folder path must be a non-empty string.";
+  }
+  if (path.includes("..") || /[\x00-\x1f]/.test(path)) {
+    return "folder path contains invalid characters (.. or control characters).";
+  }
+  if (path.length > 1000) {
+    return "folder path exceeds maximum length of 1000 characters.";
+  }
+  return null;
+}
+
+/**
  * Truncate text to a maximum length, appending "..." when truncated.
  *
  * @param text - The string to truncate.
@@ -378,9 +430,10 @@ export function validateAttachments(attachments: unknown): string | null {
   if (!Array.isArray(attachments)) {
     return "attachments must be an array.";
   }
-  if (attachments.length > 50) {
-    return "attachments must not exceed 50 items.";
+  if (attachments.length > MAX_ATTACHMENT_COUNT) {
+    return `attachments must not exceed ${MAX_ATTACHMENT_COUNT} items.`;
   }
+  let totalBytes = 0;
   for (let i = 0; i < attachments.length; i++) {
     const att = attachments[i];
     if (!att || typeof att !== "object" || Array.isArray(att)) {
@@ -396,6 +449,47 @@ export function validateAttachments(attachments: unknown): string | null {
     if (contentType !== undefined && typeof contentType !== "string") {
       return `attachments[${i}].contentType must be a string when provided.`;
     }
+    // VALID-006: cap per-file and aggregate content size so an unbounded base64
+    // payload can't OOM the process before it reaches the service layer.
+    const bytes = attachmentByteSize(content);
+    if (bytes === null) {
+      return `attachments[${i}].content must be a base64 string or Buffer.`;
+    }
+    if (bytes > MAX_ATTACHMENT_BYTES) {
+      return `attachments[${i}] is too large: ${Math.round(bytes / 1024 / 1024)}MB exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB per-file limit.`;
+    }
+    totalBytes += bytes;
+    if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+      return `total attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024}MB limit.`;
+    }
   }
   return null;
+}
+
+/**
+ * Coerce a raw `args.attachments` value into a clean `EmailAttachment[]` that
+ * carries ONLY the known fields. VALID-015: tools previously did
+ * `args.attachments as EmailAttachment[]`, which let attacker-controlled extra
+ * keys (e.g. nodemailer's `path`, `href`, `raw`, `encoding`) ride through to
+ * the mailer — `path` in particular makes nodemailer read a file from disk.
+ *
+ * Call AFTER `validateAttachments` has returned null. Returns `undefined` when
+ * the input is absent so optional-attachment call sites stay unchanged.
+ */
+export function sanitizeAttachments(attachments: unknown): EmailAttachment[] | undefined {
+  if (attachments === undefined || attachments === null) return undefined;
+  if (!Array.isArray(attachments)) return undefined;
+  return attachments.map((raw) => {
+    const att = raw as Record<string, unknown>;
+    const out: EmailAttachment = {
+      filename: att.filename as string,
+      content: att.content as string | Buffer,
+      // contentType/size are part of EmailAttachment; size is metadata only and
+      // not used on the send/draft paths, so default it to 0 when absent.
+      contentType: typeof att.contentType === "string" ? att.contentType : "",
+      size: typeof att.size === "number" ? att.size : 0,
+    };
+    if (typeof att.contentId === "string") out.contentId = att.contentId;
+    return out;
+  });
 }

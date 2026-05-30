@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SimpleIMAPService } from "./simple-imap-service.js";
+import { SimpleIMAPService, stripHtml } from "./simple-imap-service.js";
 
 // ─── downloadAttachment tests ─────────────────────────────────────────────────
 
@@ -241,6 +241,16 @@ describe("SimpleIMAPService.downloadAttachment", () => {
 // ─── saveDraft tests ──────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.saveDraft", () => {
+  // SMTP-011: findDraftsFolder now returns null (→ structured error) when no
+  // Drafts mailbox is resolvable. Tests that exercise the append path must seed
+  // a Drafts folder into the cache so resolution succeeds.
+  const seedDraftsCache = (svc: SimpleIMAPService) => {
+    (svc as any).folderCache.set("Drafts", {
+      name: "Drafts", path: "Drafts", totalMessages: 0, unreadMessages: 0,
+      folderType: "system", specialUse: "\\Drafts",
+    });
+  };
+
   it("returns error when not connected", async () => {
     const svc = new SimpleIMAPService();
     // client is null, isConnected is false by default
@@ -256,6 +266,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 42 }),
     };
+    seedDraftsCache(svc);
 
     const result = await svc.saveDraft({
       to: "bob@example.com",
@@ -273,6 +284,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockRejectedValue(new Error("APPEND failed")),
     };
+    seedDraftsCache(svc);
 
     const result = await svc.saveDraft({ subject: "Test", body: "Hello" });
     expect(result.success).toBe(false);
@@ -285,6 +297,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 1 }),
     };
+    seedDraftsCache(svc);
     const result = await svc.saveDraft({});
     expect(result.success).toBe(true);
   });
@@ -294,6 +307,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     const appendMock = vi.fn().mockResolvedValue({ uid: 5 });
     (svc as any).isConnected = true;
     (svc as any).client = { append: appendMock };
+    seedDraftsCache(svc);
     const result = await svc.saveDraft({
       subject: "With attachment",
       body: "See attached",
@@ -336,6 +350,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 6 }),
     };
+    seedDraftsCache(svc);
     const result = await svc.saveDraft({
       subject: "HTML draft",
       body: "<p>Hello</p>",
@@ -349,6 +364,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     const appendMock = vi.fn().mockResolvedValue({ uid: 7 });
     (svc as any).isConnected = true;
     (svc as any).client = { append: appendMock };
+    seedDraftsCache(svc);
     const result = await svc.saveDraft({
       subject: "Reply",
       body: "See above",
@@ -375,6 +391,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 8 }),
     };
+    seedDraftsCache(svc);
     const result = await svc.saveDraft({
       to: ["alice@example.com", "bob@example.com"],  // array → line 1154 branch 0
       cc: "carol@example.com",                        // string → line 1157 branch 1
@@ -391,6 +408,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 9 }),
     };
+    seedDraftsCache(svc);
     const result = await svc.saveDraft({
       to: "alice@example.com",               // string → existing coverage
       cc: ["cc1@example.com", "cc2@example.com"], // array → line 1157 branch 0
@@ -407,6 +425,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue(null), // result is null → typeof result !== 'object' is... actually null IS typeof object
     };
+    seedDraftsCache(svc);
     // Actually: null → typeof null === 'object' but result && ... is false (null is falsy)
     const result = await svc.saveDraft({ subject: "Test", body: "Body" });
     expect(result.success).toBe(true);
@@ -419,6 +438,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 10 }),
     };
+    seedDraftsCache(svc);
     // isHtml=true AND body='' → html: (options.body || '') evaluates the || branch
     const result = await svc.saveDraft({
       subject: "HTML Draft",
@@ -434,6 +454,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 11 }),
     };
+    seedDraftsCache(svc);
     // filename = "\r\n\x00" → after replace becomes "" → "" || "attachment" = "attachment"
     const result = await svc.saveDraft({
       subject: "Test",
@@ -453,6 +474,7 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockResolvedValue({ uid: 12 }),
     };
+    seedDraftsCache(svc);
     // contentType is undefined → rawCt = undefined → safeContentType = undefined
     const result = await svc.saveDraft({
       subject: "Test",
@@ -472,9 +494,80 @@ describe("SimpleIMAPService.saveDraft", () => {
     (svc as any).client = {
       append: vi.fn().mockRejectedValue("string-error"), // string, not Error instance
     };
+    seedDraftsCache(svc);
     const result = await svc.saveDraft({ subject: "Test", body: "Hello" });
     expect(result.success).toBe(false);
     expect(result.error).toBe("string-error"); // String("string-error")
+  });
+
+  // SMTP-011: no Drafts folder → actionable error, append never attempted.
+  it("SMTP-011: returns an actionable error when no Drafts folder exists", async () => {
+    const svc = new SimpleIMAPService();
+    const appendMock = vi.fn();
+    (svc as any).isConnected = true;
+    (svc as any).client = { append: appendMock };
+    // Cache empty + getFolders returns no draft-like folder → findDraftsFolder null.
+    vi.spyOn(svc, "getFolders").mockResolvedValue([
+      { name: "INBOX", path: "INBOX", totalMessages: 0, unreadMessages: 0, folderType: "system" as const },
+    ]);
+    const result = await svc.saveDraft({ subject: "x", body: "y" });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/no drafts folder/i);
+    expect(appendMock).not.toHaveBeenCalled();
+  });
+
+  // SMTP-012: subject / to / cc / bcc CRLF must be stripped before append.
+  it("SMTP-012: strips CRLF from subject and address fields", async () => {
+    const svc = new SimpleIMAPService();
+    const appendMock = vi.fn().mockResolvedValue({ uid: 99 });
+    (svc as any).isConnected = true;
+    (svc as any).client = { append: appendMock };
+    seedDraftsCache(svc);
+    const result = await svc.saveDraft({
+      subject: "Hello\r\nBcc: leak@evil.com",
+      to: "alice@example.com\r\nBcc: leak2@evil.com",
+      body: "hi",
+    });
+    expect(result.success).toBe(true);
+    const [, rawMime] = appendMock.mock.calls[0];
+    const wire = Buffer.isBuffer(rawMime) ? rawMime.toString("utf8") : String(rawMime);
+    // The injected "Bcc:" must not appear as its own header line.
+    expect(wire).not.toMatch(/\r?\n\s*Bcc:\s*leak@evil\.com/);
+    expect(wire).not.toMatch(/\r?\nBcc:\s*leak2@evil\.com/);
+  });
+
+  // VALID-005: per-file size cap mirrors the SMTP send path.
+  it("VALID-005: rejects an oversized attachment before append", async () => {
+    const svc = new SimpleIMAPService();
+    const appendMock = vi.fn().mockResolvedValue({ uid: 1 });
+    (svc as any).isConnected = true;
+    (svc as any).client = { append: appendMock };
+    seedDraftsCache(svc);
+    const huge = Buffer.alloc(26 * 1024 * 1024); // 26 MB > 25 MB cap
+    const result = await svc.saveDraft({
+      subject: "big",
+      body: "see attached",
+      attachments: [{ filename: "big.bin", content: huge, contentType: "application/octet-stream", size: huge.length }],
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/too large/i);
+    expect(appendMock).not.toHaveBeenCalled();
+  });
+
+  // VALID-005: count cap mirrors the SMTP send path.
+  it("VALID-005: rejects more than MAX_ATTACHMENT_COUNT attachments", async () => {
+    const svc = new SimpleIMAPService();
+    const appendMock = vi.fn().mockResolvedValue({ uid: 1 });
+    (svc as any).isConnected = true;
+    (svc as any).client = { append: appendMock };
+    seedDraftsCache(svc);
+    const many = Array.from({ length: 21 }, (_, i) => ({
+      filename: `f${i}.txt`, content: "x", contentType: "text/plain", size: 1,
+    }));
+    const result = await svc.saveDraft({ subject: "many", body: "x", attachments: many });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/too many attachments/i);
+    expect(appendMock).not.toHaveBeenCalled();
   });
 });
 
@@ -494,11 +587,11 @@ describe("SimpleIMAPService private findDraftsFolder", () => {
     expect(path).toBe("Drafts");
   });
 
-  it("falls through to 'Drafts' when cache is empty and getFolders() throws", async () => {
+  it("returns null when cache is empty and getFolders() throws (SMTP-011)", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc, "getFolders").mockRejectedValue(new Error("no connection"));
     const path = await (svc as any).findDraftsFolder();
-    expect(path).toBe("Drafts");
+    expect(path).toBeNull();
   });
 
   it("returns path from getFolders() when cache is empty but folders are found", async () => {
@@ -511,7 +604,7 @@ describe("SimpleIMAPService private findDraftsFolder", () => {
     expect(path).toBe("MyDrafts");
   });
 
-  it("falls through to 'Drafts' when getFolders() returns no matching folders (line 1109 branch1)", async () => {
+  it("returns null when getFolders() returns no matching folders (SMTP-011)", async () => {
     const svc = new SimpleIMAPService();
     // Return real folders that don't match drafts patterns
     vi.spyOn(svc, "getFolders").mockResolvedValue([
@@ -519,7 +612,7 @@ describe("SimpleIMAPService private findDraftsFolder", () => {
       { name: "Sent", path: "Sent", totalMessages: 0, unreadMessages: 0, folderType: "system" as const },
     ]);
     const path = await (svc as any).findDraftsFolder();
-    expect(path).toBe("Drafts");
+    expect(path).toBeNull();
   });
 });
 
@@ -829,17 +922,17 @@ describe("SimpleIMAPService.healthCheck", () => {
 describe("SimpleIMAPService private validateFolderName — path traversal guard", () => {
   it("throws for a folder name containing '..'", () => {
     const svc = new SimpleIMAPService();
-    expect(() => (svc as any).validateFolderName("../../etc")).toThrow(/path traversal/i);
+    expect(() => (svc as any).validateFolderName("../../etc")).toThrow(/invalid characters/i);
   });
 
   it("throws for a folder name that is exactly '..'", () => {
     const svc = new SimpleIMAPService();
-    expect(() => (svc as any).validateFolderName("..")).toThrow(/path traversal/i);
+    expect(() => (svc as any).validateFolderName("..")).toThrow(/invalid characters/i);
   });
 
   it("throws for 'Folders/../INBOX' traversal", () => {
     const svc = new SimpleIMAPService();
-    expect(() => (svc as any).validateFolderName("Folders/../INBOX")).toThrow(/path traversal/i);
+    expect(() => (svc as any).validateFolderName("Folders/../INBOX")).toThrow(/invalid characters/i);
   });
 
   it("accepts a normal folder path with no traversal", () => {
@@ -855,6 +948,23 @@ describe("SimpleIMAPService private validateFolderName — path traversal guard"
   it("still throws for control characters (existing behaviour preserved)", () => {
     const svc = new SimpleIMAPService();
     expect(() => (svc as any).validateFolderName("INBOX\x00evil")).toThrow(/control characters/i);
+  });
+
+  // VALID-003: the service-private validateFolderName and the shared
+  // helpers.validateImapPath must agree on the same set of malicious inputs.
+  it("VALID-003: service and shared validator reject the same malicious names", async () => {
+    const { validateImapPath } = await import("../utils/helpers.js");
+    const svc = new SimpleIMAPService();
+    const bad = ["", "   ", "..", "Folders/../etc", "INBOX\x00x", "a\r\nA1 LOGOUT", "x".repeat(1001)];
+    for (const name of bad) {
+      expect(validateImapPath(name), `helpers should reject ${JSON.stringify(name)}`).not.toBeNull();
+      expect(() => (svc as any).validateFolderName(name), `service should reject ${JSON.stringify(name)}`).toThrow();
+    }
+    const good = ["INBOX", "Folders/Work", "Labels/MyLabel"];
+    for (const name of good) {
+      expect(validateImapPath(name)).toBeNull();
+      expect(() => (svc as any).validateFolderName(name)).not.toThrow();
+    }
   });
 });
 
@@ -1021,5 +1131,52 @@ describe("SimpleIMAPService.stopIdle", () => {
     (svc as any).idleClient = null;
     (svc as any).idleActive = false;
     expect(() => svc.stopIdle()).not.toThrow();
+  });
+});
+
+// ─── stripHtml — entity-decode order (PARSE-008) + comment stripping (PARSE-009) ─
+describe("stripHtml", () => {
+  it("PARSE-008: encoded <script> does not emerge as literal HTML tags", () => {
+    const out = stripHtml("&lt;script&gt;alert(1)&lt;/script&gt;");
+    // Decoded to real <script>...</script>, then tag-stripped → no raw markup.
+    expect(out).not.toMatch(/<script/i);
+    expect(out).not.toMatch(/<\/script>/i);
+    expect(out).not.toContain("<");
+    expect(out).not.toContain(">");
+  });
+
+  it("PARSE-008: numeric entities (decimal + hex) are decoded then stripped", () => {
+    const dec = stripHtml("&#60;script&#62;x&#60;/script&#62;");
+    expect(dec).not.toContain("<");
+    const hex = stripHtml("&#x3c;script&#x3e;x&#x3c;/script&#x3e;");
+    expect(hex).not.toContain("<");
+  });
+
+  it("PARSE-009: HTML comment contents do not survive as prose", () => {
+    const out = stripHtml("before<!-- secret: pw123 -->after");
+    expect(out).not.toMatch(/secret/);
+    expect(out).not.toMatch(/pw123/);
+    expect(out).toContain("before");
+    expect(out).toContain("after");
+  });
+
+  it("PARSE-009: multi-line comments are fully removed", () => {
+    const out = stripHtml("a<!--\nhidden\nlines\n-->b");
+    expect(out).not.toMatch(/hidden/);
+    expect(out).toContain("a");
+    expect(out).toContain("b");
+  });
+
+  it("still strips style/script blocks and plain tags", () => {
+    expect(stripHtml("<style>.x{}</style><p>hi</p>")).toBe("hi");
+    expect(stripHtml("<script>evil()</script>visible")).toBe("visible");
+  });
+
+  it("decodes &amp; without re-interpreting it", () => {
+    expect(stripHtml("Tom &amp; Jerry")).toBe("Tom & Jerry");
+  });
+
+  it("returns empty string for empty input", () => {
+    expect(stripHtml("")).toBe("");
   });
 });

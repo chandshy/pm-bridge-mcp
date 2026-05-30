@@ -16,6 +16,11 @@ import {
   validateTargetFolder,
   requireNumericEmailId,
   validateAttachments,
+  validateImapPath,
+  sanitizeAttachments,
+  attachmentByteSize,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_COUNT,
   generateId,
   retry,
   sleep,
@@ -1260,6 +1265,100 @@ describe('helpers', () => {
       ]);
       expect(err).not.toBeNull();
       expect(err).toMatch(/attachments\[1\]/);
+    });
+
+    // VALID-006 — per-file and aggregate byte caps
+    it('VALID-006: rejects a single attachment whose decoded size exceeds the per-file cap', () => {
+      // base64 length ~= bytes / 0.75; build a string just over the cap
+      const bigBase64 = 'A'.repeat(Math.ceil((MAX_ATTACHMENT_BYTES + 1) / 0.75) + 8);
+      const err = validateAttachments([{ filename: 'huge.bin', content: bigBase64 }]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/too large/i);
+    });
+
+    it('VALID-006: rejects when the aggregate size exceeds the total cap', () => {
+      // Two files each ~60% of the cap → individually fine, together over.
+      const halfish = 'A'.repeat(Math.ceil((MAX_ATTACHMENT_BYTES * 0.6) / 0.75));
+      const err = validateAttachments([
+        { filename: 'a.bin', content: halfish },
+        { filename: 'b.bin', content: halfish },
+      ]);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/total attachment size/i);
+    });
+
+    it('VALID-005/006: count cap is now MAX_ATTACHMENT_COUNT (20), matching the send path', () => {
+      const many = Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, i) => ({ filename: `f${i}`, content: 'x' }));
+      const err = validateAttachments(many);
+      expect(err).not.toBeNull();
+      expect(err).toMatch(new RegExp(`${MAX_ATTACHMENT_COUNT}`));
+    });
+  });
+
+  // ── VALID-003: unified full-path validator ─────────────────────────────────
+  describe('validateImapPath (VALID-003)', () => {
+    it('accepts a plain folder name', () => {
+      expect(validateImapPath('INBOX')).toBeNull();
+    });
+    it('accepts a path with separators (full path)', () => {
+      expect(validateImapPath('Folders/Work')).toBeNull();
+    });
+    it('rejects empty / whitespace', () => {
+      expect(validateImapPath('')).toMatch(/non-empty/i);
+      expect(validateImapPath('   ')).toMatch(/non-empty/i);
+    });
+    it('rejects path traversal', () => {
+      expect(validateImapPath('Folders/../etc')).toMatch(/invalid characters/i);
+    });
+    it('rejects C0 control characters', () => {
+      expect(validateImapPath('Work\x00hack')).toMatch(/invalid characters/i);
+      expect(validateImapPath('Work\r\nA1 LOGOUT')).toMatch(/invalid characters/i);
+    });
+    it('rejects > 1000 chars, allows 1000', () => {
+      expect(validateImapPath('c'.repeat(1001))).toMatch(/exceeds maximum length/i);
+      expect(validateImapPath('c'.repeat(1000))).toBeNull();
+    });
+    it('rejects non-strings', () => {
+      expect(validateImapPath(42)).toMatch(/non-empty string/i);
+    });
+  });
+
+  // ── VALID-015: attachment shape sanitisation ───────────────────────────────
+  describe('sanitizeAttachments (VALID-015)', () => {
+    it('returns undefined for omitted attachments', () => {
+      expect(sanitizeAttachments(undefined)).toBeUndefined();
+      expect(sanitizeAttachments(null)).toBeUndefined();
+    });
+    it('strips attacker-controlled extra keys (path/href/raw/encoding)', () => {
+      const out = sanitizeAttachments([
+        { filename: 'x.txt', content: 'abc', contentType: 'text/plain',
+          path: '/etc/passwd', href: 'http://evil', raw: 'X', encoding: 'binary' },
+      ]);
+      expect(out).toHaveLength(1);
+      const a = out![0] as Record<string, unknown>;
+      expect(a.filename).toBe('x.txt');
+      expect(a.content).toBe('abc');
+      expect(a.contentType).toBe('text/plain');
+      expect(a.path).toBeUndefined();
+      expect(a.href).toBeUndefined();
+      expect(a.raw).toBeUndefined();
+      expect(a.encoding).toBeUndefined();
+    });
+    it('preserves contentId when present', () => {
+      const out = sanitizeAttachments([{ filename: 'x', content: 'y', contentId: 'cid1' }]);
+      expect(out![0].contentId).toBe('cid1');
+    });
+  });
+
+  describe('attachmentByteSize', () => {
+    it('sizes a Buffer exactly', () => {
+      expect(attachmentByteSize(Buffer.alloc(100))).toBe(100);
+    });
+    it('estimates base64 string at ~3/4 length', () => {
+      expect(attachmentByteSize('A'.repeat(100))).toBe(75);
+    });
+    it('returns null for non-string/non-Buffer', () => {
+      expect(attachmentByteSize({ pipe() {} })).toBeNull();
     });
   });
 

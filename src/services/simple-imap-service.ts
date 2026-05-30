@@ -10,6 +10,13 @@ import { simpleParser } from 'mailparser';
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import {
+  validateImapPath,
+  attachmentByteSize,
+  MAX_ATTACHMENT_COUNT,
+  MAX_ATTACHMENT_BYTES,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+} from '../utils/helpers.js';
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from './bridge-tls.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
@@ -74,16 +81,31 @@ interface ImapBodyNode {
  */
 export function stripHtml(html: string): string {
   if (!html) return '';
-  return html
+  // Decode entities BEFORE stripping tags (PARSE-008). The old order stripped
+  // tags first then decoded, so an encoded `&lt;script&gt;...&lt;/script&gt;`
+  // emerged as a literal `<script>...</script>` in the FTS body / bodyPreview —
+  // stored-XSS if any consumer rendered those fields as HTML. Decoding first
+  // turns the encoded markup into real tags that the tag-strip then removes.
+  // HTML comments are dropped up front (PARSE-009) so their inner text (e.g.
+  // `<!-- secret: pw123 -->`) doesn't survive as tag-stripped prose.
+  const decodeEntities = (s: string): string =>
+    s
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/gi, "'")
+      // Numeric entities (decimal &#60; and hex &#x3c;) for parity, so
+      // `&#60;script&#62;` is also neutralised by the subsequent tag-strip.
+      .replace(/&#(\d{1,7});/g, (_m, d) => String.fromCodePoint(Number(d)))
+      .replace(/&#x([0-9a-f]{1,6});/gi, (_m, h) => String.fromCodePoint(parseInt(h, 16)))
+      .replace(/&amp;/g, '&');
+
+  return decodeEntities(html.replace(/<!--[\s\S]*?-->/g, ' '))
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -483,20 +505,14 @@ export class SimpleIMAPService {
    *  is well above any real-world folder name and caps the DoS surface.
    */
   private validateFolderName(name: string): void {
-    if (!name || name.trim().length === 0) {
-      throw new Error('Folder name must not be empty');
-    }
-    // RFC 5321 / practical sanity: no folder name should exceed 1 000 chars.
-    if (name.length > 1_000) {
-      throw new Error(`Folder name is too long: ${name.length} characters (max 1000)`);
-    }
-    if (/[\x00-\x1f]/.test(name)) {
-      throw new Error(`Folder name contains invalid control characters: ${JSON.stringify(name.slice(0, 80))}`);
-    }
-    // Reject path-traversal sequences (e.g. "../../etc") — defence-in-depth
-    // alongside the handler-level validateTargetFolder() checks.
-    if (name.includes('..')) {
-      throw new Error(`Folder name contains invalid path traversal sequence: ${JSON.stringify(name.slice(0, 80))}`);
+    // VALID-003: delegate to the shared full-path validator in helpers.ts so the
+    // service no longer carries a second, drifting copy of the rules (empty /
+    // length-1000 / C0-control / ".." traversal). This is a `targetFolder`-style
+    // full path (separators allowed), NOT the leaf-only validateFolderName in
+    // helpers — hence validateImapPath, the unified full-path check.
+    const err = validateImapPath(name);
+    if (err) {
+      throw new Error(`Invalid folder path: ${err} ${JSON.stringify(String(name).slice(0, 80))}`);
     }
   }
 
@@ -1135,7 +1151,9 @@ export class SimpleIMAPService {
       // search criteria injection.  imapflow passes these as quoted strings
       // in the IMAP SEARCH command, so an unescaped '"' would close the
       // quoted string early, and '\' could escape the closing quote.
-      const sanitizeImapStr = (s: string) => s.replace(/["\\]/g, "");
+      // VALID-002: also strip CR/LF/NUL — a value like "x\r\nA002 LOGOUT" would
+      // otherwise smuggle a command line into the IMAP stream.
+      const sanitizeImapStr = (s: string) => s.replace(/["\\\r\n\x00]/g, "");
       if (options.from) searchCriteria.from = sanitizeImapStr(options.from);
       if (options.to) searchCriteria.to = sanitizeImapStr(options.to);
       if (options.subject) searchCriteria.subject = sanitizeImapStr(options.subject);
@@ -1529,9 +1547,15 @@ export class SimpleIMAPService {
   /**
    * Resolve the server-side Drafts folder path.
    * Prefers the folder with specialUse === '\\Drafts'; falls back to a
-   * case-insensitive name match against common names; last resort 'Drafts'.
+   * case-insensitive name match against common names.
+   *
+   * SMTP-011: returns `null` when no Drafts folder can be resolved instead of a
+   * literal "Drafts" string. The old fallback caused `append("Drafts", ...)` to
+   * fail late with an opaque server error on accounts where Drafts was renamed
+   * (e.g. "Brouillons"), localised, or deleted. `saveDraft` turns the null into
+   * an actionable error.
    */
-  private async findDraftsFolder(): Promise<string> {
+  private async findDraftsFolder(): Promise<string | null> {
     // Check folder cache first (populated by getFolders / markEmailRead etc.)
     const cached = Array.from(this.folderCache.values());
     const fromCache = this.pickDraftsFolder(cached);
@@ -1543,10 +1567,10 @@ export class SimpleIMAPService {
       const found = this.pickDraftsFolder(folders);
       if (found) return found;
     } catch {
-      // swallow — fall through to default
+      // swallow — fall through to "not found"
     }
 
-    return 'Drafts';
+    return null;
   }
 
   private pickDraftsFolder(folders: EmailFolder[]): string | null {
@@ -1581,34 +1605,59 @@ export class SimpleIMAPService {
     }
 
     try {
+      // SMTP-012: strip CR/LF/NUL from header-bound fields (subject, to, cc,
+      // bcc) before handing them to nodemailer, mirroring stripHeaderInjection()
+      // in smtp-service.ts. The previous comment claimed parity but only the
+      // inReplyTo/references/attachment paths were sanitised — subject/to/cc/bcc
+      // flowed through raw, so "Hello\r\nBcc: leak@evil.com" could inject a
+      // header line into the appended MIME.
+      const stripCrlf = (s: string) => s.replace(/[\r\n\x00]/g, "");
+
       // Build the raw MIME message using nodemailer's buffer transport
       const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'crlf' });
 
-      const toAddresses = !options.to
-        ? undefined
-        : Array.isArray(options.to) ? options.to.join(', ') : options.to;
-      const ccAddresses = !options.cc
-        ? undefined
-        : Array.isArray(options.cc) ? options.cc.join(', ') : options.cc;
-      const bccAddresses = !options.bcc
-        ? undefined
-        : Array.isArray(options.bcc) ? options.bcc.join(', ') : options.bcc;
+      const joinAddrs = (v: string | string[] | undefined) =>
+        !v ? undefined : stripCrlf(Array.isArray(v) ? v.join(', ') : v);
+      const toAddresses = joinAddrs(options.to);
+      const ccAddresses = joinAddrs(options.cc);
+      const bccAddresses = joinAddrs(options.bcc);
 
       const mailOptions: SendMailOptions = {
         to: toAddresses,
         cc: ccAddresses,
         bcc: bccAddresses,
-        subject: options.subject || '(No Subject)',
+        subject: stripCrlf(options.subject || '(No Subject)'),
         text: options.isHtml ? undefined : (options.body || ''),
         html: options.isHtml ? (options.body || '') : undefined,
         // Strip CRLF and NUL from inReplyTo to prevent Message-ID header injection
         // (e.g. a crafted value like "<id>\r\nBcc: evil@x.com" would inject a raw
         // MIME header line).  Mirrors the stripHeaderInjection() call in smtp-service.ts.
-        inReplyTo: options.inReplyTo ? options.inReplyTo.replace(/[\r\n\x00]/g, "") : undefined,
+        inReplyTo: options.inReplyTo ? stripCrlf(options.inReplyTo) : undefined,
         references: options.references?.map(r => r.replace(/[\x00-\x1f\x7f]/g, "")).join(' '),
       };
 
       if (options.attachments && options.attachments.length > 0) {
+        // VALID-005: enforce the SAME count/size caps as the SMTP send path
+        // (smtp-service.ts). saveDraft previously mirrored only the sanitisation,
+        // so an unbounded base64 payload could OOM the process before append.
+        if (options.attachments.length > MAX_ATTACHMENT_COUNT) {
+          return { success: false, error: `Too many attachments: ${options.attachments.length} supplied, max ${MAX_ATTACHMENT_COUNT} allowed.` };
+        }
+        let totalBytes = 0;
+        for (const att of options.attachments) {
+          const bytes = attachmentByteSize(att.content);
+          if (bytes === null) {
+            return { success: false, error: `Attachment '${att.filename ?? "unnamed"}': content must be a Buffer or base64 string.` };
+          }
+          if (bytes > MAX_ATTACHMENT_BYTES) {
+            return { success: false, error: `Attachment '${att.filename ?? "unnamed"}' is too large: ${Math.round(bytes / 1024 / 1024)}MB exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB per-file limit.` };
+          }
+          totalBytes += bytes;
+          if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+            return { success: false, error: `Total attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024}MB limit.` };
+          }
+        }
+
         // Mirror the sanitization performed in smtp-service.ts sendEmail() to prevent
         // MIME header injection via crafted attachment filenames or content-type values.
         // A filename like "a.pdf\r\nContent-Type: text/html" or a contentType like
@@ -1637,8 +1686,14 @@ export class SimpleIMAPService {
       const info = await transport.sendMail(mailOptions);
       const rawMime = info.message as Buffer;
 
-      // Append to Drafts folder with the \Draft IMAP flag
+      // Append to Drafts folder with the \Draft IMAP flag.
+      // SMTP-011: surface an actionable error when no Drafts mailbox exists
+      // instead of appending to a literal "Drafts" path that the server rejects.
       const draftsPath = await this.findDraftsFolder();
+      if (!draftsPath) {
+        logger.warn('No Drafts folder found for this account', 'IMAPService');
+        return { success: false, error: 'No Drafts folder found for this account; create or configure a Drafts mailbox.' };
+      }
       const result = await this.client.append(draftsPath, rawMime, ['\\Draft']);
 
       const uid = result && typeof result === 'object' ? (result as AppendResult).uid : undefined;
