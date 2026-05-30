@@ -293,8 +293,12 @@ async function getAnalyticsEmails(): Promise<{ inbox: EmailMessage[]; sent: Emai
   if (sharedState.analyticsCacheInflight) return sharedState.analyticsCacheInflight;
   sharedState.analyticsCacheInflight = (async () => {
     try {
+      // IMAP-012: getEmails now throws on connection loss (rather than
+      // returning empty). Both warm-cache calls degrade to [] on failure so
+      // a transient connection blip can't reject the analytics cache fill
+      // or crash startup — the INBOX call was previously uncaught.
       const [inbox, sent] = await Promise.all([
-        imapService.getEmails("INBOX", 200),
+        imapService.getEmails("INBOX", 200).catch(() => [] as EmailMessage[]),
         imapService.getEmails("Sent", 100).catch(() => [] as EmailMessage[]),
       ]);
       sharedState.analyticsCache = { inbox: trimForAnalytics(inbox), sent: trimForAnalytics(sent), fetchedAt: Date.now() };
