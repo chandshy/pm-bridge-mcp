@@ -121,7 +121,7 @@ function startServer(p: number): void {
   serverStarted = true;
   // Return value ({ scheme }) is only needed for browser auto-open; TUI handles
   // the URL itself after the server is running, so we can safely discard it.
-  startSettingsServer(p, lan, false, { onRestartRequested: _onRestartRequested }).catch((err: Error) => {
+  startSettingsServer(p, lan, false, { onRestartRequested: _onRestartRequested, onShutdownRequested: _onShutdownRequested }).catch((err: Error) => {
     process.stderr.write(`Settings server error: ${err?.message ?? err}\n`);
     process.exit(1);
   });
@@ -138,6 +138,15 @@ function _onRestartRequested(): void {
   });
   child.on("error", () => { /* ignore — new process may still start */ });
   child.unref();
+  setTimeout(() => process.exit(0), 200);
+}
+
+// ─── Helper: graceful shutdown from the in-UI "Shutdown" button ───────────────
+// This standalone entry owns _activeTray, so a UI shutdown must destroy the tray
+// subprocess before exiting (UI-006) — otherwise the systray2 helper binary is
+// orphaned. Mirrors the tray "Quit" cleanup.
+function _onShutdownRequested(): void {
+  try { _activeTray?.destroy(); } catch { /* already gone */ }
   setTimeout(() => process.exit(0), 200);
 }
 
@@ -213,7 +222,7 @@ switch (mode) {
     // Start server first (async), then open browser once it's listening.
     // startSettingsServer returns the actual scheme (http/https) so we open
     // the correct URL regardless of whether openssl was available.
-    startSettingsServer(port, lan, false, { onRestartRequested: _onRestartRequested }).then(({ scheme }) => {
+    startSettingsServer(port, lan, false, { onRestartRequested: _onRestartRequested, onShutdownRequested: _onShutdownRequested }).then(({ scheme }) => {
       const url = `${scheme}://localhost:${port}`;
       serverStarted = true;
 

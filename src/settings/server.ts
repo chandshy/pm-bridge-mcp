@@ -66,6 +66,7 @@ import {
 } from "../permissions/escalation.js";
 import { getLogFilePath, logger } from "../utils/logger.js";
 import { getAgentGrantStore, getAgentAuditLog } from "../agents/registry.js";
+import type { GrantConditions } from "../agents/types.js";
 import { notifications as agentNotifications } from "../agents/notifications.js";
 import {
   readRegistry,
@@ -162,6 +163,13 @@ export interface ServerSecurityOptions {
    * manually instead of auto-reloading.
    */
   onRestartRequested?: () => void;
+  /**
+   * Called when the UI requests a full shutdown via POST /api/shutdown.
+   * The caller is responsible for graceful teardown (tray destroy, service
+   * disconnect, then process exit). When omitted the server falls back to
+   * `process.exit(0)`, which bypasses tray cleanup.
+   */
+  onShutdownRequested?: () => void;
 }
 
 // ── /agent-setup — integration reference for AI clients ─────────────────
@@ -362,11 +370,11 @@ footer { color: #7c78a8; margin-top: 36px; font-size: 12px; font-family: system-
 
 <h1>mailpouch — Agent Integration Reference</h1>
 <p class="lede">A single-page, copy-paste-ready guide for connecting any MCP client (not just Claude) to mailpouch. Humans share this URL with their agent.</p>
-<p><span class="pill">For AI agents</span> <span class="pill">noindex</span> <span class="pill">HTML + JSON</span> <span class="pill">v${data.version}</span></p>
+<p><span class="pill">For AI agents</span> <span class="pill">noindex</span> <span class="pill">HTML + JSON</span> <span class="pill">v${escapeHtml(data.version)}</span></p>
 
 <h2>What this is</h2>
-<p>${data.summary}</p>
-<p>Protocol: <strong>${data.protocol.name}</strong> (spec version <code>${data.protocol.version}</code>) — <a href="${data.protocol.docs}">${data.protocol.docs}</a>. Transports: <code>${data.protocol.transports.join(", ")}</code>.</p>
+<p>${escapeHtml(data.summary)}</p>
+<p>Protocol: <strong>${escapeHtml(data.protocol.name)}</strong> (spec version <code>${escapeHtml(data.protocol.version)}</code>) — <a href="${escapeHtml(data.protocol.docs)}">${escapeHtml(data.protocol.docs)}</a>. Transports: <code>${escapeHtml(data.protocol.transports.join(", "))}</code>.</p>
 
 <h2>4-step quickstart</h2>
 <ol>
@@ -442,32 +450,32 @@ ${data.transports.http.auth.oauth21.flow.map(s => `  <li>${escapeHtml(s)}</li>`)
 </div>
 
 <h2>Capabilities</h2>
-<pre>toolCount:   ${data.capabilities.toolCount}
-categories:  ${data.capabilities.categories.join(", ")}
-tiers:       ${data.capabilities.tiers.join(" &lt; ")}   (default: ${data.capabilities.defaultTier})
+<pre>toolCount:   ${escapeHtml(String(data.capabilities.toolCount))}
+categories:  ${escapeHtml(data.capabilities.categories.join(", "))}
+tiers:       ${escapeHtml(data.capabilities.tiers.join(" < "))}   (default: ${escapeHtml(data.capabilities.defaultTier)})
 resources:   ${data.capabilities.resources.supported}    — ${escapeHtml(data.capabilities.resources.description)}
 prompts:     ${data.capabilities.prompts.supported}    — ${escapeHtml(data.capabilities.prompts.description)}
 elicitation: ${data.capabilities.elicitation.supported}    — ${escapeHtml(data.capabilities.elicitation.description)}</pre>
 
 <h2>Destructive operations</h2>
-<p>${data.capabilities.destructiveConfirmation}</p>
+<p>${escapeHtml(data.capabilities.destructiveConfirmation)}</p>
 
 <h2>Multi-account routing</h2>
 <p>${escapeHtml(data.accountRouting.description)}</p>
 <p>${escapeHtml(data.accountRouting.discovery)}</p>
 
 <h2>First-call advice</h2>
-<p>${data.firstCallAdvice}</p>
+<p>${escapeHtml(data.firstCallAdvice)}</p>
 
 <h2>Operator control surface</h2>
-<p>The human running this server sees you in their <a href="${data.humanControls.settingsUi}">settings UI</a>. ${data.humanControls.description}</p>
+<p>The human running this server sees you in their <a href="${escapeHtml(data.humanControls.settingsUi)}">settings UI</a>. ${escapeHtml(data.humanControls.description)}</p>
 
 <h2>Machine-readable payload</h2>
 <p>Same data as JSON: <a href="/agent-setup.json"><code>/agent-setup.json</code></a>, or send <code>Accept: application/json</code> to this URL.</p>
 <pre>${escapeHtml(jsonPretty)}</pre>
 
 <footer>
-mailpouch v${data.version} · served from the local settings server · noindex · not internet-indexed
+mailpouch v${escapeHtml(data.version)} · served from the local settings server · noindex · not internet-indexed
 </footer>
 
 </body>
@@ -479,7 +487,8 @@ function escapeHtml(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export function createSettingsServer(secOpts: ServerSecurityOptions): http.Server {
@@ -592,14 +601,16 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           //   appears in script-src, CSP3 completely ignores 'unsafe-inline' for
           //   ALL inline scripts — including onclick/oninput/onchange event handlers.
           //   All event wiring therefore uses data-action/data-tab/data-change/
-          //   data-input attributes dispatched by a delegated listener inside the
-          //   nonce-protected <script> block.
+          //   data-input/data-submit attributes dispatched by delegated listeners
+          //   inside the nonce-protected <script> block. 'unsafe-inline' is
+          //   omitted entirely: there are no remaining inline handlers, and CSP1/2
+          //   browsers (which honour the keyword) gain nothing from it here.
           // - style-src: NO nonce here. When a nonce is present in style-src,
           //   CSP3 browsers completely ignore 'unsafe-inline', blocking all
           //   element.style.* JS assignments and style="" HTML attributes.
           //   Keeping style-src nonce-free lets 'unsafe-inline' take effect,
           //   which is necessary for every show/hide operation in the UI.
-          "Content-Security-Policy":  `default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
+          "Content-Security-Policy":  `default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'nonce-${cspNonce}'`,
           "X-Content-Type-Options":   "nosniff",
           "X-Frame-Options":          "DENY",
           "Referrer-Policy":          "no-referrer",
@@ -658,7 +669,10 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         } else {
           res.writeHead(200, {
             "Content-Type":             "text/html; charset=utf-8",
-            "Content-Security-Policy":  "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+            // No <script> tags on this page, so script-src is locked to 'self'
+            // (effectively none). style-src keeps 'unsafe-inline' for the single
+            // inline <style> block; all ${data.*} interpolations are escapeHtml'd.
+            "Content-Security-Policy":  "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'",
             "X-Content-Type-Options":   "nosniff",
             "X-Frame-Options":          "DENY",
             "Referrer-Policy":          "no-referrer",
@@ -1458,11 +1472,49 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             json(res, 400, { error: `Invalid preset '${preset}'. Must be one of: ${[...presets].join(", ")}.` });
             return;
           }
+          // Sanitize toolOverrides: only known tool names → boolean. Drops
+          // unknown keys and prototype-pollution keys (__proto__, etc.).
+          const knownTools = new Set<string>(ALL_TOOLS as unknown as string[]);
+          let toolOverrides: Partial<Record<ToolName, boolean>> | undefined;
+          if (body.toolOverrides && typeof body.toolOverrides === "object" && !Array.isArray(body.toolOverrides)) {
+            const out: Record<string, boolean> = {};
+            for (const [k, v] of Object.entries(body.toolOverrides as Record<string, unknown>)) {
+              if (knownTools.has(k) && typeof v === "boolean") out[k] = v;
+            }
+            toolOverrides = out as Partial<Record<ToolName, boolean>>;
+          }
+
+          // Sanitize conditions: whitelist GrantConditions keys, validate each
+          // value's shape. Anything else (including __proto__) is discarded.
+          let conditions: GrantConditions | undefined;
+          if (body.conditions && typeof body.conditions === "object" && !Array.isArray(body.conditions)) {
+            const c = body.conditions as Record<string, unknown>;
+            const out: GrantConditions = {};
+            if (typeof c.expiresAt === "string") out.expiresAt = c.expiresAt;
+            if (typeof c.accountId === "string") out.accountId = c.accountId;
+            if (Array.isArray(c.folderAllowlist)) {
+              out.folderAllowlist = c.folderAllowlist.filter((x): x is string => typeof x === "string");
+            }
+            if (Array.isArray(c.ipPins)) {
+              out.ipPins = c.ipPins.filter((x): x is string => typeof x === "string");
+            }
+            if (c.maxCallsPerHourByTool && typeof c.maxCallsPerHourByTool === "object" && !Array.isArray(c.maxCallsPerHourByTool)) {
+              const caps: Partial<Record<ToolName, number>> = {};
+              for (const [k, v] of Object.entries(c.maxCallsPerHourByTool as Record<string, unknown>)) {
+                if (knownTools.has(k) && typeof v === "number" && Number.isFinite(v) && v >= 0) {
+                  caps[k as ToolName] = v;
+                }
+              }
+              out.maxCallsPerHourByTool = caps;
+            }
+            conditions = out;
+          }
+
           const grant = grants.approve({
             clientId,
             preset: preset as "full" | "read_only" | "supervised" | "send_only" | "custom",
-            toolOverrides: body.toolOverrides as Record<string, boolean> | undefined,
-            conditions: body.conditions as Record<string, unknown> | undefined,
+            toolOverrides,
+            conditions,
             note: typeof body.note === "string" ? body.note : undefined,
           });
           if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
@@ -1650,12 +1702,35 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           }
 
           let existing: Record<string, unknown> = {};
+          let raw: string | null = null;
           try {
-            const raw = readFileSync(claudeConfigPath, "utf8");
-            existing = JSON.parse(raw) as Record<string, unknown>;
-          } catch {
-            // File missing or invalid — start fresh
-            existing = {};
+            raw = readFileSync(claudeConfigPath, "utf8");
+          } catch (readErr: unknown) {
+            // Only ENOENT (no file yet) is safe to treat as "start fresh".
+            // Any other read error (e.g. EACCES) must not silently overwrite.
+            if ((readErr as NodeJS.ErrnoException).code !== "ENOENT") {
+              json(res, 200, {
+                ok: false,
+                error: "Existing Claude Desktop config could not be read; not overwriting. Resolve the file permissions and retry.",
+              });
+              return;
+            }
+          }
+          if (raw !== null) {
+            try {
+              const parsed = JSON.parse(raw) as unknown;
+              if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+                throw new Error("not a JSON object");
+              }
+              existing = parsed as Record<string, unknown>;
+            } catch {
+              // File present but not valid JSON — bail rather than clobber it.
+              json(res, 200, {
+                ok: false,
+                error: "Existing Claude Desktop config could not be parsed as JSON; not overwriting. Back up and fix the file, then retry.",
+              });
+              return;
+            }
           }
 
           const distIndexPath = nodePath.resolve(_moduleDir, "../index.js");
@@ -1777,8 +1852,13 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       if (method === "POST" && path === "/api/shutdown") {
         if (!requireCsrf(req, res)) return;
         json(res, 200, { ok: true });
-        // Allow the response to flush before exiting
-        setTimeout(() => process.exit(0), 300);
+        // Allow the response to flush, then hand off to the caller's graceful
+        // shutdown (destroys the tray subprocess, disconnects services, then
+        // exits). Fall back to process.exit only when no callback is wired.
+        setTimeout(() => {
+          if (secOpts.onShutdownRequested) secOpts.onShutdownRequested();
+          else process.exit(0);
+        }, 300);
         return;
       }
 
@@ -1833,7 +1913,7 @@ export async function startSettingsServer(
   port  = 8765,
   lan   = false,
   quiet = false,
-  opts: { onRestartRequested?: () => void } = {},
+  opts: { onRestartRequested?: () => void; onShutdownRequested?: () => void } = {},
 ): Promise<{ scheme: "http" | "https"; stop: () => Promise<void> }> {
   const bindHost    = lan ? "0.0.0.0" : "127.0.0.1";
   const lanIP       = lan ? getPrimaryLanIP() : "";

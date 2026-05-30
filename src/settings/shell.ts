@@ -183,6 +183,11 @@ ${buildStyles(cspNonce)}
     const el = e.target.closest('[data-input]');
     if (el) _dispatch(el.dataset.input, el);
   });
+  // Replaces former inline onsubmit="return false" handlers (CSP nonce'd
+  // script-src ignores 'unsafe-inline' event-handler attributes).
+  document.addEventListener('submit', function(e) {
+    if (e.target.closest('[data-submit]')) e.preventDefault();
+  });
   document.addEventListener('change', function(e) {
     // Grant modal duration radio buttons don't use data-change — handle directly
     if (e.target.name === 'gm-dur') {

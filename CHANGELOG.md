@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.60] — 2026-05-30
+
+### Fixed
+UI/CSP + build/docs sweep from the 2026-05-28 audit. Scope: `src/settings/server.ts`, `src/settings/shell.ts`, `src/settings/tabs/setup.ts`, `src/index.ts`, `scripts/check-npm-audit.mjs`, `scripts/lib/preship-runner.mjs`, `scripts/preship.mjs`, `tsconfig.json`, `package.json`, plus README/HELP/README_FIRST_AI doc fixes.
+
+- **Eliminated the last inline event handler in the settings UI** (UI-001). The Setup tab's `<form onsubmit="return false">` is replaced with `data-submit="noop"` wired through a delegated `submit` listener inside the nonce'd script block, so it executes under CSP3's nonce regime.
+- **Dropped `'unsafe-inline'` from the main UI `script-src`** (UI-002). With no remaining inline handlers, the CSP is now `script-src 'nonce-…'` only — CSP1/2 browsers no longer honour a now-pointless keyword.
+- **`/agent-setup` CSP hardened and all interpolations escaped** (UI-003). `script-src` is locked to `'self'` (the page has no scripts), `escapeHtml` now also escapes `'`, and every remaining raw `${data.*}` interpolation is wrapped.
+- **`/api/shutdown` now runs graceful cleanup** (UI-006). The endpoint routes through a new `onShutdownRequested` callback that invokes `gracefulShutdown` (which destroys the tray subprocess) instead of calling `process.exit(0)` directly.
+- **`/api/write-claude-desktop` no longer clobbers an unparseable config** (UI-009). A present-but-invalid (or unreadable) `claude_desktop_config.json` now returns `{ ok: false }` and leaves the file untouched; only a missing file (ENOENT) starts fresh.
+- **Agent approve endpoint validates `conditions`/`toolOverrides` shape** (UI-011). Both are sanitized against a key whitelist and per-value type checks, dropping unknown keys and `__proto__`-style prototype-pollution payloads.
+- **`npm audit` gate surfaces unbucketed severities** (BUILD-003). Findings that are neither high/critical nor moderate/low (e.g. `info`/`unknown`) are now printed as advisories instead of being silently dropped.
+- **Enabled low-cost strict-mode tsconfig flags** (BUILD-008). `noImplicitOverride` and `isolatedModules` are on; `noUncheckedIndexedAccess`/`exactOptionalPropertyTypes` remain deferred to a dedicated follow-up per the finding.
+- **Production tarball no longer ships source maps** (BUILD-009). The `files` array now excludes `dist/**/*.js.map` and `dist/**/*.d.ts.map`, so maintainer absolute paths no longer leak in the published package.
+- **Preship runner distinguishes deferred-after-halt steps** (BUILD-013). Steps skipped because an earlier step hard-failed render with a red `↷ deferred after halt` mark instead of gray "skipped", so a stdout parser cannot mistake a halted run for a clean one.
+- **`tarball-smoke` moved into the fast (pre-push) tier** (BUILD-015). The only gate that catches a missing bin shebang or dropped `files` entry now runs on every push.
+- **Documentation corrected to match code** (DOCS-001, DOCS-002, DOCS-004, DOCS-005, DOCS-006, DOCS-007). README supervised deletion cap (5→20/hr) and server-lifecycle cap (2→5/hr); HELP `fts_search` (`after:`→`sinceEpoch:`) and `remind_if_no_reply` (`emailId`/`days`→`email_id`/`after_days`); HELP audit-log file list (dropped the non-existent `~/.mailpouch-escalation-audit.jsonl`, relabeled `~/.mailpouch.audit.jsonl` as the escalation audit log); README_FIRST_AI escalation inputs (`targetPreset`/`newTools`→`target_preset`/`reason`) and return shape.
+
 ## [3.0.59] — 2026-05-30
 
 ### Fixed

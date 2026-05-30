@@ -25,7 +25,7 @@ export function buildSetupHtml(p: SetupParams): string {
     </div>
   </div>
 
-  <form id="setup-form" onsubmit="return false">
+  <form id="setup-form" data-submit="noop">
     <div class="card">
       <fieldset>
         <legend>Account</legend>

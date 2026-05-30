@@ -15,6 +15,10 @@ const CHECK = styleText(["green", "bold"], "✓");
 const CROSS = styleText(["red", "bold"], "✗");
 const WARN_MARK = styleText(["yellow", "bold"], "!");
 const SKIP_MARK = styleText(["gray"], "○");
+// Distinct mark + colour for steps skipped because an earlier step hard-failed.
+// Red (not gray) so a stdout parser cannot mistake a halted run's tail for an
+// intentional skip / pass.
+const DEFER_MARK = styleText(["red", "bold"], "↷");
 const HR = "─".repeat(60);
 
 function fmtDuration(ms) {
@@ -34,6 +38,7 @@ export async function runSteps(steps, { header = "PRESHIP", verbose = false } = 
   for (const step of steps) {
     if (halted) {
       results.push({ step, status: "skipped", durationMs: 0 });
+      console.log(`${DEFER_MARK} ${step.name.padEnd(16)} ${"—".padStart(8)}  ${styleText("red", "deferred after halt")}`);
       continue;
     }
     process.stdout.write(`… ${step.name}\r`);
@@ -85,7 +90,7 @@ function formatFinal(results, totalMs) {
     }
   }
   if (skipped.length > 0) {
-    label += styleText("gray", `  · ${skipped.length} skipped after halt`);
+    label += styleText(["red", "bold"], `  · ${skipped.length} deferred after halt`);
   }
   return { ok, line: `${label}  · total ${fmtDuration(totalMs)}` };
 }

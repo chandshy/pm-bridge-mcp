@@ -67,6 +67,12 @@ for (const [pkgName, info] of Object.entries(vulns)) {
 const filtered = allFindings.filter((f) => !allowedIds.has(f.id));
 const highCrit = filtered.filter((f) => f.severity === "high" || f.severity === "critical");
 const modLow = filtered.filter((f) => f.severity === "moderate" || f.severity === "low");
+// Anything that isn't high/critical or moderate/low — e.g. "info", "unknown",
+// or a future severity label npm introduces. These were previously dropped
+// silently; surface them so an unbucketed advisory can't hide.
+const other = filtered.filter(
+  (f) => !["high", "critical", "moderate", "low"].includes(f.severity)
+);
 
 if (highCrit.length > 0) {
   console.error(`npm-audit FAILED: ${highCrit.length} HIGH/CRITICAL finding(s):`);
@@ -80,11 +86,21 @@ if (highCrit.length > 0) {
   process.exit(1);
 }
 
+// Print BOTH advisory buckets before exiting — an early exit after MODERATE/LOW
+// would hide any unbucketed-severity findings whenever both are present.
 if (modLow.length > 0) {
   console.error(`npm-audit advisory: ${modLow.length} MODERATE/LOW finding(s):`);
   for (const f of modLow) {
     console.error(`  - [${f.severity.toUpperCase()}] ${f.pkg}  (advisory ${f.id})  ${f.title}`);
   }
+}
+if (other.length > 0) {
+  console.error(`npm-audit advisory: ${other.length} finding(s) with unbucketed severity:`);
+  for (const f of other) {
+    console.error(`  - [${(f.severity || "UNKNOWN").toUpperCase()}] ${f.pkg}  (advisory ${f.id})  ${f.title}`);
+  }
+}
+if (modLow.length > 0 || other.length > 0) {
   // Preship orchestrator treats this step as `mode: "advisory"`, so it prints
   // and continues. Exit code distinguishes for standalone callers.
   process.exit(2);
