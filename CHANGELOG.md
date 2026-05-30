@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.64] — 2026-05-30
+
+### Fixed — Info triage + final audit-ledger reconciliation (audit 2026-05-28)
+
+Closeout batch for the 2026-05-28 audit. Triaged the 21 remaining Info findings (fix-or-acknowledge) and reconciled seven previously-shipped findings whose audit-doc blocks were never annotated. After this batch every `#### <ID>` block in `docs/audit-2026-05-28.md` carries a Resolved/Acknowledged annotation (241/241).
+
+**Info fixes (7)**
+- TOOL-018: `get_connection_status` outputSchema gains `required: ["smtp","imap","settingsConfigured","settingsConfigPath"]`.
+- TOOL-019: `fts_status` outputSchema gains `required: ["available"]`.
+- TOOL-021: `pass_get`'s `fields` schema documents its optional/omitted-when-empty semantics.
+- TOOL-023: `clear_cache` description states it does NOT rebuild the FTS index (use `fts_rebuild`).
+- TOOL-024: `get_emails_by_label` limit clamp mirrors `get_emails`' `Math.min(Math.max(1, …), …)` order.
+- SMTP-020: `escapeHtml` now also escapes `'` → `&#39;` for safe reuse in single-quoted attributes.
+- UI-018: audit-log CSS class built from a `{requested,approved,denied,expired}` allowlist instead of `escHtml(e.event)`.
+
+**Info acknowledged as by-design (14)** — IMAP-017 (already addressed by the IMAP-005 rename), IMAP-021, SMTP-017, SMTP-019, XPORT-019, XPORT-020, XPORT-022, PERM-016, TOOL-022, CRED-014, VALID-020, UI-016, TEST-023, TEST-025. Reasons recorded inline in the audit doc.
+
+### Ledger reconciliation
+Verified against shipped code and annotated in `docs/audit-2026-05-28.md`: TEST-016 / TEST-017 / TEST-018 / TEST-020 / TEST-021 / TEST-022 (v3.0.63 test-quality sweep #174), and BUILD-014 (v3.0.43 preship-gate hotfix #130 — `PRESHIP_SKIP=1` bypass at `scripts/preship.mjs:31`).
+
 ## [3.0.63] — 2026-05-30
 
 ### Fixed

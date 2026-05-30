@@ -65,6 +65,7 @@ export const defs: ToolDef[] = [
         settingsConfigured: { type: "boolean", description: "Whether a settings config file exists on disk" },
         settingsConfigPath: { type: "string", description: "Absolute path to the settings config file" },
       },
+      required: ["smtp", "imap", "settingsConfigured", "settingsConfigPath"],
     },
   },
   {
@@ -92,7 +93,7 @@ export const defs: ToolDef[] = [
   {
     name: "clear_cache",
     title: "Clear Cache",
-    description: "Clear all in-memory caches (email message cache, folder cache, analytics cache). Forces fresh IMAP fetches on next access. Use if you suspect stale data.",
+    description: "Clear all in-memory caches (email message cache, folder cache, analytics cache). Forces fresh IMAP fetches on next access. Use if you suspect stale data. Does NOT rebuild the on-disk FTS index — run fts_rebuild to refresh fts_search results.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: ACTION_RESULT_SCHEMA,
