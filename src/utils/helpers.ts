@@ -86,7 +86,7 @@ export function parseEmailsDetailed(emailString: string): { valid: string[]; dro
       valid.push(candidate);
     } else {
       dropped.push(trimmed);
-      logger.warn("parseEmails: dropping invalid address", "helpers", { address: sanitizeForLog(trimmed, 80) });
+      logger.warn("parseEmailsDetailed: dropping invalid address", "helpers", { address: sanitizeForLog(trimmed, 80) });
     }
   }
   return { valid, dropped };

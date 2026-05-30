@@ -9,7 +9,7 @@ import { join as pathJoin } from "path";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from "./bridge-tls.js";
-import { parseEmails, parseEmailsDetailed, isValidEmail } from "../utils/helpers.js";
+import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
 
@@ -299,8 +299,12 @@ export class SMTPService {
     } else {
       const parsedTo = parseEmailsDetailed(options.to);
       if (parsedTo.dropped.length > 0) {
+        // Sanitize the rejected (caller-controlled) values before interpolating —
+        // this error is logged/persisted, so raw newlines/control chars would
+        // allow log injection.
+        const shown = parsedTo.dropped.map(d => sanitizeForLog(d, 60)).join(", ");
         throw new Error(
-          `Invalid recipient address(es) in "to": ${parsedTo.dropped.join(", ")}. Fix or remove them and retry.`,
+          `Invalid recipient address(es) in "to": ${shown}. Fix or remove them and retry.`,
         );
       }
       toAddresses = parsedTo.valid;

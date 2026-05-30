@@ -2362,6 +2362,12 @@ describe("expandImapSequence (IMAP-011)", () => {
   it("caps an enormous range instead of allocating a billion elements", () => {
     expect(() => expandImapSequence("1:1000000000")).toThrow(/too large/i);
   });
+
+  it("rejects a part with more than one colon (malformed sequence grammar)", () => {
+    // "1:2:3" must be rejected, not silently truncated to "1:2".
+    expect(() => expandImapSequence("1:2:3")).toThrow(/Invalid IMAP sequence part/);
+    expect(() => expandImapSequence("5,1:2:3")).toThrow(/Invalid IMAP sequence part/);
+  });
 });
 
 // IMAP-015: UID validation must reject structurally-impossible UIDs (non-32-bit,

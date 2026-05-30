@@ -130,9 +130,10 @@ describe("discovery", () => {
     // (index.ts ListTools handler), so we can't assert exact equality without
     // pinning the active preset — but we CAN assert two real invariants:
     //   1. every served tool exists in the registry (catches ghosts/typos);
-    //   2. the served count matches the registry's tier-visible count, so a
-    //      module silently dropping a registration shrinks both and is caught
-    //      against the registry rather than a magic number.
+    //   2. the served count is non-empty and never exceeds the full registry
+    //      (the registry is the ceiling), anchoring the check to the registry
+    //      rather than a magic number. (We do NOT assert an exact tier-visible
+    //      count here — that would require pinning the active preset.)
     const registeredNames = new Set(allToolDefs().map((t) => t.name));
     const unexpected = [...liveNames].filter((n) => !registeredNames.has(n));
     expect(unexpected, `tools served but not registered: ${unexpected.join(", ")}`).toEqual([]);

@@ -624,17 +624,29 @@ describe("SchedulerService", () => {
   });
 
   it("SMTP-018: pruneHistory runs on persist(), not only at load()", () => {
-    const svc = new SchedulerService(makeSMTP(), storePath);
-    // Seed more terminal (cancelled) records than the history cap by scheduling
-    // + cancelling, then assert the on-disk blob is pruned without a restart.
-    const ids: string[] = [];
-    for (let i = 0; i < 1010; i++) {
-      ids.push(svc.schedule(makeOptions(), futureDate(120)));
-    }
-    for (const id of ids) svc.cancel(id);
+    // Seed the store with exactly the history cap (1000) of terminal records,
+    // then prove that ONE persist (triggered by a single schedule+cancel that
+    // pushes the count to 1001) trims the on-disk blob back to the cap. This
+    // exercises the same persist-time prune as 1000+ live cancels but with two
+    // writes instead of ~2000 — the brute-force version times out on Windows CI.
+    const now = new Date().toISOString();
+    const seeded = Array.from({ length: 1000 }, (_, i) => ({
+      id: `seed-${i}`,
+      scheduledAt: now,
+      createdAt: now,
+      status: "cancelled" as const,
+      options: { to: "bob@example.com", subject: "x", body: "y" },
+    }));
+    writeFileSync(storePath, JSON.stringify(seeded), "utf-8");
 
-    // A final persist (triggered by the last cancel) must have pruned the
-    // non-pending history down to the cap on disk — not waited for next start.
+    // load() accepts all 1000 (== cap, not over it); disk still holds 1000.
+    const svc = new SchedulerService(makeSMTP(), storePath);
+    // schedule (+1 pending) then cancel (→ cancelled) takes non-pending to 1001.
+    // With the SMTP-018 fix, persist() prunes back to 1000 before writing;
+    // without it, the unpruned 1001 lands on disk.
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    svc.cancel(id);
+
     const onDisk = JSON.parse(readFileSync(storePath, "utf-8")) as Array<{ status: string }>;
     const nonPending = onDisk.filter(r => r.status !== "pending");
     expect(nonPending.length).toBeLessThanOrEqual(1000);

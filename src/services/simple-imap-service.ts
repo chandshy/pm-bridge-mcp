@@ -200,7 +200,13 @@ const MAX_EXPANDED_SEQUENCE = 10_000;
 export function expandImapSequence(range: string): number[] {
   const nums: number[] = [];
   for (const part of range.split(',')) {
-    const [a, b] = part.split(':').map(Number);
+    const segs = part.split(':');
+    // IMAP sequence-set grammar allows at most one ':' per part; "1:2:3" is
+    // malformed and must be rejected, not silently truncated to "1:2".
+    if (segs.length > 2) {
+      throw new Error(`Invalid IMAP sequence part: ${JSON.stringify(part)}`);
+    }
+    const [a, b] = segs.map(Number);
     if (!Number.isInteger(a) || a < 1) {
       throw new Error(`Invalid IMAP sequence part: ${JSON.stringify(part)}`);
     }
