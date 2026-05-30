@@ -7,6 +7,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
+  optionalSourceFolder,
   requireNumericEmailId,
   validateFolderName,
   validateLabelName,
@@ -293,20 +294,6 @@ export const defs: ToolDef[] = [
     outputSchema: BULK_RESULT_SCHEMA,
   },
 ];
-
-/** Validate and extract an optional sourceFolder argument. Uses the
- *  full-path validator (validateTargetFolder) since sourceFolder is a
- *  complete IMAP path like `Folders/Work` or `Labels/Priority` — the
- *  leaf-only validateFolderName would reject the embedded `/`. */
-function optionalSourceFolder(raw: unknown): string | undefined {
-  if (raw === undefined || raw === null || raw === "") return undefined;
-  if (typeof raw !== "string") {
-    throw new McpError(ErrorCode.InvalidParams, "'sourceFolder' must be a string when provided.");
-  }
-  const err = validateTargetFolder(raw);
-  if (err) throw new McpError(ErrorCode.InvalidParams, `Invalid sourceFolder: ${err}`);
-  return raw;
-}
 
 export const handlers: Record<string, ToolHandler> = {
   mark_email_read: async (ctx) => {

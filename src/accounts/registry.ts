@@ -79,25 +79,39 @@ export async function readRegistryWithSecrets(): Promise<AccountRegistry> {
   const reg = readRegistry();
   const { loadCredentials } = await import("../security/keychain.js");
   for (const acct of reg.accounts) {
-    if (!acct.password) {
-      const perAccount = await loadAccountCredentials(acct.id);
+    // CRED-005: fetch the per-account keychain entry at most once. The entry
+    // carries both fields, so the prior two-block form re-hit the keychain
+    // (a sync libsecret/Keychain/Cred-Manager FFI) for every account that had
+    // both password and smtpToken missing.
+    const needsPassword = !acct.password;
+    const needsSmtpToken = !acct.smtpToken;
+    if (!needsPassword && !needsSmtpToken) continue;
+
+    const perAccount = await loadAccountCredentials(acct.id);
+    // Legacy key is loaded lazily and only for the "primary" slot.
+    let legacy: Awaited<ReturnType<typeof loadCredentials>> | null | undefined;
+    const getLegacy = async () => {
+      if (legacy === undefined) legacy = (await loadCredentials()) ?? null;
+      return legacy;
+    };
+
+    if (needsPassword) {
       if (perAccount?.password) {
         acct.password = perAccount.password;
       } else if (acct.id === "primary") {
         // Back-compat: the pre-multi-account keychain entry didn't use
         // a per-account suffix. Fall back to the legacy key so existing
         // installs keep working after this change.
-        const legacy = await loadCredentials();
-        if (legacy?.password) acct.password = legacy.password;
+        const l = await getLegacy();
+        if (l?.password) acct.password = l.password;
       }
     }
-    if (!acct.smtpToken) {
-      const perAccount = await loadAccountCredentials(acct.id);
+    if (needsSmtpToken) {
       if (perAccount?.smtpToken) {
         acct.smtpToken = perAccount.smtpToken;
       } else if (acct.id === "primary") {
-        const legacy = await loadCredentials();
-        if (legacy?.smtpToken) acct.smtpToken = legacy.smtpToken;
+        const l = await getLegacy();
+        if (l?.smtpToken) acct.smtpToken = l.smtpToken;
       }
     }
   }

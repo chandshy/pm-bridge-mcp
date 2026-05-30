@@ -14,10 +14,11 @@ import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolCallContext, ToolResult } from "./types.js";
 
 import { handlers as readingHandlers } from "./reading.js";
+import { handlers as sendingHandlers } from "./sending.js";
+import { handlers as bridgeHandlers } from "./bridge.js";
 import { handlers as analyticsHandlers } from "./analytics.js";
 import { handlers as aliasHandlers } from "./aliases.js";
 import { handlers as systemHandlers } from "./system.js";
-import { handlers as sendingHandlers } from "./sending.js";
 import { handlers as escalationHandlers, type EscalationContext } from "./escalation.js";
 
 const DEFAULT_LIMITS = {
@@ -312,7 +313,6 @@ describe("tool input hygiene (v3.0.53)", () => {
     });
   });
 
-  // ── SMTP-009/010/013 — sending-tool validation parity ─────────────────────
   describe("sending tool hardening (SMTP-009/010/013)", () => {
     const sendOk = { success: true as const, messageId: "msg-1" };
     function sendCtx(overrides: Partial<ToolCallContext>): ToolCallContext {
@@ -385,6 +385,117 @@ describe("tool input hygiene (v3.0.53)", () => {
       await sendingHandlers.forward_email(ctx);
       const sent = sendEmail.mock.calls[0][0] as { body: string };
       expect(sent.body).toContain("see < below");
+    });
+  });
+
+  // ════════════════════════════════════════════════════════════════════════
+  // v3.0.62 low-severity sweep
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── TOOL-016 — search_emails larger/smaller must be non-negative finite ──
+  describe("TOOL-016 search_emails larger/smaller", () => {
+    for (const field of ["larger", "smaller"] as const) {
+      it(`rejects a negative '${field}'`, async () => {
+        const ctx = makeCtx({ args: { [field]: -1 }, imapService: { searchEmails: vi.fn() } as never });
+        await expect(readingHandlers.search_emails(ctx)).rejects.toBeInstanceOf(McpError);
+      });
+      it(`rejects a NaN '${field}'`, async () => {
+        const ctx = makeCtx({ args: { [field]: Number.NaN }, imapService: { searchEmails: vi.fn() } as never });
+        await expect(readingHandlers.search_emails(ctx)).rejects.toBeInstanceOf(McpError);
+      });
+    }
+    it("accepts a non-negative larger/smaller", async () => {
+      const searchEmails = vi.fn().mockResolvedValue([]);
+      const ctx = makeCtx({ args: { larger: 0, smaller: 1024 }, imapService: { searchEmails } as never });
+      await expect(readingHandlers.search_emails(ctx)).resolves.toBeDefined();
+    });
+  });
+
+  // ── TOOL-017 — sentBefore/sentSince require parseable date strings ───────
+  describe("TOOL-017 search_emails sentBefore/sentSince", () => {
+    for (const field of ["sentBefore", "sentSince"] as const) {
+      it(`rejects a non-string '${field}'`, async () => {
+        const ctx = makeCtx({ args: { [field]: 1234 }, imapService: { searchEmails: vi.fn() } as never });
+        await expect(readingHandlers.search_emails(ctx)).rejects.toBeInstanceOf(McpError);
+      });
+      it(`rejects an unparseable '${field}'`, async () => {
+        const ctx = makeCtx({ args: { [field]: "not-a-date" }, imapService: { searchEmails: vi.fn() } as never });
+        await expect(readingHandlers.search_emails(ctx)).rejects.toBeInstanceOf(McpError);
+      });
+    }
+    it("accepts an ISO date string", async () => {
+      const searchEmails = vi.fn().mockResolvedValue([]);
+      const ctx = makeCtx({ args: { sentBefore: "2026-01-01T00:00:00Z" }, imapService: { searchEmails } as never });
+      await expect(readingHandlers.search_emails(ctx)).resolves.toBeDefined();
+      expect((searchEmails.mock.calls[0][0] as { sentBefore: Date }).sentBefore).toBeInstanceOf(Date);
+    });
+  });
+
+  // ── VALID-016 — fts_search validates the folder filter ───────────────────
+  describe("VALID-016 fts_search folder validation", () => {
+    const ftsCtx = (args: Record<string, unknown>, search = vi.fn().mockReturnValue([])) =>
+      makeCtx({ args, getFts: () => ({ search }) as never, getCallerAllowedFolders: () => undefined });
+
+    it("rejects a traversal in the folder filter", async () => {
+      await expect(readingHandlers.fts_search(ftsCtx({ query: "x", folder: "../etc" }))).rejects.toBeInstanceOf(McpError);
+    });
+    it("accepts a clean folder filter", async () => {
+      await expect(readingHandlers.fts_search(ftsCtx({ query: "x", folder: "Folders/Work" }))).resolves.toBeDefined();
+    });
+  });
+
+  // ── TOOL-013 — fts_rebuild in-progress flag is keyed per DB path ─────────
+  describe("TOOL-013 fts_rebuild per-DB in-progress flag", () => {
+    it("allows concurrent rebuilds against different DB paths", async () => {
+      // Two FTS handles with distinct dbPaths. A blocking rebuild on the first
+      // must not reject a rebuild on the second.
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const ftsA = { stats: vi.fn().mockReturnValue({ messageCount: 0, dbPath: "/tmp/a.db" }), rebuild: vi.fn(async () => { await gate; return 0; }) };
+      const ftsB = { stats: vi.fn().mockReturnValue({ messageCount: 0, dbPath: "/tmp/b.db" }), rebuild: vi.fn().mockReturnValue(0) };
+      const ctxA = makeCtx({ args: {}, getFts: () => ftsA as never, recordFromEmail: ((e: unknown) => e) as never });
+      const ctxB = makeCtx({ args: {}, getFts: () => ftsB as never, recordFromEmail: ((e: unknown) => e) as never });
+      const pA = readingHandlers.fts_rebuild(ctxA);
+      const resB = await readingHandlers.fts_rebuild(ctxB);
+      expect(resB.isError).toBeFalsy();
+      release();
+      await pA;
+    });
+
+    it("rejects a second concurrent rebuild against the SAME DB path", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const stats = vi.fn().mockReturnValue({ messageCount: 0, dbPath: "/tmp/same.db" });
+      const fts = { stats, rebuild: vi.fn(async () => { await gate; return 0; }) };
+      const mk = () => makeCtx({ args: {}, getFts: () => fts as never, recordFromEmail: ((e: unknown) => e) as never });
+      const p1 = readingHandlers.fts_rebuild(mk());
+      const res2 = await readingHandlers.fts_rebuild(mk());
+      expect(res2.isError).toBe(true);
+      release();
+      await p1;
+    });
+  });
+
+  // ── TOOL-014 — start_bridge flags isError when ports stay down ───────────
+  describe("TOOL-014 start_bridge port-failure result", () => {
+    const bridgeCtx = (smtpUp: boolean, imapUp: boolean) =>
+      makeCtx({
+        args: {},
+        config: { smtp: { host: "h", port: 1 }, imap: { host: "h", port: 2 } } as never,
+        launchProtonBridge: vi.fn().mockResolvedValue(undefined) as never,
+        isBridgeReachable: vi.fn().mockImplementation((_h: string, p: number) => Promise.resolve(p === 1 ? smtpUp : imapUp)) as never,
+        state: {} as never,
+      });
+
+    it("sets isError when ports never come up", async () => {
+      const res = await bridgeHandlers.start_bridge(bridgeCtx(false, false));
+      expect(res.isError).toBe(true);
+      expect((res.structuredContent as { success: boolean }).success).toBe(false);
+    });
+    it("does not set isError when both ports are reachable", async () => {
+      const res = await bridgeHandlers.start_bridge(bridgeCtx(true, true));
+      expect(res.isError).toBeFalsy();
+      expect((res.structuredContent as { success: boolean }).success).toBe(true);
     });
   });
 });

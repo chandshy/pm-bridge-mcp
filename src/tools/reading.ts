@@ -21,6 +21,7 @@ import {
   isValidEmail,
   optionalFolderHint,
   requireNumericEmailId,
+  truncate,
   validateLabelName,
   validateTargetFolder,
 } from "../utils/helpers.js";
@@ -28,7 +29,11 @@ import { extractActionItems, parseIcs } from "../services/content-parser.js";
 import { FtsUnavailableError } from "../services/fts-service.js";
 import type { FtsIndexService } from "../services/fts-service.js";
 
-let _ftsRebuilding = false;
+// TOOL-013: track in-progress rebuilds per resolved DB path rather than a
+// single module-global boolean. Per-account routing means two concurrent
+// fts_rebuild calls can target different index files; a shared flag wrongly
+// rejected the second even when its target was a different DB.
+const _ftsRebuilding = new Set<string>();
 import type { EmailMessage, EmailFolder } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
@@ -246,11 +251,14 @@ export const defsEarly: ToolDef[] = [
     outputSchema: {
       type: "object",
       properties: {
-        emails: { type: "array", items: { type: "object" } },
+        // TOOL-011: advertise the same item shape as get_emails (was a bare
+        // `object` with no properties) and declare required keys.
+        emails: { type: "array", items: EMAIL_SUMMARY_SCHEMA },
         count: { type: "number" },
         folder: { type: "string" },
         nextCursor: { type: "string" },
       },
+      required: ["emails", "folder", "count"],
     },
   },
 ];
@@ -620,10 +628,30 @@ export const handlers: Record<string, ToolHandler> = {
     }
     const answered = typeof args.answered === 'boolean' ? args.answered : undefined;
     const isDraft  = typeof args.isDraft === 'boolean' ? args.isDraft : undefined;
+    // TOOL-016: byte-size predicates are non-negative integers; reject negatives
+    // and non-finite (NaN/Infinity) instead of forwarding them to the IMAP wire.
+    if (args.larger !== undefined &&
+        (typeof args.larger !== 'number' || !Number.isFinite(args.larger) || args.larger < 0)) {
+      throw new McpError(ErrorCode.InvalidParams, "'larger' must be a non-negative finite number (bytes) when provided.");
+    }
+    if (args.smaller !== undefined &&
+        (typeof args.smaller !== 'number' || !Number.isFinite(args.smaller) || args.smaller < 0)) {
+      throw new McpError(ErrorCode.InvalidParams, "'smaller' must be a non-negative finite number (bytes) when provided.");
+    }
     const larger   = typeof args.larger === 'number' ? args.larger : undefined;
     const smaller  = typeof args.smaller === 'number' ? args.smaller : undefined;
-    const sentBefore = args.sentBefore ? new Date(args.sentBefore as string) : undefined;
-    const sentSince  = args.sentSince  ? new Date(args.sentSince  as string) : undefined;
+    // TOOL-017: require a string + a parseable date. The old truthy-check let
+    // numbers/objects through — `new Date(null)` → 1970, `new Date({})` →
+    // Invalid Date — silently corrupting the search window.
+    const parseSentDate = (raw: unknown, field: string): Date | undefined => {
+      if (raw === undefined || raw === null) return undefined;
+      if (typeof raw !== 'string' || Number.isNaN(Date.parse(raw))) {
+        throw new McpError(ErrorCode.InvalidParams, `'${field}' must be a parseable date string when provided.`);
+      }
+      return new Date(raw);
+    };
+    const sentBefore = parseSentDate(args.sentBefore, 'sentBefore');
+    const sentSince  = parseSentDate(args.sentSince, 'sentSince');
 
     const results = await imapService.searchEmails({
       folder: folders ? undefined : folder,
@@ -767,9 +795,26 @@ export const handlers: Record<string, ToolHandler> = {
       if (normSubj !== normalized) continue;
       byId.set(m.id, m);
     }
+    // TOOL-010: the outputSchema advertises EMAIL_SUMMARY_SCHEMA, but the
+    // handler used to return full EmailMessage objects (entire body per
+    // message), so a long thread could blow the 1 MB response budget and the
+    // shape didn't match the schema. Narrow to the summary fields, deriving a
+    // bounded bodyPreview from the body when absent.
     const messages = Array.from(byId.values())
       .sort((a, b) => (a.date?.getTime?.() ?? 0) - (b.date?.getTime?.() ?? 0))
-      .slice(0, maxMsgs);
+      .slice(0, maxMsgs)
+      .map((m) => ({
+        id: m.id,
+        from: m.from,
+        to: m.to,
+        subject: m.subject,
+        bodyPreview: m.bodyPreview ?? (m.body ? truncate(m.body, 300) : ""),
+        date: m.date?.toISOString?.() ?? null,
+        folder: m.folder,
+        isRead: m.isRead,
+        isStarred: m.isStarred,
+        hasAttachment: m.hasAttachment,
+      }));
     return ok({ subject: normalized, messages });
   },
 
@@ -840,10 +885,18 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'sinceEpoch' must be a non-negative finite number (epoch seconds) when provided.");
     }
     const sinceEpoch = typeof args.sinceEpoch === "number" ? args.sinceEpoch : undefined;
+    // VALID-016: validate the folder filter for parity with search_emails;
+    // previously it was forwarded raw, so fts_search admitted folders its IMAP
+    // twin would reject.
+    const ftsFolder = typeof args.folder === "string" ? args.folder : undefined;
+    if (ftsFolder !== undefined) {
+      const ftsFolderErr = validateTargetFolder(ftsFolder);
+      if (ftsFolderErr) throw new McpError(ErrorCode.InvalidParams, `folder: ${ftsFolderErr}`);
+    }
     const hits = fts.search({
       query: q,
       limit,
-      folder: typeof args.folder === "string" ? args.folder : undefined,
+      folder: ftsFolder,
       sinceEpoch,
       allowedFolders,
     }).map(h => ({
@@ -861,12 +914,15 @@ export const handlers: Record<string, ToolHandler> = {
 
   fts_rebuild: async (ctx) => {
     const { ok, getFts, getAnalyticsEmails, recordFromEmail } = ctx;
-    if (_ftsRebuilding) {
+    const fts = getFts();
+    // Resolve the target DB path so the in-progress guard is scoped to this
+    // account's index, not all accounts (TOOL-013).
+    const dbPath = fts.stats().dbPath;
+    if (_ftsRebuilding.has(dbPath)) {
       return { content: [{ type: "text" as const, text: "FTS rebuild already in progress — try again in a moment." }], isError: true };
     }
-    _ftsRebuilding = true;
+    _ftsRebuilding.add(dbPath);
     try {
-      const fts = getFts();
       const { inbox, sent } = await getAnalyticsEmails();
       // PARSE-003: atomic clear+repopulate in one transaction. A bare
       // clear()+upsertMany() committed the DELETE immediately, so a throw mid-map
@@ -876,7 +932,7 @@ export const handlers: Record<string, ToolHandler> = {
       const stats = fts.stats();
       return ok({ indexed, messageCount: stats.messageCount, dbPath: stats.dbPath });
     } finally {
-      _ftsRebuilding = false;
+      _ftsRebuilding.delete(dbPath);
     }
   },
 

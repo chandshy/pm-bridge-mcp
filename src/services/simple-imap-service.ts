@@ -1677,6 +1677,12 @@ export class SimpleIMAPService {
       // flowed through raw, so "Hello\r\nBcc: leak@evil.com" could inject a
       // header line into the appended MIME.
       const stripCrlf = (s: string) => s.replace(/[\r\n\x00]/g, "");
+      // VALID-013: inReplyTo and references are sibling Message-ID header
+      // fields and must share ONE sanitiser. The reference list historically
+      // stripped the full C0/C1+DEL range; inReplyTo only stripped CR/LF/NUL.
+      // Unify on the broader mask (strictly safer than CRLF-only) for both —
+      // C0 (0x00–0x1f), DEL and C1 (0x7f–0x9f).
+      const stripHeaderField = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
 
       // Build the raw MIME message using nodemailer's buffer transport
       const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'crlf' });
@@ -1694,11 +1700,9 @@ export class SimpleIMAPService {
         subject: stripCrlf(options.subject || '(No Subject)'),
         text: options.isHtml ? undefined : (options.body || ''),
         html: options.isHtml ? (options.body || '') : undefined,
-        // Strip CRLF and NUL from inReplyTo to prevent Message-ID header injection
-        // (e.g. a crafted value like "<id>\r\nBcc: evil@x.com" would inject a raw
-        // MIME header line).  Mirrors the stripHeaderInjection() call in smtp-service.ts.
-        inReplyTo: options.inReplyTo ? stripCrlf(options.inReplyTo) : undefined,
-        references: options.references?.map(r => r.replace(/[\x00-\x1f\x7f]/g, "")).join(' '),
+        // VALID-013: both Message-ID header fields use the same broad mask.
+        inReplyTo: options.inReplyTo ? stripHeaderField(options.inReplyTo) : undefined,
+        references: options.references?.map(stripHeaderField).join(' '),
       };
 
       if (options.attachments && options.attachments.length > 0) {

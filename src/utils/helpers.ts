@@ -18,6 +18,13 @@ export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 /**
+ * Per-token cap for `parseEmails` (VALID-010). RFC 5321 caps a full address at
+ * 320 chars; 1024 leaves generous room for a `Display Name <addr>` token while
+ * keeping the regex off multi-kilobyte inputs.
+ */
+export const MAX_ADDRESS_TOKEN = 1024;
+
+/**
  * Best-effort decoded byte size of an attachment `content` value.
  * base64 strings decode to ~3/4 of their character length; Buffers are exact.
  * Returns `null` for anything that is neither (e.g. a Readable stream), which
@@ -78,6 +85,13 @@ export function parseEmailsDetailed(emailString: string): { valid: string[]; dro
   for (const raw of emailString.split(",")) {
     const trimmed = raw.trim();
     if (trimmed.length === 0) continue;
+    // VALID-010: reject pathologically long tokens before running the regex.
+    // RFC 5321 caps a full address at 320 chars; allow generous room for a
+    // display name but cap so a multi-MB token can't be fed to the matcher.
+    if (trimmed.length > MAX_ADDRESS_TOKEN) {
+      logger.warn("parseEmails: dropping over-length address token", "helpers", { length: trimmed.length });
+      continue;
+    }
     // Support "Display Name <email@domain.com>" format by extracting the angle-bracket part.
     // Anchored to reject multiple/nested brackets: "Name <<x>>" or "a> <b".
     const angleMatch = trimmed.match(/^[^<>]*<([^<>]+)>$/);
@@ -161,8 +175,19 @@ export function sanitizeForLog(str: string, maxLength: number = 100): string {
  * Extract email address from "Name <email@domain.com>" format
  */
 export function extractEmailAddress(emailString: string): string {
-  const match = emailString.match(/<([^>]+)>/);
-  return match ? match[1] : emailString.trim();
+  // PARSE-020: take the LAST angle-bracket pair, not the first one found
+  // anywhere. A hostile header like `<bogus> "Alice" <real@x.com>` previously
+  // returned `bogus` (first `<...>`) and poisoned the contact map; the real
+  // address is conventionally the trailing `<addr>` segment.
+  const lastOpen = emailString.lastIndexOf("<");
+  if (lastOpen !== -1) {
+    const close = emailString.indexOf(">", lastOpen + 1);
+    if (close !== -1) {
+      const inner = emailString.slice(lastOpen + 1, close).trim();
+      if (inner) return inner;
+    }
+  }
+  return emailString.trim();
 }
 
 /**
@@ -212,46 +237,59 @@ export function generateId(): string {
 }
 
 /**
- * Validate a label name before constructing an IMAP path (e.g. `Labels/<name>`).
+ * Control-character class rejected by every text-shape validator: the full
+ * C0 range (U+0000–U+001F), DEL (U+007F), and the C1 range (U+0080–U+009F).
+ * VALID-007: the old `/[\x00-\x1f]/` let DEL and C1 through; this matches the
+ * CONTROL_CHARS_RE documented in settings/security.ts sanitizeText.
+ */
+const CONTROL_CHARS_RE = /[\x00-\x1f\x7f\x80-\x9f]/;
+
+/**
+ * Validate a single IMAP name segment (a "leaf") before it is composed into a
+ * path such as `Labels/<name>` or `Folders/<name>`. Shared by
+ * `validateLabelName` and `validateFolderName` so the rules can't drift
+ * (VALID-004 — the two were byte-identical duplicates).
  *
- * Returns `null` on success or an error message string on failure.
- * Rules mirror those used in `move_to_label`:
+ * Returns `null` on success or an error message string on failure. Rules:
  *   - Must be a non-empty string after trimming
  *   - Must not contain `/` (path separator) or `..` (traversal)
- *   - Must not contain C0 control characters (U+0000–U+001F)
+ *   - Must not contain C0/C1 control characters or DEL
  *   - Must not exceed 255 characters
  */
-export function validateLabelName(label: unknown): string | null {
-  if (!label || typeof label !== "string" || !label.trim()) {
-    return "label must be a non-empty string.";
+export function validateLeafName(value: unknown, fieldName: string): string | null {
+  if (!value || typeof value !== "string" || !value.trim()) {
+    return `${fieldName} must be a non-empty string.`;
   }
-  if (label.includes("/") || label.includes("..") || /[\x00-\x1f]/.test(label)) {
-    return "label contains invalid characters (/, .., or control characters).";
+  if (value.includes("/") || value.includes("..") || CONTROL_CHARS_RE.test(value)) {
+    return `${fieldName} contains invalid characters (/, .., or control characters).`;
   }
-  if (label.length > 255) {
-    return "label exceeds maximum length of 255 characters.";
+  if (value.length > 255) {
+    return `${fieldName} exceeds maximum length of 255 characters.`;
   }
   return null;
 }
 
 /**
- * Validate a folder name before constructing an IMAP path (e.g. `Folders/<name>`).
- *
+ * Validate a label name before constructing an IMAP path (e.g. `Labels/<name>`).
  * Returns `null` on success or an error message string on failure.
- * Same rules as validateLabelName — the folder name is the leaf segment only;
- * the `Folders/` prefix is added by the caller.
+ *
+ * Note (VALID-019): a non-ASCII leaf like `Wörk` is accepted here but imapflow
+ * encodes it to modified UTF-7 (`W&APY-rk`) on the wire, so the IMAP-stored
+ * name differs from the in-memory key. Callers that use the label as a map key
+ * must re-list to learn the encoded name.
+ */
+export function validateLabelName(label: unknown): string | null {
+  return validateLeafName(label, "label");
+}
+
+/**
+ * Validate a folder name before constructing an IMAP path (e.g. `Folders/<name>`).
+ * Returns `null` on success or an error message string on failure.
+ * The folder name is the leaf segment only; the `Folders/` prefix is added by
+ * the caller.
  */
 export function validateFolderName(folder: unknown): string | null {
-  if (!folder || typeof folder !== "string" || !folder.trim()) {
-    return "folder must be a non-empty string.";
-  }
-  if (folder.includes("/") || folder.includes("..") || /[\x00-\x1f]/.test(folder)) {
-    return "folder contains invalid characters (/, .., or control characters).";
-  }
-  if (folder.length > 255) {
-    return "folder exceeds maximum length of 255 characters.";
-  }
-  return null;
+  return validateLeafName(folder, "folder");
 }
 
 /**
@@ -264,19 +302,50 @@ export function validateFolderName(folder: unknown): string | null {
  * Max length 1000 characters.
  */
 export function validateTargetFolder(targetFolder: unknown): string | null {
+  // VALID-017: empty/omitted is intentionally NOT an error here — it signals
+  // "caller falls back to a default (e.g. INBOX)". Folder-MUTATING tools that
+  // require a concrete name must use `validateRequiredTargetFolder` instead, or
+  // an empty string would silently reach imapflow.
   if (targetFolder === undefined || targetFolder === null || targetFolder === "") {
     return null; // omitted/empty — caller uses a default (e.g. INBOX)
   }
   if (typeof targetFolder !== "string") {
     return "targetFolder must be a string.";
   }
-  if (/[\x00-\x1f]/.test(targetFolder) || targetFolder.includes("..")) {
+  // VALID-007: reject the full C0/C1+DEL control range, not just C0.
+  if (CONTROL_CHARS_RE.test(targetFolder) || targetFolder.includes("..")) {
     return "targetFolder contains invalid characters (.. or control characters).";
   }
+  // VALID-014: 1000 is the single full-path bound. A multi-segment path may
+  // exceed any single 255-char leaf cap; the per-leaf validators enforce 255
+  // on the segments that callers compose, this caps the assembled path.
   if (targetFolder.length > 1000) {
     return "targetFolder exceeds maximum length of 1000 characters.";
   }
   return null;
+}
+
+/**
+ * Like `validateTargetFolder` but REQUIRES a non-empty (after trim) name.
+ *
+ * VALID-011: folder-mutating tools (`create_folder`/`delete_folder`/
+ * `rename_folder`) always need a concrete name, so the empty-string fall-back
+ * semantics of `validateTargetFolder` are wrong for them. Each handler used to
+ * repeat its own `!args.folderName || ...trim()` guard with subtly different
+ * shapes; this centralises it. Returns the trimmed value on success or throws
+ * `McpError(InvalidParams, …)`.
+ */
+export function validateRequiredTargetFolder(raw: unknown, fieldName: string = "folderName"): string {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new McpError(ErrorCode.InvalidParams, `${fieldName} is required and must be a non-empty string.`);
+  }
+  const trimmed = raw.trim();
+  const err = validateTargetFolder(trimmed);
+  if (err) {
+    const cleaned = err.replace(/^targetFolder\s*/, "");
+    throw new McpError(ErrorCode.InvalidParams, `Invalid ${fieldName}: ${cleaned}`);
+  }
+  return trimmed;
 }
 
 /**
@@ -299,7 +368,15 @@ export function validateImapPath(path: unknown): string | null {
   if (!path || typeof path !== "string" || !path.trim()) {
     return "folder path must be a non-empty string.";
   }
-  if (path.includes("..") || /[\x00-\x1f]/.test(path)) {
+  // VALID-012: reject leading/trailing whitespace rather than silently
+  // accepting a path that selects a different mailbox than the visible name
+  // (e.g. " INBOX" vs "INBOX"). The IMAP modified-UTF-7 `&` escape is left
+  // intact since legitimate encoded folder names contain it.
+  if (path !== path.trim()) {
+    return "folder path must not have leading or trailing whitespace.";
+  }
+  // VALID-007: reject the full C0/C1+DEL control range, not just C0.
+  if (path.includes("..") || CONTROL_CHARS_RE.test(path)) {
     return "folder path contains invalid characters (.. or control characters).";
   }
   if (path.length > 1000) {
@@ -341,8 +418,17 @@ export function truncate(text: string, maxLength: number): string {
  * @throws {McpError} with `ErrorCode.InvalidParams` when validation fails.
  */
 export function requireNumericEmailId(raw: unknown, fieldName: string = "emailId"): string {
-  if (!raw || typeof raw !== "string" || !/^\d+$/.test(raw)) {
+  // VALID-008: IMAP UIDs are 32-bit unsigned (max 4294967295 = 10 digits).
+  // Reject leading zeros (except the literal "0") and over-length strings so a
+  // thousand-digit "UID" can't burn log space / Bridge round-trips. `^\d+$`
+  // alone admitted "0000001" and arbitrarily long numeric strings.
+  if (!raw || typeof raw !== "string" || !/^(0|[1-9]\d{0,9})$/.test(raw)) {
     throw new McpError(ErrorCode.InvalidParams, `${fieldName} must be a non-empty numeric UID string.`);
+  }
+  // 10 digits still admits up to 9999999999, beyond the 32-bit unsigned max.
+  // Enforce the real ceiling so an out-of-range "UID" can't reach the Bridge.
+  if (Number(raw) > 4294967295) {
+    throw new McpError(ErrorCode.InvalidParams, `${fieldName} exceeds the maximum IMAP UID (4294967295).`);
   }
   return raw;
 }
@@ -378,6 +464,30 @@ export function optionalFolderHint(raw: unknown, fieldName: string = "folder"): 
     throw new McpError(ErrorCode.InvalidParams, `Invalid ${fieldName}: ${cleaned}`);
   }
   return trimmed;
+}
+
+/**
+ * Validate an optional `sourceFolder` argument — the full IMAP path the
+ * UID(s) live in (e.g. `Folders/Work`, `Labels/Foo`). Uses the full-path
+ * validator (`validateTargetFolder`) so embedded `/` is allowed. Returns the
+ * value when present, `undefined` for omitted/empty/null, and throws
+ * `McpError(InvalidParams, …)` otherwise.
+ *
+ * VALID-021: previously defined byte-for-byte in both `tools/actions.ts` and
+ * `tools/deletion.ts`; consolidated here so the two can't drift.
+ */
+export function optionalSourceFolder(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, "'sourceFolder' must be a string when provided.");
+  }
+  // Validate with the same validator the service layer uses (validateFolderName
+  // delegates to validateImapPath) so the tool gate and the service agree —
+  // e.g. " INBOX" is rejected here with a clean McpError instead of passing the
+  // gate and failing later with a non-McpError shape.
+  const err = validateImapPath(raw);
+  if (err) throw new McpError(ErrorCode.InvalidParams, `Invalid sourceFolder: ${err}`);
+  return raw;
 }
 
 /**
@@ -458,6 +568,15 @@ export function validateAttachments(attachments: unknown): string | null {
     const { filename, content, contentType } = att as Record<string, unknown>;
     if (!filename || typeof filename !== "string") {
       return `attachments[${i}].filename must be a non-empty string.`;
+    }
+    // VALID-018: the SMTP/IMAP layers scrub CRLF/traversal later, but reject
+    // path separators and control chars here so `../../../etc/passwd` and the
+    // like never reach a layer that might interpret them.
+    if (filename.includes("/") || filename.includes("\\") || filename.includes("..") || CONTROL_CHARS_RE.test(filename)) {
+      return `attachments[${i}].filename must not contain path separators, '..', or control characters.`;
+    }
+    if (filename.length > 255) {
+      return `attachments[${i}].filename exceeds maximum length of 255 characters.`;
     }
     if (content === undefined || content === null || (typeof content !== "string" && !Buffer.isBuffer(content))) {
       return `attachments[${i}].content must be a base64 string or Buffer.`;

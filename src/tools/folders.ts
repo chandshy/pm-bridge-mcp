@@ -4,7 +4,7 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { validateTargetFolder } from "../utils/helpers.js";
+import { validateRequiredTargetFolder } from "../utils/helpers.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
@@ -121,42 +121,28 @@ export const handlers: Record<string, ToolHandler> = {
 
   create_folder: async (ctx) => {
     const { args, imapService, actionOk } = ctx;
-    const cfValidErr = validateTargetFolder(args.folderName);
-    if (cfValidErr) throw new McpError(ErrorCode.InvalidParams, cfValidErr);
-    if (!args.folderName || typeof args.folderName !== "string" || !(args.folderName as string).trim()) {
-      throw new McpError(ErrorCode.InvalidParams, "folderName must be a non-empty string.");
-    }
-    await imapService.createFolder(args.folderName as string);
+    // VALID-011: single required-name gate (rejects empty/whitespace + invalid
+    // chars in one McpError shape).
+    const folderName = validateRequiredTargetFolder(args.folderName, "folderName");
+    await imapService.createFolder(folderName);
     return actionOk();
   },
 
   delete_folder: async (ctx) => {
     const { args, imapService, actionOk } = ctx;
-    const dfValidErr = validateTargetFolder(args.folderName);
-    if (dfValidErr) throw new McpError(ErrorCode.InvalidParams, dfValidErr);
-    if (!args.folderName || typeof args.folderName !== "string" || !(args.folderName as string).trim()) {
-      throw new McpError(ErrorCode.InvalidParams, "folderName must be a non-empty string.");
-    }
-    await imapService.deleteFolder(args.folderName as string);
+    const folderName = validateRequiredTargetFolder(args.folderName, "folderName");
+    await imapService.deleteFolder(folderName);
     return actionOk();
   },
 
   rename_folder: async (ctx) => {
     const { args, imapService, actionOk } = ctx;
-    const rfOldErr = validateTargetFolder(args.oldName);
-    if (rfOldErr) throw new McpError(ErrorCode.InvalidParams, `oldName: ${rfOldErr}`);
-    if (!args.oldName || typeof args.oldName !== "string" || !(args.oldName as string).trim()) {
-      throw new McpError(ErrorCode.InvalidParams, "oldName must be a non-empty string.");
-    }
-    const rfNewErr = validateTargetFolder(args.newName);
-    if (rfNewErr) throw new McpError(ErrorCode.InvalidParams, `newName: ${rfNewErr}`);
-    if (!args.newName || typeof args.newName !== "string" || !(args.newName as string).trim()) {
-      throw new McpError(ErrorCode.InvalidParams, "newName must be a non-empty string.");
-    }
-    if ((args.oldName as string) === (args.newName as string)) {
+    const oldName = validateRequiredTargetFolder(args.oldName, "oldName");
+    const newName = validateRequiredTargetFolder(args.newName, "newName");
+    if (oldName === newName) {
       throw new McpError(ErrorCode.InvalidParams, "'newName' must be different from 'oldName'.");
     }
-    await imapService.renameFolder(args.oldName as string, args.newName as string);
+    await imapService.renameFolder(oldName, newName);
     return actionOk();
   },
 };

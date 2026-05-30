@@ -71,6 +71,24 @@ export class SimpleLoginService {
     return !!this.apiKey;
   }
 
+  /**
+   * CRED-012: strip secret-shaped substrings from a server-controlled error
+   * string. Replaces (a) the exact configured API key and (b) any long
+   * opaque token (SimpleLogin keys are ~40+ char base62/hex blobs) with a
+   * `[redacted]` placeholder so they never reach the log or the MCP response.
+   */
+  private redactSecrets(message: string): string {
+    let out = message;
+    if (this.apiKey) {
+      out = out.split(this.apiKey).join("[redacted]");
+    }
+    // Generic catch-all for opaque tokens: 24+ chars of base62/_- with no
+    // whitespace. Errs toward over-redaction; human-readable messages rarely
+    // contain unbroken 24-char alphanumeric runs.
+    out = out.replace(/[A-Za-z0-9_-]{24,}/g, "[redacted]");
+    return out;
+  }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (!this.apiKey) {
       throw new Error(
@@ -98,6 +116,12 @@ export class SimpleLoginService {
           const parsed = JSON.parse(text) as { error?: string };
           if (parsed.error) message = parsed.error;
         } catch { /* non-JSON body — use status text */ }
+        // CRED-012: the upstream `error` body is server-controlled and reaches
+        // the MCP response + the JSONL log, whose redaction is key-based (not
+        // value-pattern). Defensively scrub our own API key and any
+        // token-shaped substrings before raising so a hostile error string
+        // can't smuggle a secret into ~/.mailpouch.log.
+        message = this.redactSecrets(message);
         throw new Error(`SimpleLogin ${init.method ?? "GET"} ${path} → ${message}`);
       }
       if (!text) return undefined as T;

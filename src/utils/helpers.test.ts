@@ -27,6 +27,9 @@ import {
   sleep,
   clampOptionalInt,
   requireNonEmptyString,
+  validateLeafName,
+  validateRequiredTargetFolder,
+  optionalSourceFolder,
 } from './helpers.js';
 
 describe('helpers', () => {
@@ -1127,6 +1130,14 @@ describe('helpers', () => {
 
     it('throws for float string "3.14"', () => {
       expect(() => requireNumericEmailId('3.14')).toThrow(McpError);
+    });
+
+    it('accepts the 32-bit unsigned max (4294967295)', () => {
+      expect(requireNumericEmailId('4294967295')).toBe('4294967295');
+    });
+
+    it('throws for a 10-digit value above the 32-bit max ("9999999999")', () => {
+      expect(() => requireNumericEmailId('9999999999')).toThrow(McpError);
     });
 
     it('throws for null', () => {
@@ -3851,6 +3862,128 @@ describe('helpers', () => {
       expect(() => requireNonEmptyString('   ', 'reason')).toThrow(McpError);
       expect(() => requireNonEmptyString(undefined, 'reason')).toThrow(McpError);
       expect(() => requireNonEmptyString(42, 'reason')).toThrow(McpError);
+    });
+  });
+
+  // ── v3.0.62 low-severity validator sweep ───────────────────────────────────
+
+  describe('validateLeafName (VALID-004 shared core)', () => {
+    it('uses the provided field name in the error', () => {
+      expect(validateLeafName('', 'widget')).toMatch(/widget must be a non-empty/i);
+    });
+    it('rejects slash, traversal and control chars', () => {
+      expect(validateLeafName('a/b', 'x')).toMatch(/invalid characters/i);
+      expect(validateLeafName('..', 'x')).toMatch(/invalid characters/i);
+      expect(validateLeafName('a\x00b', 'x')).toMatch(/invalid characters/i);
+    });
+    it('accepts a plain leaf', () => {
+      expect(validateLeafName('Work', 'x')).toBeNull();
+    });
+  });
+
+  describe('VALID-007 — leaf/path validators reject DEL and C1 controls', () => {
+    it('validateLabelName rejects DEL (0x7f) and C1 (0x80-0x9f)', () => {
+      expect(validateLabelName('a\x7fb')).toMatch(/invalid characters/i);
+      expect(validateLabelName('a\x85b')).toMatch(/invalid characters/i);
+    });
+    it('validateFolderName rejects DEL and C1', () => {
+      expect(validateFolderName('a\x7fb')).toMatch(/invalid characters/i);
+      expect(validateFolderName('a\x9fb')).toMatch(/invalid characters/i);
+    });
+    it('validateTargetFolder and validateImapPath reject DEL', () => {
+      expect(validateTargetFolder('Folders/a\x7fb')).toMatch(/invalid characters/i);
+      expect(validateImapPath('Folders/a\x7fb')).toMatch(/invalid characters/i);
+    });
+  });
+
+  describe('VALID-008 — requireNumericEmailId bounds', () => {
+    it('accepts a normal UID', () => {
+      expect(requireNumericEmailId('12345')).toBe('12345');
+    });
+    it('accepts the literal "0"', () => {
+      expect(requireNumericEmailId('0')).toBe('0');
+    });
+    it('rejects leading zeros', () => {
+      expect(() => requireNumericEmailId('0000001')).toThrow(McpError);
+    });
+    it('rejects over-length numeric strings (>10 digits)', () => {
+      expect(() => requireNumericEmailId('123456789012345')).toThrow(McpError);
+    });
+  });
+
+  describe('VALID-010 — parseEmails per-token cap', () => {
+    it('drops a pathologically long token but keeps valid neighbours', () => {
+      const huge = 'x'.repeat(5000) + '@example.com';
+      expect(parseEmails(`good@example.com, ${huge}`)).toEqual(['good@example.com']);
+    });
+  });
+
+  describe('VALID-011 — validateRequiredTargetFolder', () => {
+    it('returns the trimmed name', () => {
+      expect(validateRequiredTargetFolder('  Folders/Work  ', 'folderName')).toBe('Folders/Work');
+    });
+    it('throws on empty/whitespace/non-string', () => {
+      expect(() => validateRequiredTargetFolder('', 'folderName')).toThrow(McpError);
+      expect(() => validateRequiredTargetFolder('   ', 'folderName')).toThrow(McpError);
+      expect(() => validateRequiredTargetFolder(undefined, 'folderName')).toThrow(McpError);
+    });
+    it('throws on invalid chars', () => {
+      expect(() => validateRequiredTargetFolder('a..b', 'folderName')).toThrow(McpError);
+    });
+  });
+
+  describe('VALID-012 — validateImapPath rejects edge whitespace', () => {
+    it('rejects leading/trailing whitespace', () => {
+      expect(validateImapPath(' INBOX')).toMatch(/whitespace/i);
+      expect(validateImapPath('INBOX ')).toMatch(/whitespace/i);
+    });
+    it('accepts a clean path', () => {
+      expect(validateImapPath('Folders/Work')).toBeNull();
+    });
+  });
+
+  describe('VALID-018 — validateAttachments filename hardening', () => {
+    it('rejects path separators and traversal in filename', () => {
+      expect(validateAttachments([{ filename: '../../etc/passwd', content: 'aGk=' }])).toMatch(/path separators/i);
+      expect(validateAttachments([{ filename: 'a\\b', content: 'aGk=' }])).toMatch(/path separators/i);
+    });
+    it('rejects an over-length filename', () => {
+      expect(validateAttachments([{ filename: 'x'.repeat(300), content: 'aGk=' }])).toMatch(/maximum length/i);
+    });
+    it('accepts a clean filename', () => {
+      expect(validateAttachments([{ filename: 'report.pdf', content: 'aGk=' }])).toBeNull();
+    });
+  });
+
+  describe('VALID-021 — optionalSourceFolder (shared)', () => {
+    it('returns undefined for omitted/empty', () => {
+      expect(optionalSourceFolder(undefined)).toBeUndefined();
+      expect(optionalSourceFolder('')).toBeUndefined();
+    });
+    it('returns a valid full path', () => {
+      expect(optionalSourceFolder('Folders/Work')).toBe('Folders/Work');
+    });
+    it('throws on non-string and invalid path', () => {
+      expect(() => optionalSourceFolder(42)).toThrow(McpError);
+      expect(() => optionalSourceFolder('a..b')).toThrow(McpError);
+    });
+    it('rejects leading/trailing whitespace so the gate matches the service', () => {
+      // validateImapPath (what the service uses) rejects " INBOX"; the tool gate
+      // must agree and throw a clean McpError rather than passing it through.
+      expect(() => optionalSourceFolder(' INBOX')).toThrow(McpError);
+      expect(() => optionalSourceFolder('INBOX ')).toThrow(McpError);
+    });
+  });
+
+  describe('PARSE-020 — extractEmailAddress anchoring', () => {
+    it('extracts the trailing address, not the first bracket pair', () => {
+      expect(extractEmailAddress('<bogus> "Alice" <real@x.com>')).toBe('real@x.com');
+    });
+    it('still handles a normal display-name form', () => {
+      expect(extractEmailAddress('Alice <alice@x.com>')).toBe('alice@x.com');
+    });
+    it('falls back to the trimmed input when no bracket pair matches', () => {
+      expect(extractEmailAddress('  plain@x.com  ')).toBe('plain@x.com');
     });
   });
 });
