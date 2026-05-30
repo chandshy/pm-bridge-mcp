@@ -177,7 +177,29 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
 
   // OAuth state (only populated when enabled).
   const scheme = opts.tlsCertPath && opts.tlsKeyPath ? "https" : "http";
-  const derivedIssuer = `${scheme}://${host}:${opts.port}`;
+
+  // XPORT-015: serving auth (static bearer or OAuth tokens) over plain HTTP on
+  // a non-loopback bind sends credentials across the wire in cleartext. We
+  // don't hard-refuse (some operators front the listener with a TLS-terminating
+  // proxy and bind 0.0.0.0 behind it), but we log a loud warning so an
+  // unintentional public-cleartext deployment is obvious in the logs.
+  const isLoopbackBind = host === "127.0.0.1" || host === "::1" || host === "localhost";
+  if (scheme === "http" && !isLoopbackBind) {
+    logger.warn(
+      `Serving authentication over PLAIN HTTP on a non-loopback bind (${host}:${opts.port}). ` +
+      `Bearer tokens and OAuth access tokens will cross the network in cleartext. ` +
+      `Configure remoteTlsCertPath/remoteTlsKeyPath, bind to 127.0.0.1, or front the ` +
+      `listener with a TLS-terminating reverse proxy.`,
+      "HttpTransport",
+    );
+  }
+
+  // XPORT-015: 0.0.0.0 is a wildcard bind address, not a routable host — it must
+  // never appear in the RFC 8414 issuer / RFC 9728 resource metadata or every
+  // well-behaved MCP host's discovery breaks. When no explicit issuer is set and
+  // we'd otherwise derive 0.0.0.0, substitute loopback for the advertised URL.
+  const issuerHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  const derivedIssuer = `${scheme}://${issuerHost}:${opts.port}`;
   const issuer = opts.oauthIssuer ?? derivedIssuer;
   const oauthStore = new OAuthStore();
   // Invalidate outstanding access tokens immediately when a grant transitions
@@ -245,12 +267,18 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     const caller = clientIp(req);
     let tokenKey: string | null = null;
     let ok = false;
+    let isStaticBearer = false;
     let callerClientId = "bearer:static";
     let callerClientName = "Static bearer";
 
     if (token && opts.bearerToken && tokenMatches(token, opts.bearerToken)) {
       ok = true;
-      tokenKey = "bearer:static";
+      isStaticBearer = true;
+      // XPORT-001: key the static-bearer rate bucket per caller IP, not a
+      // single global "bearer:static" string. Otherwise every legitimate
+      // user of the shared token (CLI, phone, laptop) competes for one
+      // bucket and a single busy — or malicious — caller DoSes the rest.
+      tokenKey = `bearer:static:${caller}`;
     } else if (token && oauthHandlers) {
       const rec = oauthStore.verifyToken(token);
       if (rec) {
@@ -310,8 +338,8 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         {
           clientId: callerClientId,
           clientName: callerClientName,
-          ip: clientIp(req),
-          staticBearer: tokenKey === "bearer:static",
+          ip: caller,
+          staticBearer: isStaticBearer,
         },
         async () => { await transport.handleRequest(req, res, body); },
       );

@@ -23,9 +23,10 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { createHash } from "crypto";
+import { createHash, createHmac, randomBytes } from "crypto";
 import { OAuthStore } from "./oauth-store.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
+import { clientIp } from "./http.js";
 import { logger } from "../utils/logger.js";
 import { constantTimeEqual } from "../utils/crypto.js";
 
@@ -33,6 +34,35 @@ const SCOPES = ["mcp:full"] as const;
 
 /** XPORT-002 max client_name length on the DCR registration record. */
 const DCR_CLIENT_NAME_MAX = 100;
+
+/** RFC 7636 §4.2 code_challenge shape — base64url, 43–128 chars. */
+const CODE_CHALLENGE_RE = /^[A-Za-z0-9_\-.~]{43,128}$/;
+
+/**
+ * XPORT-009: redirect_uri scheme allowlist. The DCR endpoint is public, so a
+ * `new URL(u)` parse alone accepts `javascript:`, `data:`, `file:` and any
+ * custom scheme; those then land in a 302 `Location:` after consent. We permit
+ * exactly the OAuth 2.1 native-apps BCP set:
+ *   - https (any host)
+ *   - http ONLY for loopback (localhost / 127.0.0.1 / ::1) — RFC 8252 §7.3
+ *   - a custom (reverse-DNS) private-use scheme for native apps, RFC 8252 §7.1
+ * Everything else (javascript:/data:/file:/ftp:/…) is rejected.
+ */
+function isAllowedRedirectUri(raw: string): boolean {
+  let u: URL;
+  try { u = new URL(raw); } catch { return false; }
+  if (u.protocol === "https:") return true;
+  if (u.protocol === "http:") {
+    const h = u.hostname.toLowerCase();
+    return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+  }
+  // Private-use / custom native-app scheme (e.g. "com.example.app:/cb").
+  // Reject the dangerous well-knowns explicitly; require a reverse-DNS-style
+  // scheme containing a dot so a bare "evil:" can't slip through.
+  const scheme = u.protocol.replace(/:$/, "");
+  if (scheme === "javascript" || scheme === "data" || scheme === "file" || scheme === "blob" || scheme === "vbscript") return false;
+  return /^[a-z][a-z0-9+.-]*\.[a-z][a-z0-9+.-]*$/.test(scheme);
+}
 
 /**
  * Strip control characters / ANSI escapes and length-cap a DCR-supplied
@@ -120,13 +150,6 @@ function verifyPkceS256(verifier: string, challenge: string): boolean {
 // Constant-time string compare imported from ../utils/crypto.
 const safeEqual = constantTimeEqual;
 
-/** Client IP extraction — trust X-Forwarded-For only when the caller is loopback. */
-function clientIp(req: IncomingMessage): string {
-  const remote = req.socket.remoteAddress ?? "0.0.0.0";
-  // Don't let arbitrary X-Forwarded-For headers bypass the rate limit.
-  return remote;
-}
-
 export interface OAuthHandlerResult {
   /** True when the handler has already written a response. */
   handled: boolean;
@@ -137,6 +160,14 @@ export class OAuthHandlers {
   private readonly cfg: OAuthEndpointsConfig;
   private readonly limiter: TokenBucketLimiter;
   private readonly onClientRegistered?: (c: { client_id: string; client_name?: string }) => void;
+  /**
+   * XPORT-008: per-process secret used to HMAC the consent CSRF token. The
+   * token has no server-side state — it is `HMAC(client_id)` minted by the GET
+   * consent page and required (constant-time compared) on the POST. A
+   * cross-site form on attacker.local cannot read the GET response to learn the
+   * token, so it cannot forge a valid submission even if it knows the password.
+   */
+  private readonly csrfSecret = randomBytes(32);
 
   constructor(
     store: OAuthStore,
@@ -149,6 +180,29 @@ export class OAuthHandlers {
     this.limiter = limiter;
     this.onClientRegistered = onClientRegistered;
     if (!cfg.adminPassword) throw new Error("OAuth admin password is required");
+  }
+
+  /** XPORT-008: mint a CSRF token bound to the client_id of this consent flow. */
+  private mintCsrfToken(clientId: string): string {
+    return createHmac("sha256", this.csrfSecret).update(clientId).digest("base64url");
+  }
+
+  /** XPORT-008: constant-time verify a CSRF token against the expected client_id. */
+  private verifyCsrfToken(token: string, clientId: string): boolean {
+    return constantTimeEqual(token, this.mintCsrfToken(clientId));
+  }
+
+  /**
+   * XPORT-008: reject state-changing POSTs whose Origin is cross-site. The
+   * consent form is same-origin (`form-action 'self'`); a present Origin that
+   * doesn't match the issuer means a cross-site submission. A missing Origin is
+   * allowed through (some same-origin form posts omit it) — the CSRF token is
+   * the primary defence; the Origin check is belt-and-suspenders.
+   */
+  private originAllowed(req: IncomingMessage): boolean {
+    const origin = req.headers["origin"];
+    if (!origin || typeof origin !== "string") return true;
+    return origin === this.cfg.issuer;
   }
 
   /**
@@ -224,8 +278,11 @@ export class OAuthHandlers {
     const uris = Array.isArray(body.redirect_uris) ? (body.redirect_uris as string[]) : [];
     if (uris.length === 0) { error(res, 400, "invalid_redirect_uri", "At least one redirect_uri is required."); return { handled: true }; }
     for (const u of uris) {
-      try { new URL(u); } catch {
-        error(res, 400, "invalid_redirect_uri", `redirect_uri ${u} is not a valid URL.`);
+      // XPORT-009: parse AND scheme-allowlist. `new URL` alone accepts
+      // javascript:/data:/file: and arbitrary schemes that would later be
+      // emitted in a 302 Location after consent.
+      if (typeof u !== "string" || !isAllowedRedirectUri(u)) {
+        error(res, 400, "invalid_redirect_uri", `redirect_uri ${u} uses an unsupported scheme. Allowed: https, http loopback, or a custom native-app scheme.`);
         return { handled: true };
       }
     }
@@ -283,7 +340,7 @@ export class OAuthHandlers {
     // RFC 7636 §4.2: code_challenge is base64url(SHA256(verifier)), which is
     // exactly 43 chars of URL-safe alphabet. Reject anything longer or with
     // non-base64url characters.
-    if (!codeChallenge || !/^[A-Za-z0-9_\-.~]{43,128}$/.test(codeChallenge)) {
+    if (!CODE_CHALLENGE_RE.test(codeChallenge)) {
       error(res, 400, "invalid_request", "code_challenge must be 43–128 chars of base64url alphabet.");
       return { handled: true };
     }
@@ -303,10 +360,18 @@ export class OAuthHandlers {
       resource,
       scope,
       isUntrustedDcrClient,
+      csrfToken: this.mintCsrfToken(clientId),
     });
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
+    // XPORT-003: clickjacking protection on the consent screen. The CSP gets a
+    // `frame-ancestors 'none'` (set inside consentPage), and we mirror the
+    // settings-server header set so framing/sniffing are blocked even on
+    // browsers that don't honour the meta CSP.
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
     res.end(html);
     return { handled: true };
   }
@@ -321,21 +386,45 @@ export class OAuthHandlers {
       error(res, 400, "invalid_request", "Could not parse form body."); return { handled: true };
     }
 
+    // XPORT-008: reject cross-site submissions and forged posts before the
+    // password is even examined. The CSRF token is bound to client_id and was
+    // minted by the GET consent page; a cross-site context cannot read it.
+    const clientId = body.client_id ?? "";
+    if (!this.originAllowed(req)) {
+      error(res, 403, "access_denied", "Cross-site form submission rejected.");
+      return { handled: true };
+    }
+    if (!this.verifyCsrfToken(body.csrf_token ?? "", clientId)) {
+      error(res, 403, "access_denied", "Missing or invalid CSRF token. Reload the consent page.");
+      return { handled: true };
+    }
+
     if (!safeEqual(body.admin_password ?? "", this.cfg.adminPassword)) {
       error(res, 403, "access_denied", "Incorrect admin password.");
       return { handled: true };
     }
 
-    const client = this.store.getClient(body.client_id ?? "");
+    const client = this.store.getClient(clientId);
     if (!client) { error(res, 400, "invalid_client", "Unknown client_id."); return { handled: true }; }
     const redirectUri = body.redirect_uri ?? "";
     if (!client.redirect_uris.includes(redirectUri)) { error(res, 400, "invalid_redirect_uri"); return { handled: true }; }
+
+    // XPORT-007: re-run the same format checks the GET handler enforced. A
+    // direct POST (bypassing the consent GET) must not be able to mint a code
+    // with an empty/malformed/plain challenge or an oversized state.
+    const method = body.code_challenge_method ?? "S256";
+    if (method !== "S256") { error(res, 400, "invalid_request", "PKCE S256 is required."); return { handled: true }; }
+    const codeChallenge = body.code_challenge ?? "";
+    if (!CODE_CHALLENGE_RE.test(codeChallenge)) {
+      error(res, 400, "invalid_request", "code_challenge must be 43–128 chars of base64url alphabet.");
+      return { handled: true };
+    }
     if (body.state && body.state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
 
     const rec = this.store.issueAuthCode({
       clientId: client.client_id,
       redirectUri,
-      codeChallenge: body.code_challenge ?? "",
+      codeChallenge,
       codeChallengeMethod: "S256",
       scopes: (body.scope ?? SCOPES.join(" ")).split(/\s+/).filter(Boolean),
       resource: body.resource || undefined,
@@ -441,6 +530,7 @@ export class OAuthHandlers {
     resource: string;
     scope: string;
     isUntrustedDcrClient?: boolean;
+    csrfToken: string;
   }): string {
     // Strict 5-replacement HTML escape — handles both attribute-context
     // and body-text contexts safely. The previous 3-replacement form
@@ -457,7 +547,7 @@ export class OAuthHandlers {
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'">
     <title>mailpouch — authorize</title>
     <style>
       body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 40px; }
@@ -490,6 +580,7 @@ export class OAuthHandlers {
         ${ctx.resource ? `<dt>Resource</dt><dd>${esc(ctx.resource)}</dd>` : ""}
       </dl>
       <form method="POST" action="/oauth/authorize">
+        <input type="hidden" name="csrf_token" value="${esc(ctx.csrfToken)}">
         <input type="hidden" name="client_id" value="${esc(ctx.clientId)}">
         <input type="hidden" name="redirect_uri" value="${esc(ctx.redirectUri)}">
         <input type="hidden" name="code_challenge" value="${esc(ctx.codeChallenge)}">

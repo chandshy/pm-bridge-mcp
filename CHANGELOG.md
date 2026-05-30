@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.56] — 2026-05-30
+
+### Security — OAuth/transport hardening (audit 2026-05-28, batch M4)
+
+- **XPORT-001** — Static-bearer rate-limit bucket is now keyed per caller IP (`bearer:static:<ip>`) instead of a single global bucket, so one busy or malicious caller can no longer DoS every other legitimate user of the shared token.
+- **XPORT-003** — OAuth consent page now sets `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a `frame-ancestors 'none'` CSP directive, blocking clickjacking of the Approve button.
+- **XPORT-006** — `oauth-handlers.ts` now reuses the exported `clientIp()` from the transport layer, so the OAuth rate-limit / IP-pin trust model matches the rest of the transport (XFF trusted only behind a loopback peer) instead of socket-only.
+- **XPORT-007** — The consent POST now re-runs the GET handler's `code_challenge` / `code_challenge_method` / `state` format checks, so a direct POST can no longer mint an auth code with an empty/malformed/plain (non-S256) challenge.
+- **XPORT-008** — Consent POST now requires a per-flow CSRF token (HMAC of `client_id` with a per-process secret, issued by the GET page) and rejects cross-site `Origin` headers, closing the password-known cross-site submission vector.
+- **XPORT-009** — DCR `redirect_uri` registration now enforces a scheme allowlist (https, http-loopback, custom native-app reverse-DNS scheme) and rejects `javascript:`/`data:`/`file:`/`blob:`/other schemes with `invalid_redirect_uri`.
+- **XPORT-015** — Startup now logs a high-severity warning when serving auth over plain HTTP on a non-loopback bind, and never advertises `0.0.0.0`/`::` as the OAuth issuer/resource host (falls back to loopback) so RFC 8414/9728 discovery doesn't break.
+
 ## [3.0.55] — 2026-05-30
 
 ### Fixed
