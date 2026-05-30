@@ -3,6 +3,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig, loadCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
 import { ALL_TOOLS, TOOL_CATEGORIES, DEFAULT_RESPONSE_LIMITS } from "./schema.js";
+import { CredentialEncryption } from "../crypto/credential-encryption.js";
 
 // ─── fs mocking for loadConfig / saveConfig / configExists ─────────────────────
 vi.mock("fs", async (importOriginal) => {
@@ -565,6 +566,63 @@ describe("loadCredentialsFromKeychain", () => {
     mockedExistsSync.mockReturnValue(false);
     const result = await loadCredentialsFromKeychain();
     expect(result).toBeNull();
+  });
+
+  // ─── CRED-010 (audit 2026-05-28): fail-closed on decrypt failure ─────────
+
+  it("refuses to fall through to plaintext when a valid-shaped encrypted blob fails to decrypt (CRED-010)", async () => {
+    process.env.MAILPOUCH_MACHINE_SECRET = "test-machine-secret-deterministic";
+    mockedLoad.mockResolvedValue({ password: "", smtpToken: "" });
+    mockedExistsSync.mockReturnValue(true);
+
+    // Produce a real, valid-shaped v3 blob, then tamper the ciphertext so the
+    // GCM tag no longer authenticates — isValidEncrypted stays true (16-byte
+    // tag, salt present) but decrypt() throws.
+    const good = CredentialEncryption.encrypt("the-real-password");
+    const buf = Buffer.from(good.encryptedData, "base64");
+    buf[0] ^= 0xff;
+    const tampered = { ...good, encryptedData: buf.toString("base64") };
+    expect(CredentialEncryption.isValidEncrypted(tampered)).toBe(true);
+
+    const cfgJson = JSON.stringify({
+      configVersion: 1,
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "u",
+        // Attacker-injected plaintext coexisting with a failed-auth blob.
+        password: "attacker-known-string", smtpToken: "",
+        passwordEncrypted: tampered,
+        bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(cfgJson as unknown as Buffer);
+
+    const result = await loadCredentialsFromKeychain();
+    // Fail closed — never serve the coexisting plaintext from the same file.
+    expect(result).toBeNull();
+  });
+
+  it("still serves valid encrypted-file credentials when decrypt succeeds (no regression)", async () => {
+    process.env.MAILPOUCH_MACHINE_SECRET = "test-machine-secret-deterministic";
+    mockedLoad.mockResolvedValue({ password: "", smtpToken: "" });
+    mockedExistsSync.mockReturnValue(true);
+
+    const enc = CredentialEncryption.encrypt("decryptable-secret");
+    const cfgJson = JSON.stringify({
+      configVersion: 1,
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "u", password: "", smtpToken: "",
+        passwordEncrypted: enc,
+        bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(cfgJson as unknown as Buffer);
+
+    const result = await loadCredentialsFromKeychain();
+    expect(result).toEqual({ password: "decryptable-secret", smtpToken: "", storage: "encrypted-file" });
   });
 });
 

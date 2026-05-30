@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.59] — 2026-05-30
+
+### Fixed
+Crypto/credential discipline batch from the 2026-05-28 audit (CRED findings 004, 006, 007, 010). Scope: `src/crypto/credential-encryption.ts`, `src/config/loader.ts`, `src/accounts/registry.ts`.
+
+- **GCM auth-tag length is validated before use** (CRED-006). `setAuthTag` silently accepts any 4–16 byte tag (a 4-byte tag has only 2^32 forgery margin). `decrypt()` and `isValidEncrypted()` now require a full 16-byte tag and reject short/garbage/over-length tags. The v1→v3 read-side migration is unaffected — real blobs always carry a 16-byte tag.
+- **Decrypt failure fails closed instead of falling through to plaintext** (CRED-010). When a well-formed encrypted blob in `~/.mailpouch.json` fails authenticated decryption, `loadCredentialsFromKeychain` now logs a `logger.error` and returns null rather than serving a coexisting plaintext `connection.password`/`smtpToken` from the same file. Plaintext coexisting with a failed-auth blob is treated as a tamper indicator, not a migration fallback.
+- **Credential files are re-asserted to 0o600** (CRED-007). `writeFileSync({mode})` only applies the mode at creation and is masked by umask, so an existing/restored file can be group/world-readable. `saveConfig` (config file) and the machine-id fallback now `chmod 0o600` when the mode has drifted wider, mirroring the logger's chmod-on-detect pattern.
+- **Keychain-vs-plaintext detection uses the real save result** (CRED-004). `writeRegistry` inferred keychain success from the scrubbed account shape (`!password && !smtpToken`), which a future empty-field normalization could flip to a false-clean "keychain" badge. It now records the actual `saveAccountCredentials` return value per account and marks `credentialStorage` from that.
+
 ## [3.0.58] — 2026-05-30
 
 ### Fixed

@@ -233,4 +233,39 @@ describe("accounts registry", () => {
     expect(onDisk.connection.password).toBe("");                 // legacy mirror scrubbed
     expect(onDisk.credentialStorage).toBe("keychain");           // marker set
   });
+
+  // ─── CRED-004 (audit 2026-05-28): backend detection from real result ─────
+
+  it("CRED-004: password-only account with keychain available is marked 'keychain'", async () => {
+    const keychain = await import("../security/keychain.js");
+    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue(true);
+    seedConfig({});
+    await createAccount({
+      name: "PwOnly", providerType: "imap",
+      smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
+      username: "u", password: "only-a-password", // no smtpToken
+    });
+    const onDisk = JSON.parse(diskByPath.get(CONFIG_PATH) ?? "{}") as ServerConfig;
+    expect(onDisk.credentialStorage).toBe("keychain");
+  });
+
+  it("CRED-004: keychain FAILURE marks 'config' even when the scrubbed spec has no smtpToken", async () => {
+    // The brittle predicate (`!password && !smtpToken`) used to infer keychain
+    // success from the on-disk shape. A password-only account whose keychain
+    // save FAILS keeps plaintext on disk — and must be reported as "config",
+    // never "keychain". This guards the false-clean-badge regression.
+    const keychain = await import("../security/keychain.js");
+    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue(false);
+    seedConfig({});
+    await createAccount({
+      name: "FailHost", providerType: "imap",
+      smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
+      username: "u", password: "stays-on-disk", // no smtpToken → scrubbed smtpToken is undefined
+    });
+    const onDisk = JSON.parse(diskByPath.get(CONFIG_PATH) ?? "{}") as ServerConfig;
+    const acct = onDisk.accounts?.find(a => a.name === "FailHost");
+    expect(acct!.password).toBe("stays-on-disk");  // keychain failed → plaintext kept
+    expect(acct!.smtpToken).toBeUndefined();        // empty token coerced to undefined
+    expect(onDisk.credentialStorage).toBe("config"); // NOT keychain
+  });
 });

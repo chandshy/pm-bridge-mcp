@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "crypto";
 import { hostname, platform, homedir } from "os";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, statSync, chmodSync } from "fs";
 import { spawnSync } from "child_process";
 import { join } from "path";
 
@@ -52,6 +52,21 @@ export function _resetMachineSecretCacheForTests(): void {
   _machineSecretCache = null;
 }
 
+/**
+ * Force a credential file back to owner-only (0o600) if its mode has drifted
+ * wider. `writeFileSync({mode})` only sets permissions at creation time and is
+ * masked by umask, so an existing or restored file can be group/world-readable.
+ * No-op on platforms without POSIX modes (the `& 0o077` check is a cheap guard)
+ * and best-effort — a chmod failure must not break credential resolution.
+ * CRED-007.
+ */
+function reassertOwnerOnly(path: string): void {
+  try {
+    const mode = statSync(path).mode & 0o777;
+    if (mode & 0o077) chmodSync(path, 0o600);
+  } catch { /* file vanished or chmod unsupported — best effort */ }
+}
+
 function resolveMachineSecret(): string {
   // Explicit override — useful in tests, containers, or ops scenarios where
   // the OS sources are not available and the persisted fallback file should
@@ -97,11 +112,17 @@ function resolveMachineSecret(): string {
   try {
     const path = join(homedir(), ".mailpouch-machine-id");
     if (existsSync(path)) {
+      // CRED-007: the `mode` arg to writeFileSync only applies at creation and
+      // is masked by umask; an existing file may have been left group/world-
+      // readable (e.g. a restored backup or a prior umask). Re-assert 0o600
+      // before trusting it, mirroring the logger's chmod-on-detect pattern.
+      reassertOwnerOnly(path);
       const v = readFileSync(path, "utf-8").trim();
       if (v.length >= 32) return v;
     }
     const fresh = randomBytes(32).toString("hex");
     writeFileSync(path, fresh, { encoding: "utf-8", mode: 0o600 });
+    reassertOwnerOnly(path); // umask may have widened the creation mode
     return fresh;
   } catch {
     // Last-ditch — if we can't write the file (read-only home?), use a
@@ -111,6 +132,10 @@ function resolveMachineSecret(): string {
     return `nomachineid:${hostname()}`;
   }
 }
+
+/** AES-256-GCM produces a 16-byte authentication tag. We require the full
+ *  length on decrypt — anything shorter is a truncated/forged tag. CRED-006. */
+const GCM_TAG_BYTES = 16;
 
 export class CredentialEncryption {
   private static readonly APP_SALT = "/mailpouch/credential-encryption/v1";
@@ -183,6 +208,14 @@ export class CredentialEncryption {
     const key = CredentialEncryption.deriveKey(encrypted.version, saltBuf);
     const iv = Buffer.from(encrypted.iv, "base64");
     const authTag = Buffer.from(encrypted.authTag, "base64");
+    // CRED-006: reject a short/truncated GCM tag before handing it to
+    // setAuthTag. Node accepts any 4-16 byte tag (with a deprecation warning
+    // below 12 bytes); a 4-byte tag has only 2^32 forgery margin. Require the
+    // full 16-byte tag so a tampered blob carrying a truncated tag is rejected
+    // rather than silently downgrading the GCM integrity guarantee.
+    if (authTag.length !== GCM_TAG_BYTES) {
+      throw new Error(`Invalid GCM auth tag length: expected ${GCM_TAG_BYTES} bytes, got ${authTag.length}`);
+    }
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(authTag);
     let plaintext = decipher.update(encrypted.encryptedData, "base64", "utf8");
@@ -200,6 +233,12 @@ export class CredentialEncryption {
       typeof e.encryptedData !== "string" ||
       typeof e.authTag !== "string" || (e.authTag as string).length === 0
     ) {
+      return false;
+    }
+    // CRED-006: the authTag must decode to a full 16-byte GCM tag. A short
+    // tag is either corruption or a deliberate truncation-forgery attempt;
+    // either way it is not a blob we should hand to setAuthTag.
+    if (Buffer.from(e.authTag as string, "base64").length !== GCM_TAG_BYTES) {
       return false;
     }
     // v3 mandates the per-blob salt; earlier versions never wrote one.
