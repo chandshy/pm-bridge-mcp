@@ -291,10 +291,9 @@ describe("SimpleIMAPService.saveDraft", () => {
 
   it("sanitizes attachment filename and contentType", async () => {
     const svc = new SimpleIMAPService();
+    const appendMock = vi.fn().mockResolvedValue({ uid: 5 });
     (svc as any).isConnected = true;
-    (svc as any).client = {
-      append: vi.fn().mockResolvedValue({ uid: 5 }),
-    };
+    (svc as any).client = { append: appendMock };
     const result = await svc.saveDraft({
       subject: "With attachment",
       body: "See attached",
@@ -312,8 +311,23 @@ describe("SimpleIMAPService.saveDraft", () => {
       ],
     });
     expect(result.success).toBe(true);
-    // Verify append was called (MIME was built and appended)
-    expect((svc as any).client.append).toHaveBeenCalled();
+    expect(appendMock).toHaveBeenCalled();
+    // TEST-003 (audit 2026-05-28): the old test only checked that append was
+    // called. A regression in the sanitizer would still pass. Now inspect the
+    // raw MIME bytes (the second arg to client.append is the rawMime Buffer
+    // that goes on the wire) and assert that the injected text never appears
+    // as its own MIME header — i.e. no CR/LF immediately precedes it.
+    const [, rawMime] = appendMock.mock.calls[0];
+    const wire = Buffer.isBuffer(rawMime) ? rawMime.toString("utf8") : String(rawMime);
+    // The crafted CRLF in the filename must NOT have started a real MIME
+    // header line. Sanitizer leaves the visible token glued onto the filename
+    // (e.g. "reportX-Injected: yes.pdf"), which is harmless: it's a literal
+    // filename string, not a header. The dangerous form would be a newline
+    // followed by the header text.
+    expect(wire).not.toMatch(/\r?\n\s*X-Injected:\s*yes/);
+    expect(wire).not.toMatch(/\r?\n\s*X-Evil:\s*header/);
+    // The filename's CRLF must have been stripped; the visible token survives.
+    expect(wire).toMatch(/report/);
   });
 
   it("uses HTML body when isHtml is set", async () => {
@@ -332,10 +346,9 @@ describe("SimpleIMAPService.saveDraft", () => {
 
   it("sanitizes inReplyTo and references headers", async () => {
     const svc = new SimpleIMAPService();
+    const appendMock = vi.fn().mockResolvedValue({ uid: 7 });
     (svc as any).isConnected = true;
-    (svc as any).client = {
-      append: vi.fn().mockResolvedValue({ uid: 7 }),
-    };
+    (svc as any).client = { append: appendMock };
     const result = await svc.saveDraft({
       subject: "Reply",
       body: "See above",
@@ -343,6 +356,17 @@ describe("SimpleIMAPService.saveDraft", () => {
       references: ["<ref1@example.com>", "<ref2\x01@example.com>"],
     });
     expect(result.success).toBe(true);
+    // TEST-003: the original test only asserted success — a regression in the
+    // CRLF strip on inReplyTo / control-char strip on references would slip
+    // past. Inspect the appended MIME bytes and assert the injected header
+    // never appears as its own line.
+    const [, rawMime] = appendMock.mock.calls[0];
+    const wire = Buffer.isBuffer(rawMime) ? rawMime.toString("utf8") : String(rawMime);
+    expect(wire).not.toMatch(/\r?\n\s*X-Injected:\s*evil/);
+    // The legitimate Message-ID portion of inReplyTo must survive sanitization.
+    expect(wire).toMatch(/msg-id@example\.com/);
+    // The control character (\x01) embedded in the references list must be gone.
+    expect(wire).not.toMatch(/\x01/);
   });
 
   it("handles to as array, cc as string, bcc as array (lines 1154-1160 branch coverage)", async () => {

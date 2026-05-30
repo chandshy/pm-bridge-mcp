@@ -84,6 +84,24 @@ export function __resetKeyringCacheForTests(): void {
   keyringChecked = false;
 }
 
+/**
+ * Test hook — inject a stub `Entry` backend so the positive-path tests
+ * (TEST-005 in Batch 7) can exercise save/load/migrate without `@napi-rs/
+ * keyring` actually being installed and without relying on `vi.mock`
+ * intercepting the `new Function("specifier","return import(specifier)")`
+ * dynamic load. Pass `null` to clear and fall back to the real dynamic
+ * import. Production code never calls this.
+ */
+export function __setKeyringForTests(stub: KeyringModule | null): void {
+  if (stub === null) {
+    keyringModule = null;
+    keyringChecked = false;
+  } else {
+    keyringModule = stub;
+    keyringChecked = true;
+  }
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
