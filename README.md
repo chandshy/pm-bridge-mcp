@@ -15,6 +15,7 @@ It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 d
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
 [![Tests](https://img.shields.io/badge/tests-1%2C611%20passing-brightgreen.svg)](#development)
+[![SafeSkill 70/100](https://img.shields.io/badge/SafeSkill-70%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/chandshy-mailpouch)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
