@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import {
   parseEmails,
+  parseEmailsDetailed,
   formatDate,
   parseDate,
   truncate,
@@ -66,6 +67,24 @@ describe('helpers', () => {
 
     it('should drop display-name entries with invalid inner address', () => {
       expect(parseEmails('Bad Guy <not-an-email>')).toEqual([]);
+    });
+  });
+
+  describe('parseEmailsDetailed (SMTP-014)', () => {
+    it('reports both valid and dropped addresses on partial failure', () => {
+      const { valid, dropped } = parseEmailsDetailed('alice@x.com, bogus, bob@y.com');
+      expect(valid).toEqual(['alice@x.com', 'bob@y.com']);
+      expect(dropped).toEqual(['bogus']);
+    });
+
+    it('reports no drops when all addresses are valid', () => {
+      const { valid, dropped } = parseEmailsDetailed('a@x.com, b@y.com');
+      expect(valid).toEqual(['a@x.com', 'b@y.com']);
+      expect(dropped).toEqual([]);
+    });
+
+    it('parseEmails remains backward-compatible (valid only)', () => {
+      expect(parseEmails('alice@x.com, bogus, bob@y.com')).toEqual(['alice@x.com', 'bob@y.com']);
     });
   });
 

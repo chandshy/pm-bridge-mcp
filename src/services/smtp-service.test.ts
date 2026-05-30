@@ -116,6 +116,13 @@ describe("SMTPService.sendEmail", () => {
     ).rejects.toThrow(/Invalid email address/);
   });
 
+  it("SMTP-014: hard-fails when a `to` address is dropped as invalid instead of silently shrinking", async () => {
+    const svc = new SMTPService(makeConfig());
+    await expect(
+      svc.sendEmail({ to: "good@example.com, bogus, bob@example.com", subject: "S", body: "B" })
+    ).rejects.toThrow(/Invalid recipient address\(es\) in "to": bogus/);
+  });
+
   it("throws when the combined recipient count exceeds the cap", async () => {
     const svc = new SMTPService(makeConfig());
     const many = Array.from({ length: 51 }, (_, i) => `u${i}@example.com`);

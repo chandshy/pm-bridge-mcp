@@ -22,7 +22,18 @@ function sqliteAvailable(): boolean {
   }
 }
 
-const describeMaybe = sqliteAvailable() ? describe : describe.skip;
+// TEST-013: locally, a missing native better-sqlite3 build skips the suite so
+// the dev loop isn't blocked. In CI (where the runner provisions build deps)
+// a missing sqlite is a real coverage hole — fail loudly instead of silently
+// skipping the entire FTS surface.
+const SQLITE_AVAILABLE = sqliteAvailable();
+if (!SQLITE_AVAILABLE && process.env.CI) {
+  throw new Error(
+    "FTS suite cannot run: better-sqlite3 is unavailable but CI is set. " +
+      "Install native build deps so the FTS coverage isn't silently skipped.",
+  );
+}
+const describeMaybe = SQLITE_AVAILABLE ? describe : describe.skip;
 
 function tmpDb(): string {
   return join(tmpdir(), `mailpouch-fts-${randomBytes(6).toString("hex")}.db`);

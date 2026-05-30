@@ -203,7 +203,12 @@ export class SchedulerService {
   // ─── Internal ───────────────────────────────────────────────────────────────
 
   async processDue(): Promise<void> {
-    if (this.isProcessing) return;
+    if (this.isProcessing) {
+      // SMTP-008: a slow in-flight send blocks this tick. Emit a debug line so
+      // "why didn't my email send at 12:34?" is diagnosable rather than silent.
+      logger.debug("processDue skipped — previous tick still in flight", "Scheduler");
+      return;
+    }
     this.isProcessing = true;
 
     const now = new Date();
@@ -226,6 +231,15 @@ export class SchedulerService {
       logger.info(`Processing ${due.length} due scheduled email(s)`, "Scheduler");
 
       for (const item of due) {
+        // SMTP-015: if the SMTP backoff gate is already tripped, every remaining
+        // item in this batch would return "backoff active" and burn a retryCount
+        // for a send that was never actually attempted — mass-failing the queue.
+        // Stop the batch early and leave the rest "pending" (not attempted) so
+        // the next tick retries cleanly once the backoff window elapses.
+        if (this.smtpService.backoff?.isBlocked()) {
+          logger.warn(`SMTP backoff active — deferring ${due.length - due.indexOf(item)} remaining due item(s) to a later tick`, "Scheduler");
+          break;
+        }
         // SMTP-002: flip to "sending" + persist BEFORE the await so a
         // concurrent cancel() can distinguish "still pending" from
         // "already on the wire" and return the in_flight signal.
@@ -353,6 +367,10 @@ export class SchedulerService {
   }
 
   private persist(): void {
+    // SMTP-018: prune on every write, not only at load(). A long-running process
+    // accumulates >MAX_HISTORY_RECORDS non-pending records in memory and would
+    // otherwise rewrite (and grow) the full blob on every schedule/cancel/tick.
+    this.items = this.pruneHistory(this.items);
     const tmp = this.storePath + ".tmp";
     try {
       writeFileSync(tmp, JSON.stringify(this.items, null, 2), { encoding: "utf-8", mode: 0o600 });

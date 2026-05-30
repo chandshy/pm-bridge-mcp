@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.61] — 2026-05-30
+
+### Fixed
+
+IMAP/SMTP low-severity sweep + test-quality hardening (2026-05-28 audit, batch P2-A).
+
+- **IMAP-011** — `expandImapSequence` now rejects NaN / `*` / inverted ranges and caps expansion at 10 000 UIDs, instead of silently returning `[1]` for `1:*` or OOMing on `1:1000000000`.
+- **IMAP-013** — `findDraftsFolder` logs the underlying folder-discovery failure (network/auth) before treating it as "no Drafts folder", so the actionable cause isn't swallowed.
+- **IMAP-015** — `validateEmailId` now enforces 32-bit UID bounds (`/^[1-9]\d{0,9}$/` ≤ 4 294 967 295), rejecting arbitrary-length pseudo-UIDs and log poisoning.
+- **IMAP-018** — `getEmails` preview suppresses MIME boundary/header noise for `multipart/related` roots instead of shipping `----=_Part…` markers into the list view.
+- **IMAP-019** — `disconnect()` wraps `logout()` in try/finally so a rejected logout still nulls `client` and clears `isConnected` (no more stale "connected" state on a dead socket).
+- **IMAP-022** — `getFolders` issues its per-folder `STATUS` probes concurrently (`Promise.all`) instead of one serial round-trip per folder.
+- **SMTP-008** — `processDue` logs a debug line when a tick is skipped because the previous one is still in flight.
+- **SMTP-009** — `reply_to_email` caps the `Re:` subject to `MAX_SUBJECT_LENGTH`, matching the forward path.
+- **SMTP-010** — `forward_email` escapes the user message via `escapeHtml` when the forwarded original is HTML, closing a body-injection gap.
+- **SMTP-013** — `send_email` now enforces a non-empty `subject` (the schema marked it required but the handler didn't), so transports that skip schema validation can't send an empty Subject.
+- **SMTP-014** — new `parseEmailsDetailed` reports dropped addresses; the SMTP `to` field now hard-fails on a partial drop instead of silently shrinking the recipient set.
+- **SMTP-015** — `processDue` defers the rest of a batch (without bumping `retryCount`) when the SMTP backoff gate is already tripped, instead of mass-failing untried items.
+- **SMTP-018** — `pruneHistory` now runs on every `persist()`, not only at `load()`, so the scheduler store can't grow unbounded between restarts.
+- **IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009** — reconciled: already closed by the v3.0.44 sourceFolder/pre-flight work; now annotated in the audit doc.
+
+### Tests
+
+- **TEST-006** — `imap-operations.test.ts` now uses its imported `beforeEach` to `vi.restoreAllMocks()` between tests.
+- **TEST-007** — added a `makeFolder()` helper producing the full `EmailFolder` shape (incl. `specialUse`); applied at the `getFolders` spy sites to stop mock drift.
+- **TEST-008** — agent-harness smoke tests assert a well-formed discriminated outcome instead of the tautological `expect(outcome).toBeDefined()`.
+- **TEST-009** — escalation env-override test uses a unique `mkdtempSync` dir with try/finally env restore instead of a fixed `/tmp` path.
+- **TEST-013** — `fts-service.test.ts` hard-fails (instead of silently skipping) when `better-sqlite3` is missing under `CI`.
+- **TEST-014** — agent-harness discovery test derives expectations from the tool registry (subset + ceiling against `allToolDefs()`) instead of a hand-picked subset + `>= 40` floor.
+- **TEST-015** — destructive-gate harness tests require an *explicit* refusal, so a silent `{success:0,failed:0}` no-op no longer counts as "gated".
+- **TEST-024** — deletion E2E additionally asserts the folder message count is unchanged after a `confirmed:false` rejection, evidencing the gate fires before any IMAP mutation.
+- Added focused regressions for IMAP-011/015/019, SMTP-009/010/013/014/015/018.
+
+### Notes
+
+- **IMAP-020** — acknowledged, by design: the `"`/`\` strip in `sanitizeImapStr` is a deliberate, audited injection defense; trading it for rare search-fidelity edge cases (`O\'Brien`, quoted phrases) risks regressing the IMAP SEARCH injection guard.
+- **SMTP-016** — acknowledged, by design: `remind_if_no_reply` already binds the reminder to the fetched message's real `Message-ID`, so auto-cancel matches the correct thread; a Message-ID input option is a product/schema change out of scope.
+- **TEST-010** — acknowledged with mitigation: kept the global `MAILPOUCH_INSECURE_BRIDGE=1` default (a full strict-by-default flip churns several connect-path test files) and documented the strict-test opt-out contract in `test-setup.ts`.
+- **TEST-011** — acknowledged, deferred: ephemeral Greenmail ports require dynamic docker-compose port allocation that can't be validated without a Docker runner.
+- **TEST-019** — acknowledged, deferred: a bridge-only-skip → counterpart registry would hard-fail CI today because the Phase-2 `bridge-only` counterpart suite doesn't exist yet.
+
 ## [3.0.60] — 2026-05-30
 
 ### Fixed

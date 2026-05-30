@@ -59,16 +59,22 @@ export function isValidEmail(email: string): boolean {
 }
 
 /**
- * Parse comma-separated email addresses.
- * Invalid or malformed addresses are skipped; a warning is logged for each
- * so that callers can detect misconfigured CC/BCC lists without hard-failing.
+ * Parse comma-separated email addresses, returning both the valid addresses and
+ * the raw segments that were dropped as invalid.
+ *
+ * SMTP-014: the original `parseEmails` silently discarded malformed addresses,
+ * so a caller submitting "alice@x.com, bogus, bob@y.com" proceeded with two
+ * recipients and no signal that one was dropped. This detailed form lets the
+ * SMTP layer surface partial-failure to the caller instead of quietly sending
+ * to fewer recipients than intended.
  */
-export function parseEmails(emailString: string): string[] {
+export function parseEmailsDetailed(emailString: string): { valid: string[]; dropped: string[] } {
   if (!emailString || emailString.trim() === "") {
-    return [];
+    return { valid: [], dropped: [] };
   }
 
   const valid: string[] = [];
+  const dropped: string[] = [];
   for (const raw of emailString.split(",")) {
     const trimmed = raw.trim();
     if (trimmed.length === 0) continue;
@@ -79,10 +85,20 @@ export function parseEmails(emailString: string): string[] {
     if (isValidEmail(candidate)) {
       valid.push(candidate);
     } else {
-      logger.warn("parseEmails: dropping invalid address", "helpers", { address: sanitizeForLog(trimmed, 80) });
+      dropped.push(trimmed);
+      logger.warn("parseEmailsDetailed: dropping invalid address", "helpers", { address: sanitizeForLog(trimmed, 80) });
     }
   }
-  return valid;
+  return { valid, dropped };
+}
+
+/**
+ * Parse comma-separated email addresses.
+ * Invalid or malformed addresses are skipped; a warning is logged for each
+ * so that callers can detect misconfigured CC/BCC lists without hard-failing.
+ */
+export function parseEmails(emailString: string): string[] {
+  return parseEmailsDetailed(emailString).valid;
 }
 
 /**

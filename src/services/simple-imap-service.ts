@@ -188,12 +188,44 @@ export function chunkUidsForWire(uids: string[], maxLen: number = 7500): string[
   return chunks;
 }
 
-function expandImapSequence(range: string): number[] {
+/**
+ * IMAP-011: expand an IMAP sequence-set string (`1`, `1:5`, `1,3,7:9`) into a
+ * flat number array. Guards added:
+ *  - reject non-numeric / `*` parts (NaN) so `'1:*'` no longer silently yields
+ *    `[1]` and `'a:b'` no longer yields `[NaN]`;
+ *  - cap the produced count so a hostile/buggy `1:1000000000` can't allocate a
+ *    billion-element array and OOM the process.
+ */
+const MAX_EXPANDED_SEQUENCE = 10_000;
+export function expandImapSequence(range: string): number[] {
   const nums: number[] = [];
   for (const part of range.split(',')) {
-    const [a, b] = part.split(':').map(Number);
-    if (b === undefined) nums.push(a);
-    else for (let i = a; i <= b; i++) nums.push(i);
+    const segs = part.split(':');
+    // IMAP sequence-set grammar allows at most one ':' per part; "1:2:3" is
+    // malformed and must be rejected, not silently truncated to "1:2".
+    if (segs.length > 2) {
+      throw new Error(`Invalid IMAP sequence part: ${JSON.stringify(part)}`);
+    }
+    const [a, b] = segs.map(Number);
+    if (!Number.isInteger(a) || a < 1) {
+      throw new Error(`Invalid IMAP sequence part: ${JSON.stringify(part)}`);
+    }
+    if (b === undefined) {
+      nums.push(a);
+    } else {
+      if (!Number.isInteger(b) || b < a) {
+        throw new Error(`Invalid IMAP sequence range: ${JSON.stringify(part)}`);
+      }
+      // Check the projected size BEFORE expanding so a hostile `1:1000000000`
+      // can't OOM (or hit "Invalid array length") while growing the array.
+      if (nums.length + (b - a + 1) > MAX_EXPANDED_SEQUENCE) {
+        throw new Error(`IMAP sequence too large (> ${MAX_EXPANDED_SEQUENCE} UIDs): ${JSON.stringify(range)}`);
+      }
+      for (let i = a; i <= b; i++) nums.push(i);
+    }
+    if (nums.length > MAX_EXPANDED_SEQUENCE) {
+      throw new Error(`IMAP sequence too large (> ${MAX_EXPANDED_SEQUENCE} UIDs): ${JSON.stringify(range)}`);
+    }
   }
   return nums;
 }
@@ -406,7 +438,11 @@ export class SimpleIMAPService {
 
   /** Validate that an email ID is a numeric UID string (prevents IMAP injection) */
   private validateEmailId(id: string): void {
-    if (!/^\d+$/.test(id)) {
+    // IMAP-015: IMAP UIDs are 32-bit unsigned (1..4_294_967_295). Reject
+    // arbitrary-length decimal strings (e.g. 50 nines) that pass `\d+` but are
+    // structurally not UIDs — they only ever resolve to "UID not found" while
+    // bloating log lines with attacker-controlled digits.
+    if (!/^[1-9]\d{0,9}$/.test(id) || Number(id) > 4_294_967_295) {
       throw new Error(`Invalid email ID format: ${JSON.stringify(id)}`);
     }
   }
@@ -722,9 +758,17 @@ export class SimpleIMAPService {
     return tracer.span('imap.disconnect', {}, async () => {
     if (this.client && this.isConnected) {
       logger.debug('Disconnecting from IMAP server', 'IMAPService');
-      await this.client.logout();
-      this.client = null;
-      this.isConnected = false;
+      // IMAP-019: a rejected logout() (Bridge ungracefully closing the socket
+      // during shutdown is common) must NOT leave client/isConnected stale —
+      // ensureConnection() would then trust a dead socket. Always tear down.
+      try {
+        await this.client.logout();
+      } catch (error) {
+        logger.warn('IMAP logout() failed; forcing local disconnect', 'IMAPService', error);
+      } finally {
+        this.client = null;
+        this.isConnected = false;
+      }
       logger.info('IMAP disconnected', 'IMAPService');
     }
     }); // end tracer.span('imap.disconnect')
@@ -830,8 +874,17 @@ export class SimpleIMAPService {
 
       const SYSTEM_PATHS = new Set(['inbox','sent','drafts','trash','spam','archive','all mail','starred']);
 
-      for (const folder of folders) {
-        const status = await this.client.status(folder.path, { messages: true, unseen: true });
+      // IMAP-022: issue the per-folder STATUS probes concurrently. The previous
+      // serial `await` loop cost one full round-trip per folder (30+ on a
+      // label-heavy Proton account => >1s per cache miss). imapflow pipelines
+      // STATUS commands fine, so Promise.all collapses this to ~one round-trip.
+      const client = this.client;
+      const statuses = await Promise.all(
+        folders.map(folder => client.status(folder.path, { messages: true, unseen: true })),
+      );
+
+      folders.forEach((folder, i) => {
+        const status = statuses[i];
 
         let folderType: 'system' | 'user-folder' | 'label';
         if (folder.path.startsWith('Labels/')) {
@@ -853,7 +906,7 @@ export class SimpleIMAPService {
 
         result.push(emailFolder);
         this.folderCache.set(folder.path, emailFolder);
-      }
+      });
 
       // Record the timestamp of this successful refresh
       this.folderCachedAt = Date.now();
@@ -935,8 +988,17 @@ export class SimpleIMAPService {
             // Decode the text preview from bodyPart '1'
             const rawPart = message.bodyParts?.get('1');
             const bodyText = rawPart ? rawPart.toString('utf-8') : '';
-            const looksLikeHtml = /<[a-z][\s\S]*>/i.test(bodyText);
-            const bodyPreview = truncateBody(looksLikeHtml ? stripHtml(bodyText) : bodyText);
+            // IMAP-018: for `multipart/related` (and similar) messages, part '1'
+            // is the nested `multipart/*` root, so the fetched bytes are MIME
+            // boundary markers + part headers rather than readable text. Detect
+            // that shape and suppress it instead of shipping "----=_Part…" noise
+            // into the list-view preview. (Pure preview-quality; not data loss.)
+            const looksLikeMimeNoise =
+              /^\s*--[-=_]/.test(bodyText) ||
+              /Content-Type:\s*(multipart|text|application)\//i.test(bodyText);
+            const previewSource = looksLikeMimeNoise ? '' : bodyText;
+            const looksLikeHtml = /<[a-z][\s\S]*>/i.test(previewSource);
+            const bodyPreview = truncateBody(looksLikeHtml ? stripHtml(previewSource) : previewSource);
 
             // Determine attachment count from bodyStructure without downloading content
             const attachmentCount = this.countAttachments(message.bodyStructure);
@@ -1566,8 +1628,11 @@ export class SimpleIMAPService {
       const folders = await this.getFolders();
       const found = this.pickDraftsFolder(folders);
       if (found) return found;
-    } catch {
-      // swallow — fall through to "not found"
+    } catch (error) {
+      // IMAP-013: folder discovery itself failed (network/auth) — this is NOT
+      // the same as "no Drafts folder exists". Log the actionable cause so the
+      // caller's "no Drafts folder" message isn't the only signal.
+      logger.warn('findDraftsFolder: folder discovery failed; treating as no Drafts folder', 'IMAPService', error);
     }
 
     return null;

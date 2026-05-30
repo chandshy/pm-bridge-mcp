@@ -597,4 +597,58 @@ describe("SchedulerService", () => {
     // "failed" state, the record is honestly "cancelled".
     expect(svc.list().find(i => i.id === id)!.status).toBe("cancelled");
   });
+
+  it("SMTP-015: an active SMTP backoff defers the rest of the batch without bumping retryCount", async () => {
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "msg-1" });
+    const smtp = {
+      sendEmail,
+      // Backoff is already tripped before this batch runs.
+      backoff: { isBlocked: () => true },
+    } as unknown as SMTPService;
+
+    const svc = new SchedulerService(smtp, storePath);
+    const id1 = svc.schedule(makeOptions(), futureDate(120));
+    const id2 = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    await svc.processDue();
+
+    // No send attempted, and crucially no retryCount burned — both items remain
+    // cleanly "pending" for a later tick once the backoff window elapses.
+    expect(sendEmail).not.toHaveBeenCalled();
+    const items = svc.list();
+    expect(items.find(i => i.id === id1)!.status).toBe("pending");
+    expect(items.find(i => i.id === id2)!.status).toBe("pending");
+    expect(items.find(i => i.id === id1)!.retryCount ?? 0).toBe(0);
+    expect(items.find(i => i.id === id2)!.retryCount ?? 0).toBe(0);
+  });
+
+  it("SMTP-018: pruneHistory runs on persist(), not only at load()", () => {
+    // Seed the store with exactly the history cap (1000) of terminal records,
+    // then prove that ONE persist (triggered by a single schedule+cancel that
+    // pushes the count to 1001) trims the on-disk blob back to the cap. This
+    // exercises the same persist-time prune as 1000+ live cancels but with two
+    // writes instead of ~2000 — the brute-force version times out on Windows CI.
+    const now = new Date().toISOString();
+    const seeded = Array.from({ length: 1000 }, (_, i) => ({
+      id: `seed-${i}`,
+      scheduledAt: now,
+      createdAt: now,
+      status: "cancelled" as const,
+      options: { to: "bob@example.com", subject: "x", body: "y" },
+    }));
+    writeFileSync(storePath, JSON.stringify(seeded), "utf-8");
+
+    // load() accepts all 1000 (== cap, not over it); disk still holds 1000.
+    const svc = new SchedulerService(makeSMTP(), storePath);
+    // schedule (+1 pending) then cancel (→ cancelled) takes non-pending to 1001.
+    // With the SMTP-018 fix, persist() prunes back to 1000 before writing;
+    // without it, the unpruned 1001 lands on disk.
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    svc.cancel(id);
+
+    const onDisk = JSON.parse(readFileSync(storePath, "utf-8")) as Array<{ status: string }>;
+    const nonPending = onDisk.filter(r => r.status !== "pending");
+    expect(nonPending.length).toBeLessThanOrEqual(1000);
+  });
 });
