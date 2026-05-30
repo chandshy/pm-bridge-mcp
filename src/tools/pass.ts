@@ -77,7 +77,7 @@ export const defs: ToolDef[] = [
         name: { type: "string" },
         type: { type: "string" },
         username: { type: "string" },
-        fields: { type: "object", additionalProperties: { type: "string" } },
+        fields: { type: "object", additionalProperties: { type: "string" }, description: "Extra string fields parsed from the Pass entry body. Omitted entirely when the entry has none — clients must treat `fields` as optional, not always-present." },
         note: { type: "string" },
         url: { type: "string" },
       },

@@ -417,6 +417,7 @@ export const defsLate: ToolDef[] = [
         databaseBytes: { type: "number" },
         reason: { type: "string" },
       },
+      required: ["available"],
     },
   },
   {
@@ -710,7 +711,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.limit !== undefined && typeof args.limit !== "number") {
       throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
     }
-    const lblLimit = Math.min(Math.max((args.limit as number) || 50, 1), 200, limits.maxEmailListResults);
+    const lblLimit = Math.min(Math.max(1, (args.limit as number) || 50), 200, limits.maxEmailListResults);
 
     if (args.cursor !== undefined && typeof args.cursor !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'cursor' must be a string.");

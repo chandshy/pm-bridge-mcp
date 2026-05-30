@@ -1934,7 +1934,7 @@ ${buildStyles(cspNonce)}
       return;
     }
     tbody.innerHTML = entries.map(e => {
-      const cls = 'audit-event-' + escHtml(e.event);
+      const cls = ['requested','approved','denied','expired'].includes(e.event) ? 'audit-event-' + e.event : 'audit-event-other';
       return '<tr>' +
         '<td>' + new Date(e.time).toLocaleString() + '</td>' +
         '<td class="' + cls + '">' + escHtml(e.event) + '</td>' +
