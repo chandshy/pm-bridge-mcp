@@ -77,6 +77,53 @@ describe("clientIp — X-Forwarded-For trust model", () => {
   });
 });
 
+describe("XPORT-001 — static bearer rate bucket is keyed per caller IP", () => {
+  let handle: HttpTransportHandle | null = null;
+  afterEach(async () => { if (handle) { await handle.close(); handle = null; } });
+
+  it("does not let one IP's bursts exhaust another IP's bucket", async () => {
+    // The auth limiter is keyed `bearer:static:<ip>`. We drive two distinct
+    // XFF values through the loopback peer — clientIp() trusts XFF on loopback
+    // — and assert each XFF identity gets its own bucket.
+    const port = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(),
+      port,
+      host: "127.0.0.1",
+      bearerToken: "secret",
+      rateLimitPerSecond: 1,
+      rateLimitBurst: 2, // authed cap ≈ 6 per key
+    });
+    const hammer = (xff: string) =>
+      Promise.all(Array.from({ length: 15 }, () =>
+        fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            Authorization: "Bearer secret",
+            "X-Forwarded-For": xff,
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+        }),
+      ));
+    const a = await hammer("203.0.113.10");
+    expect(a.map(r => r.status)).toContain(429);
+    // Caller B's first request must NOT be a 429 — its bucket is independent.
+    const b = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: "Bearer secret",
+        "X-Forwarded-For": "203.0.113.20",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "b", version: "0" } } }),
+    });
+    expect(b.status).not.toBe(429);
+  });
+});
+
 describe("HTTP transport", () => {
   let handle: HttpTransportHandle | null = null;
 
@@ -169,6 +216,21 @@ describe("HTTP transport", () => {
     ).rejects.toThrow(/remoteBearerToken/);
   });
 
+  it("XPORT-015 — never advertises 0.0.0.0 as the OAuth issuer host", async () => {
+    const port = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(),
+      port,
+      host: "0.0.0.0",
+      bearerToken: "",
+      oauthEnabled: true,
+      oauthAdminPassword: "admin-pw",
+    });
+    expect(handle.issuer).toBeDefined();
+    expect(handle.issuer).not.toContain("0.0.0.0");
+    expect(handle.issuer).toContain("127.0.0.1");
+  });
+
   it("dispatches an authed tools/list round-trip through the MCP transport", async () => {
     const port = await freePort();
     handle = await startHttpTransport({
@@ -259,6 +321,20 @@ describe("HTTP transport", () => {
       expect(res.status).toBe(400);
     });
 
+    // XPORT-008: the consent POST now requires a CSRF token issued by the GET
+    // consent page (bound to the client_id). Harvest it for an existing client.
+    async function csrfFor(url: string, clientId: string, redirectUri = "http://localhost:9999/cb"): Promise<string> {
+      const q = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        code_challenge: "x".repeat(43),
+        code_challenge_method: "S256",
+      });
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
+      const html = await res.text();
+      return /name="csrf_token" value="([^"]+)"/.exec(html)?.[1] ?? "";
+    }
+
     it("completes an end-to-end PKCE flow: register → authorize → token → /mcp", async () => {
       const { url } = await startOauth();
       // 1. DCR
@@ -278,10 +354,11 @@ describe("HTTP transport", () => {
       const verifier = rb(32).toString("base64url");
       const challenge = createHash("sha256").update(verifier).digest("base64url");
 
-      // 3. Consent submit (skips the GET HTML page).
+      // 3. Consent submit (harvest the CSRF token from the GET page first).
+      const csrf = await csrfFor(url, client.client_id);
       const consent = await fetch(`${url}/oauth/authorize`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
         body: new URLSearchParams({
           client_id: client.client_id,
           redirect_uri: "http://localhost:9999/cb",
@@ -289,6 +366,7 @@ describe("HTTP transport", () => {
           state: "xyz",
           scope: "mcp:full",
           admin_password: "admin-pw",
+          csrf_token: csrf,
         }).toString(),
         redirect: "manual",
       });
@@ -345,14 +423,16 @@ describe("HTTP transport", () => {
       });
       const client = await reg.json() as { client_id: string };
 
+      const csrf = await csrfFor(url, client.client_id);
       const res = await fetch(`${url}/oauth/authorize`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
         body: new URLSearchParams({
           client_id: client.client_id,
           redirect_uri: "http://localhost:9999/cb",
           code_challenge: "x".repeat(43),
           admin_password: "wrong",
+          csrf_token: csrf,
         }).toString(),
         redirect: "manual",
       });
@@ -370,14 +450,16 @@ describe("HTTP transport", () => {
       const { createHash: h, randomBytes: rb2 } = await import("crypto");
       const verifier = rb2(32).toString("base64url");
       const challenge = h("sha256").update(verifier).digest("base64url");
+      const csrf = await csrfFor(url, client.client_id);
       const consent = await fetch(`${url}/oauth/authorize`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
         body: new URLSearchParams({
           client_id: client.client_id,
           redirect_uri: "http://localhost:9999/cb",
           code_challenge: challenge,
           admin_password: "admin-pw",
+          csrf_token: csrf,
         }).toString(),
         redirect: "manual",
       });
@@ -417,6 +499,151 @@ describe("HTTP transport", () => {
       const html = await res.text();
       expect(html).toContain("Authorize mailpouch");
       expect(html).toContain("Inky");
+    });
+
+    // Helper: register a client and GET the consent page; return the form's
+    // hidden CSRF token (XPORT-008) parsed out of the HTML.
+    async function getConsent(url: string, redirectUri = "http://localhost:9999/cb"): Promise<{ clientId: string; csrf: string; challenge: string; verifier: string }> {
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [redirectUri] }),
+      });
+      const client = await reg.json() as { client_id: string };
+      const { createHash, randomBytes: rb } = await import("crypto");
+      const verifier = rb(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      const q = new URLSearchParams({
+        client_id: client.client_id,
+        redirect_uri: redirectUri,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+      });
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
+      const html = await res.text();
+      const m = /name="csrf_token" value="([^"]+)"/.exec(html);
+      return { clientId: client.client_id, csrf: m?.[1] ?? "", challenge, verifier };
+    }
+
+    it("XPORT-003 — GET consent page sets clickjacking headers + frame-ancestors CSP", async () => {
+      const { url } = await startOauth();
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
+      });
+      const client = await reg.json() as { client_id: string };
+      const q = new URLSearchParams({
+        client_id: client.client_id,
+        redirect_uri: "http://localhost:9999/cb",
+        code_challenge: "x".repeat(43),
+        code_challenge_method: "S256",
+      });
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
+      expect(res.headers.get("x-frame-options")).toBe("DENY");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      // frame-ancestors is only honoured as an HTTP header, not in a <meta> tag.
+      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+      const html = await res.text();
+      expect(html).toContain("frame-ancestors 'none'");
+    });
+
+    it("XPORT-008 — consent POST is rejected without a valid CSRF token", async () => {
+      const { url } = await startOauth();
+      const { clientId, challenge } = await getConsent(url);
+      const res = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          redirect_uri: "http://localhost:9999/cb",
+          code_challenge: challenge,
+          admin_password: "admin-pw",
+          // no csrf_token
+        }).toString(),
+        redirect: "manual",
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("XPORT-008 — consent POST with the GET-issued CSRF token succeeds", async () => {
+      const { url } = await startOauth();
+      const { clientId, csrf, challenge } = await getConsent(url);
+      expect(csrf).toBeTruthy();
+      const res = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
+        body: new URLSearchParams({
+          client_id: clientId,
+          redirect_uri: "http://localhost:9999/cb",
+          code_challenge: challenge,
+          admin_password: "admin-pw",
+          csrf_token: csrf,
+        }).toString(),
+        redirect: "manual",
+      });
+      expect(res.status).toBe(302);
+    });
+
+    it("XPORT-008 — consent POST is rejected when Origin is cross-site", async () => {
+      const { url } = await startOauth();
+      const { clientId, csrf, challenge } = await getConsent(url);
+      const res = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: "http://attacker.local" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          redirect_uri: "http://localhost:9999/cb",
+          code_challenge: challenge,
+          admin_password: "admin-pw",
+          csrf_token: csrf,
+        }).toString(),
+        redirect: "manual",
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("XPORT-007 — consent POST re-validates the code_challenge format", async () => {
+      const { url } = await startOauth();
+      const { clientId, csrf } = await getConsent(url);
+      const res = await fetch(`${url}/oauth/authorize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
+        body: new URLSearchParams({
+          client_id: clientId,
+          redirect_uri: "http://localhost:9999/cb",
+          code_challenge: "", // malformed / empty — GET would have rejected this
+          admin_password: "admin-pw",
+          csrf_token: csrf,
+        }).toString(),
+        redirect: "manual",
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("XPORT-009 — DCR rejects javascript:/data:/file: redirect_uri schemes", async () => {
+      const { url } = await startOauth();
+      for (const bad of ["javascript:alert(1)", "data:text/html,<script>1</script>", "file:///etc/passwd", "ftp://x/cb"]) {
+        const res = await fetch(`${url}/oauth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ redirect_uris: [bad] }),
+        });
+        expect(res.status, `scheme ${bad} should be rejected`).toBe(400);
+        expect((await res.json() as { error: string }).error).toBe("invalid_redirect_uri");
+      }
+    });
+
+    it("XPORT-009 — DCR still accepts loopback http + https + custom native schemes", async () => {
+      const { url } = await startOauth();
+      for (const ok of ["http://localhost:9999/cb", "http://127.0.0.1:5000/cb", "https://app.example.com/cb", "com.example.app:/oauth/callback"]) {
+        const res = await fetch(`${url}/oauth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ redirect_uris: [ok] }),
+        });
+        expect(res.status, `scheme ${ok} should be accepted`).toBe(201);
+      }
     });
 
     it("returns WWW-Authenticate pointing to the resource-metadata doc when OAuth is on", async () => {
@@ -503,14 +730,16 @@ describe("HTTP transport", () => {
       const { createHash, randomBytes: rb } = await import("crypto");
       const verifier = rb(32).toString("base64url");
       const challenge = createHash("sha256").update(verifier).digest("base64url");
+      const csrf = await csrfFor(url, client.client_id, "http://localhost:9998/cb");
       const consent = await fetch(`${url}/oauth/authorize`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
         body: new URLSearchParams({
           client_id: client.client_id,
           redirect_uri: "http://localhost:9998/cb",
           code_challenge: challenge,
           admin_password: "admin-pw",
+          csrf_token: csrf,
         }).toString(),
         redirect: "manual",
       });
@@ -623,15 +852,17 @@ describe("HTTP transport", () => {
       const verifier = rb(32).toString("base64url");
       const challenge = createHash("sha256").update(verifier).digest("base64url");
       // Authorize with a foreign resource URI.
+      const csrf = await csrfFor(baseUrl, client.client_id, "http://localhost:9998/cb");
       const consent = await fetch(`${baseUrl}/oauth/authorize`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: baseUrl },
         body: new URLSearchParams({
           client_id: client.client_id,
           redirect_uri: "http://localhost:9998/cb",
           code_challenge: challenge,
           resource: "https://other.example.com/mcp",
           admin_password: "admin-pw",
+          csrf_token: csrf,
         }).toString(),
         redirect: "manual",
       });
