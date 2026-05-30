@@ -385,6 +385,7 @@ Enable **Debug logging** in Settings → Setup, then check Settings → Logs tab
 ```
 ~/.mailpouch.json         main config
 ~/.mailpouch.audit.jsonl  escalation audit log
+~/.mailpouch-agent-audit.jsonl  per-agent gated tool-call audit log
 ~/.mailpouch-fts.db       FTS index (SQLite)
 ~/.mailpouch-pass-audit.jsonl  Pass access audit log
 ```

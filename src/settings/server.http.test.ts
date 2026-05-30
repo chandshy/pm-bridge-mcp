@@ -108,11 +108,14 @@ describe("UI-011: approve endpoint sanitizes conditions/toolOverrides", () => {
     const { port, close } = await listen(srv);
     try {
       const token = await csrfFrom(port);
-      const payload = JSON.stringify({
-        preset: "read_only",
-        toolOverrides: { get_emails: true, bogus_tool: true, __proto__: { isAdmin: true } },
-        conditions: { folderAllowlist: ["INBOX", 123], evilKey: "x", __proto__: { polluted: true } },
-      });
+      // Build the JSON by hand: `{ __proto__: ... }` in an object literal sets the
+      // prototype (and JSON.stringify omits it), so it would never reach the wire.
+      // A raw JSON string carries a literal enumerable "__proto__" key — what an
+      // attacker actually sends, and what JSON.parse turns into an own property
+      // the sanitizer must strip.
+      const payload = '{"preset":"read_only",'
+        + '"toolOverrides":{"get_emails":true,"bogus_tool":true,"__proto__":{"isAdmin":true}},'
+        + '"conditions":{"folderAllowlist":["INBOX",123],"evilKey":"x","__proto__":{"polluted":true}}}';
       const res = await request(port, "POST", "/api/agents/client_abc/approve", {
         headers: { "x-csrf-token": token, origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
         body: payload,
