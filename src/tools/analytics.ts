@@ -6,6 +6,7 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { ContactSortBy } from "../services/analytics-service.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import { clampOptionalInt } from "../utils/helpers.js";
 
 export const defs: ToolDef[] = [
   {
@@ -227,7 +228,10 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, `'sortBy' must be one of: ${VALID_SORT.join(", ")}.`);
     }
     await getAnalyticsEmails();
-    const contactLimit = Math.min((args.limit as number) || 100, limits.maxEmailListResults);
+    // Clamp to [1, maxEmailListResults] with a finite-integer floor: a truthy
+    // negative (e.g. -50) previously slipped past `|| 100` into Math.min and
+    // returned a negative limit (TOOL-003).
+    const contactLimit = clampOptionalInt(args.limit, 100, 1, limits.maxEmailListResults);
     const sortBy = (args.sortBy as ContactSortBy | undefined) ?? "recent";
     const contacts = analyticsService.getContacts(contactLimit, sortBy);
     return ok({ contacts });
@@ -239,7 +243,11 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'days' must be a number.");
     }
     await getAnalyticsEmails();
-    const trends = analyticsService.getVolumeTrends(args.days as number | undefined);
+    // Clamp days to [1, 365]; -10/0/NaN/Infinity previously forwarded raw and
+    // the service's own `Math.trunc(days) || 30` fallback only caught 0/NaN,
+    // not negatives or Infinity (TOOL-004).
+    const days = args.days === undefined ? undefined : clampOptionalInt(args.days, 30, 1, 365);
+    const trends = analyticsService.getVolumeTrends(days);
     return ok({ trends });
   },
 };

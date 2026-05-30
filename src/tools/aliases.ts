@@ -5,6 +5,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import { clampOptionalInt, requireNonEmptyString } from "../utils/helpers.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -170,9 +171,10 @@ export const handlers: Record<string, ToolHandler> = {
     if (!simpleloginService.isConfigured()) {
       throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
     }
-    const pageSize = typeof args.pageSize === "number"
-      ? Math.min(Math.max(1, args.pageSize), 1000)
-      : 200;
+    // clampOptionalInt rejects NaN/Infinity (which passed `typeof === "number"`
+    // and survived Math.max(1, NaN) as NaN into listAliases' caller-side
+    // pagination cap, looping unbounded) — TOOL-006.
+    const pageSize = clampOptionalInt(args.pageSize, 200, 1, 1000);
     const aliases = await simpleloginService.listAliases(pageSize);
     return ok({ aliases });
   },
@@ -194,12 +196,13 @@ export const handlers: Record<string, ToolHandler> = {
     if (!simpleloginService.isConfigured()) {
       throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
     }
-    if (typeof args.aliasPrefix !== "string" || typeof args.signedSuffix !== "string") {
-      throw new McpError(ErrorCode.InvalidParams, "aliasPrefix and signedSuffix are required.");
-    }
+    // Require non-empty after trim: "" passed the type check and reached
+    // SimpleLogin, which answered with an opaque 4xx (TOOL-007).
+    const aliasPrefix  = requireNonEmptyString(args.aliasPrefix, "aliasPrefix");
+    const signedSuffix = requireNonEmptyString(args.signedSuffix, "signedSuffix");
     const alias = await simpleloginService.createCustomAlias({
-      aliasPrefix: args.aliasPrefix,
-      signedSuffix: args.signedSuffix,
+      aliasPrefix,
+      signedSuffix,
       mailboxIds: Array.isArray(args.mailboxIds) ? (args.mailboxIds as number[]) : undefined,
       note: typeof args.note === "string" ? args.note : undefined,
       name: typeof args.name === "string" ? args.name : undefined,
@@ -240,9 +243,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (typeof args.aliasId !== "number") {
       throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
     }
-    const pageSize = typeof args.pageSize === "number"
-      ? Math.min(Math.max(1, args.pageSize), 1000)
-      : 50;
+    const pageSize = clampOptionalInt(args.pageSize, 50, 1, 1000);
     const activities = await simpleloginService.getAliasActivities(args.aliasId, pageSize);
     return ok({ activities });
   },

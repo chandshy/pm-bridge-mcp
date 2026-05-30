@@ -20,6 +20,7 @@ import type { PermissionPreset } from "../config/schema.js";
 import { isValidChallengeId, sanitizeText, isValidEscalationTarget } from "../settings/security.js";
 import type { ProtonMailConfig } from "../types/index.js";
 import { logger } from "../utils/logger.js";
+import { requireNonEmptyString } from "../utils/helpers.js";
 import type { ToolDef, ToolResult } from "./types.js";
 
 void logger;
@@ -120,7 +121,10 @@ export const handlers: Record<string, EscalationHandler> = {
   request_permission_escalation: async (ctx) => {
     const { args, config } = ctx;
     const targetPreset = args.target_preset;
-    const reason       = sanitizeText((args.reason as string | undefined) ?? "No reason provided", 500);
+    // `reason` is declared required in inputSchema; enforce it at runtime so an
+    // omitted/blank reason can't land a real escalation logged as "No reason
+    // provided" (TOOL-002).
+    const reason       = sanitizeText(requireNonEmptyString(args.reason, "reason"), 500);
     if (!isValidEscalationTarget(targetPreset)) {
       throw new McpError(ErrorCode.InvalidParams, "Invalid target_preset. Must be one of: send_only, supervised, full");
     }
