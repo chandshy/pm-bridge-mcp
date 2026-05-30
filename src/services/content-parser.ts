@@ -247,21 +247,20 @@ export function parseIcs(text: string): Meeting | null {
   // `BEGIN:VEVENT;X-MICROSOFT-CDO-BUSYSTATUS=BUSY` from some legacy producers.
   // Match on the property name/value rather than strict equality so those
   // aren't silently skipped (PARSE-011, audit-2026-05-28).
-  const isBoundary = (line: string, value: string): boolean => {
+  const isBoundary = (line: string, keyword: "BEGIN" | "END", value: string): boolean => {
     const prop = splitProperty(line);
-    return prop !== null && prop.name === "BEGIN" &&
+    return prop !== null && prop.name === keyword &&
       prop.value.trim().toUpperCase().split(";")[0] === value;
   };
   let inEvent = false;
   let eventLines: string[] = [];
   for (const line of lines) {
-    const upper = line.trim().toUpperCase();
-    if (isBoundary(line, "VEVENT")) {
+    if (isBoundary(line, "BEGIN", "VEVENT")) {
       inEvent = true;
       eventLines = [];
       continue;
     }
-    if (upper === "END:VEVENT" || upper.startsWith("END:VEVENT;")) {
+    if (isBoundary(line, "END", "VEVENT")) {
       if (inEvent) break;
     }
     if (inEvent) eventLines.push(line);
