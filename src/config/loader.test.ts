@@ -14,6 +14,12 @@ vi.mock("fs", async (importOriginal) => {
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
     statSync: vi.fn(),   // returns undefined by default → mtime check throws → cache invalidated
+    // CRED-008 config-lock primitives: no-op in unit tests so the lock around
+    // saveConfig doesn't touch the real home dir. Concurrency behavior is
+    // covered by config-lock.test.ts against a real filesystem.
+    openSync: vi.fn(() => 3),
+    closeSync: vi.fn(),
+    unlinkSync: vi.fn(),
     appendFile: vi.fn((_path: string, _data: string, _enc: string, cb: () => void) => cb()),
   };
 });

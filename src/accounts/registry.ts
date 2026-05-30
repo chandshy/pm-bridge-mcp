@@ -11,7 +11,7 @@
 
 import { randomBytes } from "crypto";
 import type { ServerConfig } from "../config/schema.js";
-import { loadConfig, saveConfig, defaultConfig } from "../config/loader.js";
+import { loadConfig, saveConfig, defaultConfig, withConfigWriteLockAsync } from "../config/loader.js";
 import type { AccountSpec, AccountRegistry, AccountStatus } from "./types.js";
 import {
   loadAccountCredentials,
@@ -132,6 +132,11 @@ export async function readRegistryWithSecrets(): Promise<AccountRegistry> {
  * sites that used to fire-and-forget should `await` it.
  */
 export async function writeRegistry(reg: AccountRegistry): Promise<void> {
+  // CRED-008: hold the exclusive config lock across the whole read-modify-write
+  // (loadConfig → merge → saveConfig) so a racing settings-UI POST or a second
+  // writeRegistry cannot clobber this write. The inner saveConfig reuses the
+  // held lock reentrantly.
+  await withConfigWriteLockAsync(async () => {
   const cfg = loadConfig() ?? defaultConfig();
 
   // Clone the specs so we can blank secrets without mutating the
@@ -194,6 +199,7 @@ export async function writeRegistry(reg: AccountRegistry): Promise<void> {
     };
   }
   saveConfig(cfg);
+  });
 }
 
 export function listStatuses(): AccountStatus[] {

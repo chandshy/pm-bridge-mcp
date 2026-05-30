@@ -22,6 +22,20 @@ const MIN_LEAD_TIME_MS = 60 * 1000;
 const POLL_INTERVAL_MS = 60 * 1000;
 /** Number of send attempts before marking an item as permanently failed. */
 const MAX_RETRIES = 3;
+/** Base unit for per-item exponential backoff between retry attempts. */
+const RETRY_BACKOFF_BASE_MS = 60 * 1000;
+/** Ceiling on a single backoff delay so a high retryCount can't push it absurdly far out. */
+const RETRY_BACKOFF_MAX_MS = 30 * 60 * 1000;
+
+/**
+ * Exponential per-item backoff: attempt N waits base * 2^(N-1), capped.
+ * SMTP-003 — without this, a transient Bridge outage causes every due item to
+ * be re-attempted on every 60 s poll tick (a tight blast against a down peer).
+ */
+function backoffMs(retryCount: number): number {
+  const exp = RETRY_BACKOFF_BASE_MS * Math.pow(2, Math.max(0, retryCount - 1));
+  return Math.min(exp, RETRY_BACKOFF_MAX_MS);
+}
 /** Maximum age (ms) for completed/failed/cancelled records kept in history. */
 const MAX_HISTORY_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 /** Hard cap on non-pending records retained in history (safety valve). */
@@ -194,7 +208,12 @@ export class SchedulerService {
 
     const now = new Date();
     const due = this.items.filter(
-      i => i.status === "pending" && new Date(i.scheduledAt) <= now
+      i =>
+        i.status === "pending" &&
+        new Date(i.scheduledAt) <= now &&
+        // SMTP-003: honor per-item backoff — a failed attempt sets nextAttemptAt
+        // into the future; skip until that window has elapsed.
+        (!i.nextAttemptAt || new Date(i.nextAttemptAt) <= now)
     );
 
     if (due.length === 0) {
@@ -223,18 +242,25 @@ export class SchedulerService {
           }
           if (result.success) {
             item.status = "sent";
+            delete item.nextAttemptAt;
             logger.info(`Scheduled email sent`, "Scheduler", { id: item.id, messageId: result.messageId });
           } else {
             item.retryCount = (item.retryCount ?? 0) + 1;
             item.error = result.error;
             if ((item.retryCount ?? 0) >= MAX_RETRIES) {
               item.status = "failed";
+              delete item.nextAttemptAt;
               logger.warn(`Scheduled email permanently failed after ${MAX_RETRIES} attempts`, "Scheduler", { id: item.id, error: result.error });
             } else {
               item.status = "pending";
+              item.nextAttemptAt = new Date(Date.now() + backoffMs(item.retryCount)).toISOString();
               logger.warn(`Scheduled email send failed (attempt ${item.retryCount}/${MAX_RETRIES}), will retry`, "Scheduler", { id: item.id, error: result.error });
             }
           }
+          // SMTP-004: persist after each item's terminal/retry status flip so a
+          // crash mid-loop cannot leave a "sent" item on disk as "pending"
+          // (which would re-send a non-idempotent message on restart).
+          this.persist();
         } catch (err: unknown) {
           // Same post-await guard for the throw path.
           if (item.status !== "sending") {
@@ -247,11 +273,15 @@ export class SchedulerService {
           item.error = errMsg;
           if ((item.retryCount ?? 0) >= MAX_RETRIES) {
             item.status = "failed";
+            delete item.nextAttemptAt;
             logger.error(`Scheduled email permanently failed after ${MAX_RETRIES} attempts`, "Scheduler", { id: item.id, error: errMsg });
           } else {
             item.status = "pending";
+            item.nextAttemptAt = new Date(Date.now() + backoffMs(item.retryCount)).toISOString();
             logger.warn(`Scheduled email threw (attempt ${item.retryCount}/${MAX_RETRIES}), will retry`, "Scheduler", { id: item.id, error: errMsg });
           }
+          // SMTP-004: persist after each item's status flip (throw path too).
+          this.persist();
         }
       }
 

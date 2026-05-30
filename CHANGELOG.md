@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.55] — 2026-05-30
+
+### Fixed
+Persistence-atomicity batch from the 2026-05-28 audit (SMTP-003/004/005/006/007, CRED-008, UI-005). Scope: `scheduler.ts`, `reminder-service.ts`, `config/loader.ts`, `accounts/registry.ts`, `index.ts`.
+
+- **Scheduler retries now back off per item** (SMTP-003). A failed send sets `nextAttemptAt = now + exp_backoff(retryCount)` (60s → 120s → … capped at 30m); `processDue()` skips items whose `nextAttemptAt` is still in the future, so a brief Bridge outage no longer re-burns every pending item on every 60s poll tick.
+- **Scheduler persists after each item's status flip** (SMTP-004). `persist()` now runs after every per-item terminal/retry transition, not only at the end of the batch loop, so a crash mid-loop cannot leave an already-sent item recorded as `pending` and re-send it (non-idempotent SMTP) on restart.
+- **Reminder writes use a same-filesystem temp file** (SMTP-005). `persist()` builds the temp path as `${this.path}.<rand>.tmp` (sibling of the store) instead of `tmpdir()`, so `rename(2)` stays atomic and no longer fails `EXDEV` on containerised / NFS-home installs where `$HOME` and `/tmp` are on different mounts.
+- **Reminder persist failures roll back in-memory state** (SMTP-006). Every mutating method snapshots `reminders` before mutating and routes the write through `persistOrRollback()`, which on a write failure restores the snapshot, logs at error level, and re-throws — so a failed write can never later be flushed as a half-baked mutation.
+- **`scanDue()` commits the fired transition before returning** (SMTP-007, partially-addressed). The `pending → fired` flip is now persisted (and rolled back atomically on failure) before the due list is returned, closing the partial-write window. The at-least-once delivery limitation (a dropped MCP response after a successful persist) remains by design pending a dedicated acknowledge tool — see the audit note cross-referencing SMTP-006.
+- **Config read-modify-write is serialized with an exclusive file lock** (CRED-008). `saveConfig` and `writeRegistry` now take an `O_EXCL` lock on `${config}.lock` (with stale-lock reclamation, reentrancy, and always-release-in-finally) plus an in-process async mutex, so racing settings-UI POSTs / registry writes can no longer clobber each other. No new dependency.
+- **Tray "Open Settings" item is gated on a live settings URL** (UI-005). Verified already in place: the tray entry is only built when `_settingsEnabled && _settingsUrl`, so a failed UI bind no longer shows a dead menu item.
+
 ## [3.0.54] — 2026-05-29
 
 ### Fixed
