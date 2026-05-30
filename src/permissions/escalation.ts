@@ -54,6 +54,7 @@ import { join } from "path";
 import { randomBytes } from "crypto";
 import { buildPermissions } from "../config/loader.js";
 import { ALL_TOOLS, type PermissionPreset, type ToolName } from "../config/schema.js";
+import { withFileLock } from "../utils/file-lock.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -306,6 +307,10 @@ export function requestEscalation(
    */
   options?: { clientId?: string; clientName?: string },
 ): RequestResult {
+  // PERM-006: serialize the load→check→save cycle across processes so two
+  // concurrent requests can't both pass the MAX_PENDING / rate-limit checks
+  // and double-append (PERM-014 is the same race for parallel callers).
+  return withFileLock(getPendingFilePath(), (): RequestResult => {
   const data = loadPendingFile();
   if (evictExpired(data)) savePendingFile(data);
 
@@ -397,20 +402,25 @@ export function requestEscalation(
   });
 
   return { ok: true, id, expiresAt: expiresAt.toISOString(), newTools, unthrottledTools };
+  }); // end withFileLock
 }
 
 /** Read the current status of an escalation without modifying it. */
 export function getEscalationStatus(id: string): EscalationRecord | null {
-  const data = loadPendingFile();
-  if (evictExpired(data)) savePendingFile(data);
-  return data.escalations.find(e => e.id === id) ?? null;
+  return withFileLock(getPendingFilePath(), (): EscalationRecord | null => {
+    const data = loadPendingFile();
+    if (evictExpired(data)) savePendingFile(data);
+    return data.escalations.find(e => e.id === id) ?? null;
+  });
 }
 
 /** Return all currently-pending escalations (for display in the settings UI). */
 export function getPendingEscalations(): EscalationRecord[] {
+  return withFileLock(getPendingFilePath(), (): EscalationRecord[] => {
   const data = loadPendingFile();
   if (evictExpired(data)) savePendingFile(data);
   return data.escalations.filter(e => e.status === "pending");
+  });
 }
 
 export type ApproveResult =
@@ -426,6 +436,9 @@ export function approveEscalation(
   id: string,
   via: "browser_ui" | "terminal_tui",
 ): ApproveResult {
+  // PERM-006: lock the load→mutate→save cycle so a concurrent expiry sweep or
+  // a second approval from the other server process can't clobber this write.
+  return withFileLock(getPendingFilePath(), (): ApproveResult => {
   const data = loadPendingFile();
   if (evictExpired(data)) savePendingFile(data);
 
@@ -451,6 +464,7 @@ export function approveEscalation(
   });
 
   return { ok: true, targetPreset: e.targetPreset };
+  }); // end withFileLock
 }
 
 /** Mark an escalation as denied. */
@@ -458,6 +472,8 @@ export function denyEscalation(
   id: string,
   via: "browser_ui" | "terminal_tui",
 ): { ok: true } | { ok: false; error: string } {
+  // PERM-006: serialize with the other writers (request/approve/expiry sweep).
+  return withFileLock(getPendingFilePath(), (): { ok: true } | { ok: false; error: string } => {
   const data = loadPendingFile();
   if (evictExpired(data)) savePendingFile(data);
 
@@ -480,6 +496,7 @@ export function denyEscalation(
   });
 
   return { ok: true };
+  }); // end withFileLock
 }
 
 /** Read the audit log (most recent entries first).

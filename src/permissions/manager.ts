@@ -65,9 +65,16 @@ export class PermissionManager {
     const canonical = canonicalToolName(tool) as ToolName;
     const perm = config.permissions?.tools?.[canonical] ?? config.permissions?.tools?.[tool];
     if (!perm) {
-      resultTags.allowed = true;
-      resultTags.reason = '';
-      return { allowed: true };
+      // PERM-005: default-DENY when the tool name resolves to no permission
+      // entry. In production the loader materializes every ALL_TOOLS key, so
+      // this only fires for an unregistered/arbitrary name reaching the gate
+      // (a new handler added to the registry but not to ALL_TOOLS, or a raw
+      // `request.params.name` that names nothing). Failing open here would
+      // let such a tool execute under any preset.
+      const reason = `'${canonical}' is not a registered tool; denied by default.`;
+      resultTags.allowed = false;
+      resultTags.reason = reason;
+      return { allowed: false, reason };
     }
 
     if (!perm.enabled) {

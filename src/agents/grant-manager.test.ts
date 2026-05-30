@@ -154,4 +154,90 @@ describe("GrantManager.check", () => {
     const r = mgr.check({ clientId: "pmc_1", tool: "get_connection_status", globalPreset: "full" });
     expect(r.allowed).toBe(true);
   });
+
+  // ── PERM-011: folder allowlist bypass via email-ID-scoped mutators ──────────
+  it("enforces folderAllowlist against an email-ID-scoped tool's sourceFolder arg", () => {
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({
+      clientId: "pmc_1",
+      preset: "full",
+      conditions: { folderAllowlist: ["INBOX"] },
+    });
+    // delete_email targeting a UID in Archive must be blocked when the grant
+    // is pinned to INBOX — the folder is carried by `sourceFolder`.
+    expect(
+      mgr.check({
+        clientId: "pmc_1", tool: "delete_email", globalPreset: "full",
+        args: { emailId: "42", sourceFolder: "Archive" },
+      }).allowed,
+    ).toBe(false);
+    // Same tool against an allowed folder still passes.
+    expect(
+      mgr.check({
+        clientId: "pmc_1", tool: "delete_email", globalPreset: "full",
+        args: { emailId: "42", sourceFolder: "INBOX" },
+      }).allowed,
+    ).toBe(true);
+  });
+
+  it("fails closed for an email-ID-scoped tool with no sourceFolder when allowlisted", () => {
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({
+      clientId: "pmc_1",
+      preset: "full",
+      conditions: { folderAllowlist: ["INBOX"] },
+    });
+    const r = mgr.check({
+      clientId: "pmc_1", tool: "delete_email", globalPreset: "full",
+      args: { emailId: "42" },
+    });
+    expect(r.allowed).toBe(false);
+  });
+
+  it("leaves get_thread/download_attachment folder-agnostic (gating them here would be false enforcement)", () => {
+    // PERM-011 residual: their services don't honor a folder constraint
+    // (get_thread assembles INBOX+Sent; download_attachment passes no folder),
+    // so they are deliberately NOT gated at this layer — gating would be theatre
+    // and download_attachment would fail-closed for every restricted grant.
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({ clientId: "pmc_1", preset: "full", conditions: { folderAllowlist: ["INBOX"] } });
+    for (const tool of ["get_thread", "download_attachment"]) {
+      expect(
+        mgr.check({ clientId: "pmc_1", tool, globalPreset: "full", args: { emailId: "42" } }).allowed,
+      ).toBe(true);
+    }
+  });
+
+  // ── PERM-013: custom preset must not widen via intersection ─────────────────
+  it("does not let a custom grant preset inherit another preset's enabled map", () => {
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    // grant preset = custom, with delete_email explicitly disabled. The global
+    // preset (supervised) DOES allow delete_email. The old rank table treated
+    // custom == full, so intersectPresets returned "supervised" and the gate
+    // consulted supervised's map — re-enabling the tool the user disabled.
+    store.approve({
+      clientId: "pmc_1",
+      preset: "custom",
+      toolOverrides: { delete_email: false },
+    });
+    const r = mgr.check({ clientId: "pmc_1", tool: "delete_email", globalPreset: "supervised" });
+    expect(r.allowed).toBe(false);
+  });
+
+  it("a custom grant only allows tools it explicitly overrides to true", () => {
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({
+      clientId: "pmc_1",
+      preset: "custom",
+      toolOverrides: { get_emails: true },
+    });
+    // Explicitly enabled, and within the global ceiling.
+    expect(
+      mgr.check({ clientId: "pmc_1", tool: "get_emails", globalPreset: "full" }).allowed,
+    ).toBe(true);
+    // Not overridden → default-deny under custom (no preset map to fall back on).
+    expect(
+      mgr.check({ clientId: "pmc_1", tool: "send_email", globalPreset: "full" }).allowed,
+    ).toBe(false);
+  });
 });

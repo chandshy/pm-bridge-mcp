@@ -495,7 +495,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const escalationCaller = earlyCaller && !earlyCaller.staticBearer
       ? { clientId: earlyCaller.clientId, clientName: earlyCaller.clientName }
       : { clientId: "stdio", clientName: undefined };
-    return _escalationHandlers[name]({ args, config, caller: escalationCaller });
+    // PERM-001: escalation meta-tools bypass the grant/permission/destructive
+    // gates by design (they can never GRANT access), but they MUST still leave
+    // a per-agent audit trail. Previously these calls were invisible in
+    // ~/.mailpouch-agent-audit.jsonl, so a revoked agent could spam escalation
+    // requests with zero per-agent attribution. Write a row around the call.
+    const escStartedAt = Date.now();
+    try {
+      const res = await _escalationHandlers[name]({ args, config, caller: escalationCaller });
+      if (earlyCaller && !earlyCaller.staticBearer) {
+        agentAudit.write({
+          ts: new Date(escStartedAt).toISOString(),
+          clientId: earlyCaller.clientId,
+          clientName: earlyCaller.clientName,
+          tool: name,
+          argHash: hashArgs(args),
+          ok: res.isError !== true,
+          durMs: Date.now() - escStartedAt,
+          ...(res.isError === true ? { blockedReason: "escalation request returned an error" } : {}),
+          ip: earlyCaller.ip,
+        });
+      }
+      return res;
+    } catch (err: unknown) {
+      if (earlyCaller && !earlyCaller.staticBearer) {
+        agentAudit.write({
+          ts: new Date(escStartedAt).toISOString(),
+          clientId: earlyCaller.clientId,
+          clientName: earlyCaller.clientName,
+          tool: name,
+          argHash: hashArgs(args),
+          ok: false,
+          durMs: Date.now() - escStartedAt,
+          blockedReason: safeErrorMessage(err),
+          ip: earlyCaller.ip,
+        });
+      }
+      throw err;
+    }
   }
 
   // ── Per-tool account routing ─────────────────────────────────────────────
@@ -529,6 +566,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const callStartedAt = Date.now();
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
+  // PERM-007: snapshot the config ONCE for the whole gate chain. The grant
+  // gate's global-preset read and the destructive-confirm gate's
+  // requireDestructiveConfirm read previously each called loadConfig()
+  // independently; a settings save (or an approved escalation) landing
+  // between them produced a TOCTOU window where the two gates judged the
+  // same call against different snapshots. One snapshot closes that gap.
+  const configSnapshot = loadConfig() ?? defaultConfig();
   if (caller && !caller.staticBearer) {
     const callerGrant = agentGrants.get(caller.clientId);
     const boundAccountId = callerGrant?.conditions?.accountId;
@@ -551,7 +595,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    const globalPreset = (loadConfig() ?? defaultConfig()).permissions.preset;
+    const globalPreset = configSnapshot.permissions.preset;
     const grantResult = grantManager.check({
       clientId: caller.clientId,
       tool: name,
@@ -632,7 +676,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has(canonicalName)
     && DESTRUCTIVE_DESTINATIONS.has(moveTargetRaw.trim().toLowerCase());
   const isDestructive = DESTRUCTIVE_TOOLS.has(canonicalName) || moveTargetIsDestructive;
-  if (isDestructive && (loadConfig() ?? defaultConfig()).requireDestructiveConfirm !== false) {
+  if (isDestructive && configSnapshot.requireDestructiveConfirm !== false) {
     if (args.confirmed !== true) {
       const preview = describeDestructivePreview(name, args);
       const caps = server.getClientCapabilities();
