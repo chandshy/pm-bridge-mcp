@@ -79,7 +79,19 @@ export class AgentAuditLog {
       writeFileSync(`${this.path}.1.gz`, gzipSync(raw), { encoding: undefined, mode: 0o600 });
       unlinkSync(staged);
     } catch (err) {
-      logger.warn(`AgentAuditLog: rotation compress failed; staged copy left at ${staged}`, "AgentAuditLog", err);
+      // Compression failed after the live file was renamed away. Don't leave the
+      // rows orphaned in `${path}.rotating` — the NEXT rotation's rename would
+      // clobber them. If no new live file exists yet (the common case), move the
+      // staged copy back so appends continue it; otherwise park it under a unique
+      // name for manual recovery rather than losing it.
+      try {
+        if (!existsSync(this.path)) {
+          renameSync(staged, this.path);
+        } else {
+          renameSync(staged, `${this.path}.recover-${this.now()}`);
+        }
+      } catch { /* best-effort recovery */ }
+      logger.warn(`AgentAuditLog: rotation compress failed; staged copy recovered`, "AgentAuditLog", err);
     }
     // Evict generations beyond KEEP_GENERATIONS.
     for (let i = KEEP_GENERATIONS + 1; i < KEEP_GENERATIONS + 5; i++) {
