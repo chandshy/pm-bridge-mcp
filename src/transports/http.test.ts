@@ -542,6 +542,8 @@ describe("HTTP transport", () => {
       const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
       expect(res.headers.get("x-frame-options")).toBe("DENY");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      // frame-ancestors is only honoured as an HTTP header, not in a <meta> tag.
+      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
       const html = await res.text();
       expect(html).toContain("frame-ancestors 'none'");
     });

@@ -365,10 +365,14 @@ export class OAuthHandlers {
     res.statusCode = 200;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
-    // XPORT-003: clickjacking protection on the consent screen. The CSP gets a
-    // `frame-ancestors 'none'` (set inside consentPage), and we mirror the
-    // settings-server header set so framing/sniffing are blocked even on
-    // browsers that don't honour the meta CSP.
+    // XPORT-003: clickjacking protection on the consent screen. `frame-ancestors`
+    // is honoured only when CSP arrives as an HTTP header (it is ignored in a
+    // `<meta http-equiv>` tag), so we send the policy as a real response header
+    // here; X-Frame-Options: DENY covers legacy browsers that predate CSP2.
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    );
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
