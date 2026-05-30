@@ -132,4 +132,20 @@ describe("AgentGrantStore", () => {
     const s = new AgentGrantStore(path);
     expect(s.list()).toEqual([]);
   });
+
+  // PERM-006: two store instances over the same file model the MCP server and
+  // the settings server. A grant created by one must not be dropped when the
+  // other writes — reloadMerge under the lock recovers it before persist.
+  it("does not drop a grant another process created when this process mutates", () => {
+    const a = new AgentGrantStore(path); // e.g. the MCP server
+    const b = new AgentGrantStore(path); // e.g. the settings server
+    a.createPending({ clientId: "pmc_a", clientName: "A" });
+    // b knows nothing about pmc_a yet (loaded before a's write). When b
+    // creates its own grant, the lost-update bug would clobber pmc_a.
+    b.createPending({ clientId: "pmc_b", clientName: "B" });
+    // A fresh reader sees BOTH grants on disk.
+    const reader = new AgentGrantStore(path);
+    expect(reader.get("pmc_a")).toBeDefined();
+    expect(reader.get("pmc_b")).toBeDefined();
+  });
 });

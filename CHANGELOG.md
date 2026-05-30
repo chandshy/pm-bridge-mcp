@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.57] — 2026-05-30
+
+### Fixed
+Permission/grant correctness batch from the 2026-05-28 audit (PERM findings 001, 005, 006, 007, 008, 009, 011, 013). Scope: `src/permissions/manager.ts`, `src/permissions/escalation.ts`, `src/agents/grant-manager.ts`, `src/agents/grant-store.ts`, `src/transports/http.ts`, `src/settings/shell.ts`, plus a new `src/utils/file-lock.ts`.
+
+- **Escalation meta-tools now write a per-agent audit row** (PERM-001). `request_permission_escalation` / `check_escalation_status` bypass the grant/permission/destructive gates by design (they can never grant access), but they were also invisible in `~/.mailpouch-agent-audit.jsonl`. The dispatcher now writes an audit row around the escalation handler for OAuth callers, so a revoked agent spamming escalations leaves an attributable trail.
+- **An unmapped tool name now defaults to DENY, not ALLOW** (PERM-005). `PermissionManager.check` returned `{ allowed: true }` when the tool resolved to no permission entry; a handler added to the registry but not to `ALL_TOOLS` (or an arbitrary `request.params.name`) ran ungated. Undefined `perm` now denies with a clear reason.
+- **Grant store and escalation pending-file mutations are cross-process locked** (PERM-006). New minimal advisory lock (`withFileLock`, a sibling `${target}.lock` dir with stale-break, no new dependency) serializes the load→mutate→atomic-rename cycles in `escalation.ts` and `grant-store.ts`. The grant store also reload-merges grants another process created so a whole-file rewrite no longer drops them.
+- **The gate chain reads a single config snapshot** (PERM-007). The agent-grant gate (global preset) and the destructive-confirm gate each called `loadConfig()` independently; a settings save landing between them produced a TOCTOU window where the two gates judged the same call against different snapshots. Both now use one snapshot taken at the top of the handler.
+- **Static bearer is rejected when OAuth is enabled** (PERM-008). A static bearer authenticates as one shared, fully-trusted identity that bypasses the per-agent grant store and audit log. When `oauthEnabled` is true the static-bearer path is now refused; OAuth deployments must use per-client DCR tokens that are independently gated, audited, and revocable.
+- **Settings-UI grant cards use the strict 5-replacement HTML escaper** (PERM-009). The grant/agent list renderers used a weak `esc()` (only `& < "`); attacker-controlled `clientName` could inject `>`/`'`. The page-level `esc()` now escapes all five (`& < > " '`), matching `escHtml`. (DCR-time `sanitizeDcrClientName` from v3.0.50 #145 already strips control chars + caps length; this closes the render side.)
+- **Folder allowlist is enforced on email-ID-scoped mutators** (PERM-011). `delete_email`, `get_email_by_id`, `get_thread`, `mark_email_read`, `star_email`, `download_attachment` were treated as folder-agnostic, so a grant pinned to `INBOX` accepted `delete_email { sourceFolder: "Archive" }`. They are dropped from `FOLDER_AGNOSTIC_TOOLS` and `extractFolderArg` now reads `sourceFolder`/`source_folder`; a call that omits the folder fails closed.
+- **A `custom` grant preset no longer ranks equal to `full`** (PERM-013). `intersectPresets` ranked `custom == full`, so intersecting a `custom` grant with a lower global preset returned the global preset's enabled-map and silently re-enabled tools the user disabled. A `custom` grant is now governed solely by its explicit `toolOverrides` (default-deny for un-overridden tools), bounded by the global ceiling.
+
 ## [3.0.56] — 2026-05-30
 
 ### Security — OAuth/transport hardening (audit 2026-05-28, batch M4)

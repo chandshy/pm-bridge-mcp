@@ -87,6 +87,18 @@ export class GrantManager {
       return this.checkFolderCondition(grant, ctx, grant.preset);
     }
 
+    // PERM-013: a "custom" grant has no meaningful preset map of its own —
+    // buildPermissions("custom") enables every tool, identical to "full". The
+    // user's intent for a custom grant lives entirely in `toolOverrides`,
+    // which were already applied above. With no override the tool is NOT in
+    // the custom surface, so it must default-deny here. The old rank table
+    // ranked custom == full (3); intersecting custom with a lower global
+    // preset returned the GLOBAL preset and then consulted its enabled-map,
+    // silently re-enabling tools the user had disabled in the custom set.
+    if (grant.preset === "custom") {
+      return { allowed: false, reason: `Tool '${ctx.tool}' is not in the custom grant surface for '${grant.clientName}' (custom grants allow only explicitly-overridden tools).` };
+    }
+
     // No override — apply the intersection of grant preset and global preset.
     const effective = intersectPresets(grant.preset, ctx.globalPreset);
     if (!this.globalAllows(effective, ctx.tool)) {
@@ -162,12 +174,13 @@ export class GrantManager {
 /**
  * Pull a folder argument out of a tool call's args. Recognizes the
  * conventional field names used across the existing tool surface: `folder`,
- * `mailbox`, `targetFolder`. Returns undefined when no folder-like field
- * is present.
+ * `mailbox`, `targetFolder`, and (PERM-011) `sourceFolder` — the field that
+ * carries the originating folder for email-ID-scoped mutators since v3.0.41.
+ * Returns undefined when no folder-like field is present.
  */
 function extractFolderArg(args: Record<string, unknown> | undefined): string | undefined {
   if (!args) return undefined;
-  for (const k of ["folder", "mailbox", "targetFolder", "folderName", "target_folder"]) {
+  for (const k of ["folder", "mailbox", "targetFolder", "folderName", "target_folder", "sourceFolder", "source_folder"]) {
     const v = args[k];
     if (typeof v === "string" && v.trim()) return v.trim();
   }
@@ -196,15 +209,28 @@ const FOLDER_AGNOSTIC_TOOLS = new Set<string>([
   "save_draft", "schedule_email",
   "request_permission_escalation", "check_escalation_status",
   "sync_emails",
-  // Email-ID-scoped tools — folder is implied by the message UID, not by an arg.
-  "get_email_by_id", "get_thread", "mark_email_read", "star_email",
-  "delete_email", "download_attachment",
+  // PERM-011: email-ID-scoped tools (get_email_by_id, get_thread,
+  // mark_email_read, star_email, delete_email, download_attachment) used to
+  // be listed here as folder-agnostic on the theory that "the folder is
+  // implied by the UID". But UIDs ARE folder-scoped, and since v3.0.41 these
+  // tools carry the originating folder in `sourceFolder`. Leaving them
+  // agnostic let a grant pinned to INBOX delete a UID in Archive via
+  // `delete_email { sourceFolder: "Archive" }`. They are now enforced by the
+  // allowlist via extractFolderArg's `sourceFolder` recognition; a call that
+  // omits the folder fails closed (consistent with checkFolderCondition).
 ]);
 
 /**
  * Intersect two presets — return the stricter of the two. Ordering is
- * read_only < send_only < supervised < full; custom sorts with full (the
- * caller has already opted into whatever the custom set allows).
+ * read_only < send_only < supervised < full.
+ *
+ * PERM-013: `a` (the grant preset) is never "custom" here — check() short-
+ * circuits a custom grant to its explicit toolOverrides before reaching this
+ * function, because buildPermissions("custom") is all-enabled and carries no
+ * real restriction. `b` (the global preset) may still be "custom"; it sorts at
+ * the top of the rank (most permissive preset-level ceiling), and the live
+ * per-tool custom config is enforced separately by the global permission gate
+ * (PermissionManager.check), so a custom global cannot silently widen a grant.
  */
 function intersectPresets(a: PermissionPreset, b: PermissionPreset): PermissionPreset {
   const rank: Record<PermissionPreset, number> = {

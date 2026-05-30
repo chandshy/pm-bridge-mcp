@@ -134,7 +134,10 @@ describe("PermissionManager", () => {
     expect(mockedDefaultConfig).toHaveBeenCalled();
   });
 
-  it("allows a tool that has no explicit permission entry in config", () => {
+  // PERM-005: an unmapped tool name must default-DENY, not allow. In
+  // production every ALL_TOOLS key is materialized by the loader, so this
+  // only fires for an unregistered/arbitrary name reaching the gate.
+  it("denies a tool that has no explicit permission entry in config (default-deny)", () => {
     // Config with no tool entries at all
     const config = makeConfig({});
     mockedLoadConfig.mockReturnValue(config);
@@ -142,7 +145,20 @@ describe("PermissionManager", () => {
     const manager = new PermissionManager();
     const result = manager.check("get_emails");
 
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/not a registered tool/i);
+  });
+
+  it("denies an arbitrary unknown tool name (default-deny)", () => {
+    const config = makeConfig({
+      get_emails: { enabled: true, rateLimit: null },
+    });
+    mockedLoadConfig.mockReturnValue(config);
+
+    const manager = new PermissionManager();
+    const result = manager.check("pass_create_unregistered" as never);
+
+    expect(result.allowed).toBe(false);
   });
 
   it("reloads config after the cache TTL expires", () => {

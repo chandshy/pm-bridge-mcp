@@ -18,6 +18,7 @@ import type { AgentGrant, AgentGrantStatus, GrantConditions } from "./types.js";
 import type { PermissionPreset, ToolName } from "../config/schema.js";
 import { logger } from "../utils/logger.js";
 import { notifications } from "./notifications.js";
+import { withFileLock } from "../utils/file-lock.js";
 
 interface StoreFile {
   version: 1;
@@ -63,6 +64,46 @@ export class AgentGrantStore {
     }
   }
 
+  /**
+   * PERM-006: run a structural mutation under a cross-process advisory lock.
+   * Both the MCP server and the settings server hold their own AgentGrantStore
+   * instance over the same file; without locking + a reload-merge, one
+   * process's whole-file rewrite silently drops grants the other process
+   * created or modified. We reload the on-disk state under the lock, MERGE the
+   * caller's pending in-memory record set on top (so a fresh local `set` made
+   * by `fn` before persist isn't lost), apply `fn`, then persist atomically.
+   */
+  private mutate<T>(fn: () => T): T {
+    return withFileLock(this.path, () => {
+      this.reloadMerge();
+      return fn();
+    });
+  }
+
+  /**
+   * Reload the file from disk and merge in any grant the in-memory Map does
+   * NOT already know about. This recovers grants another process created
+   * since we last loaded (the PERM-006 lost-grant case) without clobbering
+   * records we already hold — local state (including not-yet-persisted
+   * counter/field edits) stays authoritative for clientIds we know. The lock
+   * serializes the surrounding write so two processes never interleave the
+   * tmp→rename for the same file.
+   */
+  private reloadMerge(): void {
+    if (!existsSync(this.path)) return;
+    try {
+      const parsed = JSON.parse(readFileSync(this.path, "utf-8")) as Partial<StoreFile>;
+      const list = Array.isArray(parsed.grants) ? parsed.grants : [];
+      for (const g of list) {
+        if (g && typeof g.clientId === "string" && !this.grants.has(g.clientId)) {
+          this.grants.set(g.clientId, g);
+        }
+      }
+    } catch (err) {
+      logger.warn(`AgentGrantStore: reloadMerge failed for ${this.path}`, "AgentGrantStore", err);
+    }
+  }
+
   private persist(): void {
     const payload: StoreFile = { version: 1, grants: [...this.grants.values()] };
     // tmp MUST be on the same filesystem as the destination for rename(2) to
@@ -80,50 +121,56 @@ export class AgentGrantStore {
    * an MCP host retrying on a disconnected tunnel).
    */
   createPending(args: CreatePendingArgs): AgentGrant {
-    const existing = this.grants.get(args.clientId);
-    if (existing) return existing;
+    return this.mutate(() => {
+      const existing = this.grants.get(args.clientId);
+      if (existing) return existing;
 
-    const grant: AgentGrant = {
-      clientId: args.clientId,
-      clientName: args.clientName || "(unnamed client)",
-      status: "pending",
-      preset: "read_only", // placeholder — replaced on approve
-      createdAt: new Date().toISOString(),
-      totalCalls: 0,
-    };
-    this.grants.set(args.clientId, grant);
-    this.persist();
-    notifications.emitGrantChanged("grant-created", grant);
-    return grant;
+      const grant: AgentGrant = {
+        clientId: args.clientId,
+        clientName: args.clientName || "(unnamed client)",
+        status: "pending",
+        preset: "read_only", // placeholder — replaced on approve
+        createdAt: new Date().toISOString(),
+        totalCalls: 0,
+      };
+      this.grants.set(args.clientId, grant);
+      this.persist();
+      notifications.emitGrantChanged("grant-created", grant);
+      return grant;
+    });
   }
 
   approve(args: ApproveArgs): AgentGrant | null {
-    const g = this.grants.get(args.clientId);
-    if (!g) return null;
-    g.status = "active";
-    g.preset = args.preset;
-    g.toolOverrides = args.toolOverrides;
-    g.conditions = args.conditions;
-    g.note = args.note;
-    g.approvedAt = new Date().toISOString();
-    g.revokedAt = undefined;
-    this.persist();
-    notifications.emitGrantChanged("grant-approved", g);
-    return g;
+    return this.mutate(() => {
+      const g = this.grants.get(args.clientId);
+      if (!g) return null;
+      g.status = "active";
+      g.preset = args.preset;
+      g.toolOverrides = args.toolOverrides;
+      g.conditions = args.conditions;
+      g.note = args.note;
+      g.approvedAt = new Date().toISOString();
+      g.revokedAt = undefined;
+      this.persist();
+      notifications.emitGrantChanged("grant-approved", g);
+      return g;
+    });
   }
 
   deny(clientId: string, note?: string): AgentGrant | null {
-    const g = this.grants.get(clientId);
-    if (!g) return null;
-    const wasPending = g.status === "pending";
-    g.status = "revoked";
-    g.revokedAt = new Date().toISOString();
-    g.note = note ?? g.note;
-    this.persist();
-    // Distinguish "deny" (never-approved pending grant rejected) from
-    // "revoke" (previously-approved grant taken back) for UI filtering.
-    notifications.emitGrantChanged(wasPending ? "grant-denied" : "grant-revoked", g);
-    return g;
+    return this.mutate(() => {
+      const g = this.grants.get(clientId);
+      if (!g) return null;
+      const wasPending = g.status === "pending";
+      g.status = "revoked";
+      g.revokedAt = new Date().toISOString();
+      g.note = note ?? g.note;
+      this.persist();
+      // Distinguish "deny" (never-approved pending grant rejected) from
+      // "revoke" (previously-approved grant taken back) for UI filtering.
+      notifications.emitGrantChanged(wasPending ? "grant-denied" : "grant-revoked", g);
+      return g;
+    });
   }
 
   revoke(clientId: string): AgentGrant | null {
@@ -135,13 +182,15 @@ export class AgentGrantStore {
    * expiresAt has passed; atomic so concurrent tool calls agree on the state.
    */
   markExpired(clientId: string): AgentGrant | null {
-    const g = this.grants.get(clientId);
-    if (!g) return null;
-    if (g.status === "expired") return g;
-    g.status = "expired";
-    this.persist();
-    notifications.emitGrantChanged("grant-expired", g);
-    return g;
+    return this.mutate(() => {
+      const g = this.grants.get(clientId);
+      if (!g) return null;
+      if (g.status === "expired") return g;
+      g.status = "expired";
+      this.persist();
+      notifications.emitGrantChanged("grant-expired", g);
+      return g;
+    });
   }
 
   /** Record a successful tool call against the grant's counters. */
@@ -173,17 +222,19 @@ export class AgentGrantStore {
 
   /** Drop revoked/expired grants older than `retainDays` days. */
   prune(retainDays = 90, now = Date.now()): number {
-    const cutoff = now - retainDays * 24 * 60 * 60_000;
-    let removed = 0;
-    for (const [k, g] of this.grants) {
-      if (g.status !== "revoked" && g.status !== "expired") continue;
-      const endAt = g.revokedAt ?? g.approvedAt ?? g.createdAt;
-      if (Date.parse(endAt) < cutoff) {
-        this.grants.delete(k);
-        removed++;
+    return this.mutate(() => {
+      const cutoff = now - retainDays * 24 * 60 * 60_000;
+      let removed = 0;
+      for (const [k, g] of this.grants) {
+        if (g.status !== "revoked" && g.status !== "expired") continue;
+        const endAt = g.revokedAt ?? g.approvedAt ?? g.createdAt;
+        if (Date.parse(endAt) < cutoff) {
+          this.grants.delete(k);
+          removed++;
+        }
       }
-    }
-    if (removed > 0) this.persist();
-    return removed;
+      if (removed > 0) this.persist();
+      return removed;
+    });
   }
 }

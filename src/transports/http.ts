@@ -271,7 +271,14 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     let callerClientId = "bearer:static";
     let callerClientName = "Static bearer";
 
-    if (token && opts.bearerToken && tokenMatches(token, opts.bearerToken)) {
+    // PERM-008: when OAuth is enabled, the static bearer is NOT accepted. A
+    // static bearer authenticates as a single shared, fully-trusted identity
+    // ("bearer:static") that bypasses the per-agent grant store and the agent
+    // audit log entirely — if it leaks, every tool runs with zero per-agent
+    // attribution. OAuth deployments must use per-client tokens (DCR + grant)
+    // so each agent is independently gated, audited, and revocable. The static
+    // bearer remains available only for non-OAuth deployments.
+    if (token && opts.bearerToken && !oauthHandlers && tokenMatches(token, opts.bearerToken)) {
       ok = true;
       isStaticBearer = true;
       // XPORT-001: key the static-bearer rate bucket per caller IP, not a

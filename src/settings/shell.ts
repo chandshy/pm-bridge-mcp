@@ -369,7 +369,7 @@ ${buildStyles(cspNonce)}
       list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No accounts configured.</div>';
       return;
     }
-    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     list.innerHTML = rows.map(a => {
       const active = a.id === activeId;
       const buttons =
@@ -570,7 +570,7 @@ ${buildStyles(cspNonce)}
       list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No grants in this view.</div>';
       return;
     }
-    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     list.innerHTML = grants.map(g => {
       const badge = g.status === 'pending' ? '🔴 pending'
                   : g.status === 'active'  ? '🟢 active'
@@ -612,7 +612,7 @@ ${buildStyles(cspNonce)}
     const r = await fetch('/api/agents/audit?limit=200');
     const body = await r.json();
     const rows = body.rows || [];
-    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     const tbody = document.getElementById('agents-audit-body');
     if (!rows.length) {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:30px;color:#888">No calls logged yet.</td></tr>';

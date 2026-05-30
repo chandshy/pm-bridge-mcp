@@ -292,6 +292,27 @@ describe("HTTP transport", () => {
       ).rejects.toThrow(/oauthAdminPassword|admin password/i);
     });
 
+    // PERM-008: when OAuth is enabled the static bearer must NOT be accepted —
+    // it authenticates as a single shared identity that bypasses the per-agent
+    // grant store and audit log. OAuth deployments must use per-client tokens.
+    it("rejects the static bearer when OAuth is enabled", async () => {
+      const port = await freePort();
+      handle = await startHttpTransport({
+        server: buildServer(),
+        port,
+        host: "127.0.0.1",
+        bearerToken: "static-secret",
+        oauthEnabled: true,
+        oauthAdminPassword: "admin-pw",
+      });
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer static-secret" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+      expect(res.status).toBe(401);
+    });
+
     it("serves RFC 8414 oauth-authorization-server metadata", async () => {
       const { url } = await startOauth();
       const res = await fetch(`${url}/.well-known/oauth-authorization-server`);
