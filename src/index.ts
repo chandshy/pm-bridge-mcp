@@ -1974,7 +1974,16 @@ async function main() {
 
       // Password: keychain takes priority over config file plaintext
       const keychainCreds = await loadCredentialsFromKeychain();
-      if (keychainCreds?.password) {
+      // CRED-010: an encrypted blob that failed authenticated decryption is a
+      // tamper indicator. loadCredentialsFromKeychain signals this distinctly so
+      // we must NOT fall back to the coexisting plaintext field — leave the
+      // password/token empty (send/receive fails closed until re-encrypted).
+      if (keychainCreds?.storage === "decrypt-failed") {
+        logger.error(
+          "Encrypted Bridge credential failed authenticated decryption — refusing to use any plaintext credential from the same config. Re-enter the credential in Settings to re-encrypt.",
+          "MCPServer",
+        );
+      } else if (keychainCreds?.password) {
         config.smtp.password = keychainCreds.password;
         config.imap.password = keychainCreds.password;
         logger.debug(`Bridge password loaded from ${keychainCreds.storage}`, "MCPServer");
@@ -1983,7 +1992,9 @@ async function main() {
         config.imap.password = cn.password;
         logger.debug("Bridge password loaded from config file", "MCPServer");
       }
-      if (keychainCreds?.smtpToken) {
+      if (keychainCreds?.storage === "decrypt-failed") {
+        // already logged above; do not fall back to plaintext smtpToken either
+      } else if (keychainCreds?.smtpToken) {
         config.smtp.smtpToken = keychainCreds.smtpToken;
       } else if (cn.smtpToken) {
         config.smtp.smtpToken = cn.smtpToken;

@@ -8,7 +8,7 @@
  * to reduce the risk of credential exposure.
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync, statSync, openSync, closeSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, statSync, openSync, closeSync, unlinkSync, chmodSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, resolve, normalize } from "path";
 import { randomBytes } from "crypto";
@@ -34,6 +34,7 @@ import {
 } from "../security/keychain.js";
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
 import { tracer } from "../utils/tracer.js";
+import { logger } from "../utils/logger.js";
 
 /** Clamp a numeric value to [min, max], falling back to min for non-finite input. */
 function clamp(value: number, min: number, max: number): number {
@@ -437,6 +438,19 @@ function withConfigLock<T>(dest: string, fn: () => T): T {
   }
 }
 
+/**
+ * Force the config file back to owner-only (0o600) if its mode drifted wider.
+ * `writeFileSync({mode})` only applies at creation and is masked by umask, so
+ * the destination can be group/world-readable. Best-effort — a chmod failure
+ * must not break a config save. CRED-007.
+ */
+function reassertOwnerOnly(path: string): void {
+  try {
+    const mode = statSync(path).mode & 0o777;
+    if (mode & 0o077) chmodSync(path, 0o600);
+  } catch { /* file vanished or chmod unsupported — best effort */ }
+}
+
 export function saveConfig(config: ServerConfig): void {
   tracer.spanSync('config.save', {}, () => {
   const dest    = getConfigPath();
@@ -450,6 +464,11 @@ export function saveConfig(config: ServerConfig): void {
   const tmp = `${dest}.${randomBytes(8).toString("hex")}.tmp`;
   writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });
   renameSync(tmp, dest);
+  // CRED-007: the `mode` arg above is masked by umask at creation, so the
+  // file the config lands in may be wider than 0o600. Re-assert owner-only
+  // on the destination — the config file carries plaintext credentials in
+  // the legacy/encrypted-file storage modes.
+  reassertOwnerOnly(dest);
   invalidateConfigCache();
   });
   }); // end tracer.spanSync('config.save')
@@ -529,7 +548,7 @@ export async function withConfigWriteLockAsync<T>(fn: () => Promise<T>): Promise
 export async function loadCredentialsFromKeychain(): Promise<{
   password: string;
   smtpToken: string;
-  storage: "keychain" | "encrypted-file" | "config";
+  storage: "keychain" | "encrypted-file" | "config" | "decrypt-failed";
 } | null> {
   const tags: { hasPassword?: boolean; hasSmtpToken?: boolean; storage?: string } = {};
   return tracer.span('config.loadKeychain', tags, async () => {
@@ -551,19 +570,37 @@ export async function loadCredentialsFromKeychain(): Promise<{
     if (hasEncryptedPassword || hasEncryptedToken) {
       let password = "";
       let smtpToken = "";
+      // CRED-010: track GCM auth failures. A well-formed encrypted blob whose
+      // decrypt() throws is an authenticated-decryption failure — the IV/tag/
+      // ciphertext don't agree with the key (machine-id changed, downgrade, or
+      // tampering). We must NOT silently fall through to a plaintext field in
+      // the SAME file: plaintext coexisting with a failed-auth encrypted blob
+      // is itself a tamper indicator, and serving it would hand the caller an
+      // attacker-controllable value from a blob that just failed integrity.
+      let decryptFailed = false;
       if (hasEncryptedPassword) {
         try {
           // isValidEncrypted confirmed algorithm === "aes-256-gcm"; cast is safe.
           password = CredentialEncryption.decrypt(config.connection.passwordEncrypted as Parameters<typeof CredentialEncryption.decrypt>[0]);
-        } catch {
-          // Decryption failure — credential missing from this source
+        } catch (err) {
+          decryptFailed = true;
+          logger.error(
+            "Encrypted bridge password failed authenticated decryption — refusing to fall back to plaintext from the same config file (possible machine-id change, version downgrade, or tampering). Re-enter the credential to re-encrypt.",
+            "Credentials",
+            err,
+          );
         }
       }
       if (hasEncryptedToken) {
         try {
           smtpToken = CredentialEncryption.decrypt(config.connection.smtpTokenEncrypted as Parameters<typeof CredentialEncryption.decrypt>[0]);
-        } catch {
-          // Same as above
+        } catch (err) {
+          decryptFailed = true;
+          logger.error(
+            "Encrypted SMTP token failed authenticated decryption — refusing to fall back to plaintext from the same config file (possible machine-id change, version downgrade, or tampering). Re-enter the credential to re-encrypt.",
+            "Credentials",
+            err,
+          );
         }
       }
       if (password || smtpToken) {
@@ -571,6 +608,17 @@ export async function loadCredentialsFromKeychain(): Promise<{
         tags.hasSmtpToken = !!smtpToken;
         tags.storage = "encrypted-file";
         return { password, smtpToken, storage: "encrypted-file" as const };
+      }
+      // Fail closed: a valid-shaped encrypted blob that failed to decrypt must
+      // not degrade to plaintext from this same file. Return a DISTINCT
+      // "decrypt-failed" sentinel (not null, which callers can't tell apart from
+      // "no credentials" and would answer by reading the plaintext field
+      // themselves) so the caller can refuse the plaintext fallback explicitly.
+      if (decryptFailed) {
+        tags.hasPassword = false;
+        tags.hasSmtpToken = false;
+        tags.storage = "decrypt-failed";
+        return { password: "", smtpToken: "", storage: "decrypt-failed" as const };
       }
     }
   }

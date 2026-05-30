@@ -149,7 +149,9 @@ describe("CredentialEncryption", () => {
       version: 1,
       iv: "a".repeat(24),
       encryptedData: "b".repeat(8),
-      authTag: "c".repeat(24),
+      // CRED-006: isValidEncrypted now requires a full 16-byte GCM tag, so the
+      // fixture uses a real 16-byte base64 tag rather than an arbitrary string.
+      authTag: Buffer.alloc(16).toString("base64"),
     };
     expect(CredentialEncryption.isValidEncrypted(v1ish)).toBe(true);
     const v3WithoutSalt = { ...v1ish, version: 3 };
@@ -184,5 +186,36 @@ describe("CredentialEncryption", () => {
     const enc = CredentialEncryption.encrypt("salt-matters");
     const swapped = { ...enc, salt: Buffer.alloc(16, 0xff).toString("base64") };
     expect(() => CredentialEncryption.decrypt(swapped)).toThrow();
+  });
+
+  // ─── CRED-006 (audit 2026-05-28): GCM auth-tag length validation ─────────
+
+  it("decrypt rejects a truncated 4-byte GCM auth tag (CRED-006)", () => {
+    const enc = CredentialEncryption.encrypt("tag-matters");
+    // A 4-byte tag is the worst case Node's setAuthTag silently accepts.
+    const shortTag = { ...enc, authTag: Buffer.alloc(4).toString("base64") };
+    expect(() => CredentialEncryption.decrypt(shortTag)).toThrow(/auth tag length/i);
+  });
+
+  it("decrypt rejects an empty / garbage-length auth tag (CRED-006)", () => {
+    const enc = CredentialEncryption.encrypt("guarded");
+    const emptyTag = { ...enc, authTag: "" };
+    expect(() => CredentialEncryption.decrypt(emptyTag)).toThrow(/auth tag length/i);
+    const sevenByteTag = { ...enc, authTag: Buffer.alloc(7).toString("base64") };
+    expect(() => CredentialEncryption.decrypt(sevenByteTag)).toThrow(/auth tag length/i);
+  });
+
+  it("decrypt rejects an over-length (>16-byte) auth tag (CRED-006)", () => {
+    const enc = CredentialEncryption.encrypt("guarded");
+    const longTag = { ...enc, authTag: Buffer.alloc(20).toString("base64") };
+    expect(() => CredentialEncryption.decrypt(longTag)).toThrow(/auth tag length/i);
+  });
+
+  it("isValidEncrypted rejects a blob with a short auth tag (CRED-006)", () => {
+    const enc = CredentialEncryption.encrypt("guarded");
+    const shortTag = { ...enc, authTag: Buffer.alloc(4).toString("base64") };
+    expect(CredentialEncryption.isValidEncrypted(shortTag)).toBe(false);
+    // A full 16-byte tag still validates.
+    expect(CredentialEncryption.isValidEncrypted(enc)).toBe(true);
   });
 });

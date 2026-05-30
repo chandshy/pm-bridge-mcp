@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync, closeSync, openSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync, closeSync, openSync, readFileSync, chmodSync, statSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomBytes } from "crypto";
@@ -44,6 +44,26 @@ describe("config file lock (CRED-008)", () => {
     expect(existsSync(lockPath)).toBe(false); // released in finally
     expect(JSON.parse(readFileSync(cfgPath, "utf-8")).connection.username).toBe("alice@example.com");
   });
+
+  // ─── CRED-007 (audit 2026-05-28): re-assert 0o600 on the config file ─────
+
+  it.runIf(process.platform !== "win32")(
+    "saveConfig re-asserts 0o600 on a config file left world-readable",
+    () => {
+      // Pre-create the destination with a wide mode (e.g. restored backup or a
+      // prior loose umask). saveConfig must tighten it back to owner-only.
+      writeFileSync(cfgPath, "{}", { mode: 0o644 });
+      chmodSync(cfgPath, 0o644); // ensure the wide mode survives umask
+      expect(statSync(cfgPath).mode & 0o777).toBe(0o644);
+
+      const cfg = defaultConfig();
+      cfg.connection.username = "carol@example.com";
+      saveConfig(cfg);
+
+      expect(statSync(cfgPath).mode & 0o077).toBe(0); // no group/world bits
+      expect(statSync(cfgPath).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it("reclaims a STALE lock left by a crashed holder", () => {
     // Simulate a crashed holder: create the lock file and backdate its mtime
