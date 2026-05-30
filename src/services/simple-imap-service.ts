@@ -1680,8 +1680,9 @@ export class SimpleIMAPService {
       // VALID-013: inReplyTo and references are sibling Message-ID header
       // fields and must share ONE sanitiser. The reference list historically
       // stripped the full C0/C1+DEL range; inReplyTo only stripped CR/LF/NUL.
-      // Unify on the broader mask (strictly safer than CRLF-only) for both.
-      const stripHeaderField = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, "");
+      // Unify on the broader mask (strictly safer than CRLF-only) for both —
+      // C0 (0x00–0x1f), DEL and C1 (0x7f–0x9f).
+      const stripHeaderField = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
 
       // Build the raw MIME message using nodemailer's buffer transport
       const transport = nodemailer.createTransport({ streamTransport: true, buffer: true, newline: 'crlf' });

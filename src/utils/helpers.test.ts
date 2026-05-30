@@ -1132,6 +1132,14 @@ describe('helpers', () => {
       expect(() => requireNumericEmailId('3.14')).toThrow(McpError);
     });
 
+    it('accepts the 32-bit unsigned max (4294967295)', () => {
+      expect(requireNumericEmailId('4294967295')).toBe('4294967295');
+    });
+
+    it('throws for a 10-digit value above the 32-bit max ("9999999999")', () => {
+      expect(() => requireNumericEmailId('9999999999')).toThrow(McpError);
+    });
+
     it('throws for null', () => {
       expect(() => requireNumericEmailId(null)).toThrow(McpError);
     });
@@ -3958,6 +3966,12 @@ describe('helpers', () => {
     it('throws on non-string and invalid path', () => {
       expect(() => optionalSourceFolder(42)).toThrow(McpError);
       expect(() => optionalSourceFolder('a..b')).toThrow(McpError);
+    });
+    it('rejects leading/trailing whitespace so the gate matches the service', () => {
+      // validateImapPath (what the service uses) rejects " INBOX"; the tool gate
+      // must agree and throw a clean McpError rather than passing it through.
+      expect(() => optionalSourceFolder(' INBOX')).toThrow(McpError);
+      expect(() => optionalSourceFolder('INBOX ')).toThrow(McpError);
     });
   });
 

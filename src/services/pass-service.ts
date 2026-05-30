@@ -229,9 +229,11 @@ export class PassService {
   /**
    * Append one line to the audit log. Never includes secret values.
    *
-   * CRED-009: each row is hash-chained — `hash = sha256(prevHash || canonical)`,
-   * where `canonical` is the row JSON without the `hash` field. A reviewer can
-   * recompute the chain to detect deletion or in-place edits. This is
+   * CRED-009: each row is hash-chained — `hash = sha256(prevHash + JSON.stringify(base))`,
+   * where `base` is the row WITHOUT the `hash` field but WITH `prevHash` already
+   * embedded in it (so prevHash is bound into the row both directly and via the
+   * hash input). A reviewer can recompute the chain to detect deletion or
+   * in-place edits. This is
    * tamper-EVIDENT, not tamper-PROOF: an attacker with write access can rewrite
    * the whole file and recompute every hash. The log is best-effort (no fsync,
    * no rotation lock); treat a broken chain as "investigate", not "trusted".

@@ -425,6 +425,11 @@ export function requireNumericEmailId(raw: unknown, fieldName: string = "emailId
   if (!raw || typeof raw !== "string" || !/^(0|[1-9]\d{0,9})$/.test(raw)) {
     throw new McpError(ErrorCode.InvalidParams, `${fieldName} must be a non-empty numeric UID string.`);
   }
+  // 10 digits still admits up to 9999999999, beyond the 32-bit unsigned max.
+  // Enforce the real ceiling so an out-of-range "UID" can't reach the Bridge.
+  if (Number(raw) > 4294967295) {
+    throw new McpError(ErrorCode.InvalidParams, `${fieldName} exceeds the maximum IMAP UID (4294967295).`);
+  }
   return raw;
 }
 
@@ -476,7 +481,11 @@ export function optionalSourceFolder(raw: unknown): string | undefined {
   if (typeof raw !== "string") {
     throw new McpError(ErrorCode.InvalidParams, "'sourceFolder' must be a string when provided.");
   }
-  const err = validateTargetFolder(raw);
+  // Validate with the same validator the service layer uses (validateFolderName
+  // delegates to validateImapPath) so the tool gate and the service agree —
+  // e.g. " INBOX" is rejected here with a clean McpError instead of passing the
+  // gate and failing later with a non-McpError shape.
+  const err = validateImapPath(raw);
   if (err) throw new McpError(ErrorCode.InvalidParams, `Invalid sourceFolder: ${err}`);
   return raw;
 }
