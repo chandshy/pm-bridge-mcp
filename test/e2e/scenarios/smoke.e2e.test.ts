@@ -31,12 +31,18 @@ describe("smoke.e2e — harness boots and round-trips", () => {
 
   it("MCP listTools returns the mailpouch tool surface", async () => {
     const { tools } = await h.client.listTools();
-    const names = new Set(tools.map((t) => t.name));
+    const names = tools.map((t) => t.name).sort();
+    const set = new Set(names);
     // Sample assertions across categories.
-    expect(names.has("get_emails")).toBe(true);
-    expect(names.has("bulk_move_emails")).toBe(true);
-    expect(names.has("delete_email")).toBe(true);
-    expect(names.has("get_folders")).toBe(true);
+    expect(set.has("get_emails")).toBe(true);
+    expect(set.has("bulk_move_emails")).toBe(true);
+    expect(set.has("delete_email")).toBe(true);
+    expect(set.has("get_folders")).toBe(true);
+    // TEST-020: lock the whole surface so a tool silently disappearing (or an
+    // accidental rename) fails loudly instead of slipping past the 4 spot
+    // checks. The sorted name list is deterministic for a given tier; update
+    // the snapshot deliberately when the surface changes.
+    expect(names).toMatchSnapshot("mcp-tool-names");
   });
 
   it("ImapFixtures APPEND + listUids round-trips", async () => {

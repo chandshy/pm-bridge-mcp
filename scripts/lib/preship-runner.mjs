@@ -100,16 +100,32 @@ function formatFinal(results, totalMs) {
 import { spawn } from "node:child_process";
 
 /**
+ * BUILD-017: secrets that no preship step needs but which would otherwise be
+ * inherited from the operator's shell. Stripped from every child env by default
+ * (defence in depth: the secrets scanner shouldn't run with a real PAT in
+ * scope). A step that genuinely needs one can opt back in via `keepEnv`.
+ */
+const SCRUBBED_ENV_KEYS = ["NPM_TOKEN", "NODE_AUTH_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
+
+function buildChildEnv(extra, keepEnv = []) {
+  const base = { ...process.env };
+  for (const k of SCRUBBED_ENV_KEYS) {
+    if (!keepEnv.includes(k)) delete base[k];
+  }
+  return { ...base, ...(extra ?? {}) };
+}
+
+/**
  * Run a child process and resolve a step result. Captures stdout+stderr.
  * Treats exit 0 as ok unless `successWhen` is provided.
  *
  *   spawnStep("vitest", ["run"], { mode: "hard" })
  */
 export function spawnStep(cmd, args, opts = {}) {
-  const { successWhen, env, cwd, summary } = opts;
+  const { successWhen, env, cwd, summary, keepEnv } = opts;
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
-      env: { ...process.env, ...(env ?? {}) },
+      env: buildChildEnv(env, keepEnv),
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -134,7 +150,11 @@ export function spawnStep(cmd, args, opts = {}) {
 
 /**
  * Helper for npm-script steps: `spawnNpmRun("test")` runs `npm run test`.
+ *
+ * BUILD-016: no `--silent` — it suppresses npm's own `npm error` framing on a
+ * failing script, so the operator saw less than they would running the script
+ * directly. We already capture and print the child's stdout+stderr on failure.
  */
 export function spawnNpmRun(scriptName, opts = {}) {
-  return spawnStep("npm", ["run", "--silent", scriptName], opts);
+  return spawnStep("npm", ["run", scriptName], opts);
 }

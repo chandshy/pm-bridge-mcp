@@ -88,11 +88,14 @@ describe('AnalyticsService', () => {
 
   describe('getEmailAnalytics', () => {
     it('should return analytics object', () => {
+      // TEST-018: assert the actual shape, not mere truthiness — toBeDefined
+      // also passes for null / 0 / wrong types.
       const analytics = service.getEmailAnalytics();
-      expect(analytics).toBeDefined();
-      expect(analytics.volumeTrends).toBeDefined();
-      expect(analytics.topSenders).toBeDefined();
-      expect(analytics.topRecipients).toBeDefined();
+      expect(analytics).toEqual(expect.objectContaining({
+        volumeTrends: expect.any(Array),
+        topSenders: expect.any(Array),
+        topRecipients: expect.any(Array),
+      }));
     });
 
     it('should include volume trends', () => {
@@ -151,8 +154,11 @@ describe('AnalyticsService', () => {
     });
 
     it('should include attachment stats', () => {
+      // TEST-018: assert shape, not truthiness.
       const analytics = service.getEmailAnalytics();
-      expect(analytics.attachmentStats).toBeDefined();
+      expect(analytics.attachmentStats).toEqual(expect.objectContaining({
+        totalAttachments: expect.any(Number),
+      }));
       expect(analytics.attachmentStats.totalAttachments).toBeGreaterThanOrEqual(0);
     });
   });

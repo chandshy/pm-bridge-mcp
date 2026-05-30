@@ -36,6 +36,11 @@ const EXCLUDE_PATHSPECS = [
   ":!CHANGELOG.md",
   ":!scripts/check-secrets.mjs",   // the patterns themselves shouldn't trigger
   ":!docs/preship.md",              // docs reference the patterns by name
+  // BUILD-020: test fixtures legitimately carry key-shaped sample values
+  // (e.g. a fake `sk-test_…` for a stripe-style mock). Exclude the fixtures
+  // trees so they don't block every push. Real `*.test.ts` files stay scanned.
+  ":!test/**/fixtures/**",
+  ":!**/__fixtures__/**",
 ];
 
 function hasGitleaks() {

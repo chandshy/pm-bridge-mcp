@@ -28,20 +28,19 @@ try {
     cwd: ROOT,
     encoding: "utf-8",
   });
+  // BUILD-007: every early-exit path throws so the catch/finally below runs
+  // the staging/install cleanup and the single `exitCode` accumulator owns the
+  // process exit code — no bare `process.exit(1)` that skips cleanup.
   if (packRes.status !== 0) {
-    console.error(`npm pack failed (exit ${packRes.status}):`);
-    console.error(packRes.stderr || packRes.stdout);
-    process.exit(1);
+    throw new Error(`npm pack failed (exit ${packRes.status}): ${packRes.stderr || packRes.stdout}`);
   }
   const tgzName = packRes.stdout.trim().split("\n").pop();
   if (!tgzName) {
-    console.error(`npm pack produced no tarball name`);
-    process.exit(1);
+    throw new Error(`npm pack produced no tarball name`);
   }
   const tgzPath = join(stagingDir, tgzName);
   if (!existsSync(tgzPath)) {
-    console.error(`Tarball missing: ${tgzPath}`);
-    process.exit(1);
+    throw new Error(`Tarball missing: ${tgzPath}`);
   }
 
   // 2. Install the tarball into a fresh dir. `--no-package-lock` keeps the
@@ -61,31 +60,25 @@ try {
     { encoding: "utf-8", timeout: 120_000 }
   );
   if (installRes.status !== 0) {
-    console.error(`npm install <tarball> failed (exit ${installRes.status}):`);
-    console.error(installRes.stderr || installRes.stdout);
-    process.exit(1);
+    throw new Error(`npm install <tarball> failed (exit ${installRes.status}): ${installRes.stderr || installRes.stdout}`);
   }
 
   // 3. Run the binary's --version. We use the unpacked dist entry path
   //    directly to avoid PATH wiring issues with `npm install --prefix`.
   const entry = join(installDir, "node_modules", pkg.name, pkg.main);
   if (!existsSync(entry)) {
-    console.error(`Installed entry missing: ${entry}`);
-    process.exit(1);
+    throw new Error(`Installed entry missing: ${entry}`);
   }
   const versionRes = spawnSync("node", [entry, "--version"], {
     encoding: "utf-8",
     timeout: 15_000,
   });
   if (versionRes.status !== 0) {
-    console.error(`mailpouch --version failed (exit ${versionRes.status}):`);
-    console.error(versionRes.stderr || versionRes.stdout);
-    process.exit(1);
+    throw new Error(`mailpouch --version failed (exit ${versionRes.status}): ${versionRes.stderr || versionRes.stdout}`);
   }
   const out = (versionRes.stdout || "").trim();
   if (!out.includes(PKG_VERSION)) {
-    console.error(`mailpouch --version output did not contain ${PKG_VERSION}: got "${out}"`);
-    process.exit(1);
+    throw new Error(`mailpouch --version output did not contain ${PKG_VERSION}: got "${out}"`);
   }
 
   // 4. Verify packed files include the native-tray JS shim (BUILD-006). The
@@ -93,8 +86,8 @@ try {
   //    "it booted" to prove the tray shim shipped. Probe the tar listing
   //    directly: the published tarball must contain native/tray/index.js.
   //    Failure paths here `throw` so the existing catch/finally chain runs
-  //    the staging/install cleanup (the older `process.exit(1)` paths
-  //    above remain as-is — BUILD-007 cleanup is tracked in a later batch).
+  //    the staging/install cleanup (BUILD-007: all early-exit branches above
+  //    now `throw` too, so cleanup always runs).
   const tgzListRes = spawnSync("tar", ["-tzf", join(stagingDir, tgzName)], {
     encoding: "utf-8",
     timeout: 15_000,

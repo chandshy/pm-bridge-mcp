@@ -32,6 +32,7 @@ import {
   clientIP,
   generateAccessToken,
   hasValidAccessToken,
+  hasValidBootstrapToken,
   tryGenerateSelfSignedCert,
   getPrimaryLanIP,
   GENERAL_RATE_LIMIT,
@@ -100,6 +101,25 @@ function tcpCheck(host: string, port: number, timeoutMs = 5000): Promise<boolean
 }
 
 // ─── REST API helpers ──────────────────────────────────────────────────────────
+
+/**
+ * UI-010: resolve the Claude Desktop config path for the current platform.
+ * Returns null on Windows when %APPDATA% is unset (a service running without a
+ * loaded user profile) — the earlier `process.env.APPDATA ?? ""` fell through
+ * to a CWD-relative `Claude\claude_desktop_config.json` that existsSync could
+ * match by accident or that a write could clobber.
+ */
+function claudeDesktopConfigPath(): string | null {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA;
+    if (!appData) return null;
+    return nodePath.join(appData, "Claude", "claude_desktop_config.json");
+  }
+  if (process.platform === "darwin") {
+    return nodePath.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
+  }
+  return nodePath.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
+}
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -588,6 +608,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     try {
       // ── Serve UI ────────────────────────────────────────────────────────
       if (method === "GET" && path === "/") {
+        // UI-014: in LAN mode the shell HTML embeds the per-process CSRF token,
+        // so "/" must be token-gated too. The general gate above skips "/"
+        // (browser navigation can't send the X-Access-Token header), so accept
+        // the bootstrap `?token=` here instead. Without this any LAN device
+        // could GET "/" and read the CSRF token.
+        if (lan && accessToken && !hasValidBootstrapToken(req, url, accessToken)) {
+          json(res, 401, { error: "Access denied. Open the URL with ?token=… from the server console." });
+          return;
+        }
         // Per-response CSP nonce. Lets us drop 'unsafe-inline' for script
         // and style: only the three inline blocks we ship can execute,
         // because they carry the matching nonce attribute. Stops stored XSS
@@ -1460,6 +1489,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // POST /api/agents/:id/approve — body: { preset, toolOverrides?, conditions?, note? }
         const approveMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/approve$/.exec(path);
         if (method === "POST" && approveMatch) {
+          // UI-012: agent-grant mutations widen privilege just like an escalation
+          // approval, so they share the stricter per-IP escalation limiter.
+          if (!escalationLimiter.check(`${ip}:agent-approve`)) {
+            json(res, 429, { error: "Too many agent-grant changes." }); return;
+          }
           if (!requireCsrf(req, res)) return;
           const clientId = approveMatch[1];
           let body: Record<string, unknown>;
@@ -1525,6 +1559,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // POST /api/agents/:id/deny
         const denyMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/deny$/.exec(path);
         if (method === "POST" && denyMatch) {
+          if (!escalationLimiter.check(`${ip}:agent-deny`)) {
+            json(res, 429, { error: "Too many agent-grant changes." }); return;
+          }
           if (!requireCsrf(req, res)) return;
           const clientId = denyMatch[1];
           let body: Record<string, unknown> = {};
@@ -1538,6 +1575,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // POST /api/agents/:id/revoke
         const revokeMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/revoke$/.exec(path);
         if (method === "POST" && revokeMatch) {
+          if (!escalationLimiter.check(`${ip}:agent-revoke`)) {
+            json(res, 429, { error: "Too many agent-grant changes." }); return;
+          }
           if (!requireCsrf(req, res)) return;
           const clientId = revokeMatch[1];
           const grant = grants.revoke(clientId);
@@ -1643,6 +1683,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // POST /api/accounts/:id/activate
         const activateMatch = /^\/api\/accounts\/([A-Za-z0-9_\-]+)\/activate$/.exec(path);
         if (method === "POST" && activateMatch) {
+          // UI-012: switching the active account hot-swaps credentials; gate it
+          // with the same per-IP escalation limiter as other privileged ops.
+          if (!escalationLimiter.check(`${ip}:account-activate`)) {
+            json(res, 429, { error: "Too many account-activation attempts." }); return;
+          }
           if (!requireCsrf(req, res)) return;
           const set = await setActiveAccount(activateMatch[1]);
           if (!set) { json(res, 404, { error: "Account not found." }); return; }
@@ -1670,14 +1715,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
 
       // ── GET /api/claude-desktop-status ────────────────────────────────────
       if (method === "GET" && path === "/api/claude-desktop-status") {
-        const platform = process.platform;
-        let cdConfigPath: string;
-        if (platform === "win32") {
-          cdConfigPath = nodePath.join(process.env.APPDATA ?? "", "Claude", "claude_desktop_config.json");
-        } else if (platform === "darwin") {
-          cdConfigPath = nodePath.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
-        } else {
-          cdConfigPath = nodePath.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
+        const cdConfigPath = claudeDesktopConfigPath();
+        if (!cdConfigPath) {
+          // UI-010: Windows with no %APPDATA% — can't resolve a real path.
+          json(res, 200, { found: false, configPath: null });
+          return;
         }
         const found = existsSync(cdConfigPath);
         json(res, 200, { found, configPath: cdConfigPath });
@@ -1691,14 +1733,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           json(res, 401, { error: "Access denied." }); return;
         }
         try {
-          const platform = process.platform;
-          let claudeConfigPath: string;
-          if (platform === "win32") {
-            claudeConfigPath = nodePath.join(process.env.APPDATA ?? "", "Claude", "claude_desktop_config.json");
-          } else if (platform === "darwin") {
-            claudeConfigPath = nodePath.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
-          } else {
-            claudeConfigPath = nodePath.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
+          const claudeConfigPath = claudeDesktopConfigPath();
+          if (!claudeConfigPath) {
+            // UI-010: refuse to write to a CWD-relative path when %APPDATA% is
+            // unset on Windows — that would scatter a config in the wrong place.
+            json(res, 200, {
+              ok: false,
+              error: "Could not resolve the Claude Desktop config location (%APPDATA% is not set). Write it manually.",
+            });
+            return;
           }
 
           let existing: Record<string, unknown> = {};

@@ -104,7 +104,7 @@ Every tool call is blocked unless the active preset allows it. Change the preset
 
 ### Require destructive confirmation
 
-On by default. Every `delete_email`, `move_to_trash`, `move_to_spam`, `bulk_delete*`, `alias_delete`, `pass_get`, `shutdown_server`, and `restart_server` call must carry `{ confirmed: true }`. MCP-elicitation-capable clients prompt you inline before the call executes; others require the agent to explicitly confirm.
+On by default. Every `delete_email`, `bulk_delete*`, `delete_folder`, `move_to_trash`, `move_to_spam`, `alias_delete`, `pass_get`, `shutdown_server`, and `restart_server` call must carry `{ confirmed: true }`. MCP-elicitation-capable clients prompt you inline before the call executes; others require the agent to explicitly confirm.
 
 ---
 

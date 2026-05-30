@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { OAuthStore, OAUTH_CODE_TTL_MS, OAUTH_ACCESS_TOKEN_TTL_MS } from "./oauth-store.js";
 
 describe("OAuthStore", () => {
@@ -6,6 +6,10 @@ describe("OAuthStore", () => {
 
   beforeEach(() => {
     store = new OAuthStore();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe("client registration", () => {
@@ -53,6 +57,8 @@ describe("OAuthStore", () => {
     });
 
     it("rejects an expired code (still deletes it)", () => {
+      // TEST-016: advance virtual time instead of poking the record's createdAt.
+      vi.useFakeTimers();
       const issued = store.issueAuthCode({
         clientId: "c1",
         redirectUri: "http://localhost/cb",
@@ -60,8 +66,7 @@ describe("OAuthStore", () => {
         codeChallengeMethod: "S256",
         scopes: [],
       });
-      // Backdate the record so the TTL check fires.
-      (issued as unknown as { createdAt: number }).createdAt = Date.now() - OAUTH_CODE_TTL_MS - 1;
+      vi.advanceTimersByTime(OAUTH_CODE_TTL_MS + 1);
       expect(store.consumeAuthCode(issued.code)).toBeNull();
     });
 
@@ -81,8 +86,10 @@ describe("OAuthStore", () => {
 
     it("verifyToken returns null for unknown or expired tokens", () => {
       expect(store.verifyToken("unknown")).toBeNull();
+      // TEST-016: drive expiry through virtual time, not an internal poke.
+      vi.useFakeTimers();
       const t = store.issueToken({ clientId: "c1", scopes: [] });
-      (t as unknown as { expiresAt: number }).expiresAt = Date.now() - 1;
+      vi.advanceTimersByTime(OAUTH_ACCESS_TOKEN_TTL_MS + 1);
       expect(store.verifyToken(t.token)).toBeNull();
     });
 
@@ -97,13 +104,38 @@ describe("OAuthStore", () => {
       const t = store.issueToken({ clientId: "c1", scopes: [], resource: "https://x.example.com/mcp" });
       expect(store.verifyToken(t.token)?.resource).toBe("https://x.example.com/mcp");
     });
+
+    it("XPORT-005 — the raw token is not used as an internal Map key", () => {
+      const t = store.issueToken({ clientId: "c1", scopes: [] });
+      // Reach into the private map: the key must be the sha256 hash, never the
+      // raw bearer the caller presents.
+      const keys = [...(store as unknown as { tokens: Map<string, unknown> }).tokens.keys()];
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).not.toBe(t.token);
+      expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
+      // Lookup still resolves via the raw token.
+      expect(store.verifyToken(t.token)?.clientId).toBe("c1");
+    });
+
+    it("XPORT-013 — revokeTokensForClient leaves the reverse index consistent", () => {
+      store.issueToken({ clientId: "cA", scopes: [] });
+      store.issueToken({ clientId: "cA", scopes: [] });
+      store.issueToken({ clientId: "cB", scopes: [] });
+      const n = store.revokeTokensForClient("cA");
+      expect(n).toBe(2);
+      // The remaining token map size must equal what verifyToken can reach.
+      expect(store.stats().tokens).toBe(1);
+    });
   });
 
   describe("sweep / stats", () => {
     it("sweep() removes expired codes and tokens, leaves live ones alone", () => {
-      const live = store.issueToken({ clientId: "c1", scopes: [] });
+      // TEST-016: issue the "dead" token in the past via fake timers, then
+      // sweep at the real-ish now so only it has expired.
+      vi.useFakeTimers();
       const dead = store.issueToken({ clientId: "c1", scopes: [] });
-      (dead as unknown as { expiresAt: number }).expiresAt = Date.now() - 1_000;
+      vi.advanceTimersByTime(OAUTH_ACCESS_TOKEN_TTL_MS + 1_000);
+      const live = store.issueToken({ clientId: "c1", scopes: [] });
       const swept = store.sweep();
       expect(swept.tokens).toBe(1);
       expect(store.verifyToken(live.token)).not.toBeNull();

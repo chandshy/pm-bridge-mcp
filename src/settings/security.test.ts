@@ -10,6 +10,7 @@ import {
   readBodySafe,
   generateAccessToken,
   hasValidAccessToken,
+  hasValidBootstrapToken,
   getPrimaryLanIP,
   clientIP,
   tryGenerateSelfSignedCert,
@@ -374,6 +375,41 @@ describe('hasValidAccessToken', () => {
     const token = { value: 'abcd' };
     const req = mockReqWithHeaders({ 'x-access-token': 'caf\u00e9' });
     expect(hasValidAccessToken(req, makeURL(), token)).toBe(false);
+  });
+});
+
+// ─── hasValidBootstrapToken (UI-014) ─────────────────────────────────────────
+
+describe('hasValidBootstrapToken', () => {
+  function makeURL(search = '') {
+    return new URL(`http://localhost:8765/${search}`);
+  }
+  function mockReqWithHeaders(headers: Record<string, string>) {
+    return { headers } as unknown as import('http').IncomingMessage;
+  }
+
+  it('accepts a matching ?token= query (browser navigation can not send a header)', () => {
+    const token = generateAccessToken();
+    const req = mockReqWithHeaders({});
+    expect(hasValidBootstrapToken(req, makeURL(`?token=${token.value}`), token)).toBe(true);
+  });
+
+  it('accepts a matching X-Access-Token header (SPA re-fetch)', () => {
+    const token = generateAccessToken();
+    const req = mockReqWithHeaders({ 'x-access-token': token.value });
+    expect(hasValidBootstrapToken(req, makeURL(), token)).toBe(true);
+  });
+
+  it('rejects when neither header nor query token is present', () => {
+    const token = generateAccessToken();
+    const req = mockReqWithHeaders({});
+    expect(hasValidBootstrapToken(req, makeURL(), token)).toBe(false);
+  });
+
+  it('rejects a wrong query token', () => {
+    const token = generateAccessToken();
+    const req = mockReqWithHeaders({});
+    expect(hasValidBootstrapToken(req, makeURL('?token=nope'), token)).toBe(false);
   });
 });
 

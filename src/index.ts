@@ -1721,9 +1721,11 @@ async function _startSettingsServerDaemon(): Promise<void> {
           "MCPServer",
           err,
         );
+        _markSettingsUnavailable();
         return;
       } else {
         logger.warn("Settings UI failed to start", "MCPServer", err);
+        _markSettingsUnavailable();
         return;
       }
     }
@@ -1790,6 +1792,18 @@ function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
     { id: "quit",    label: "Quit" },
   ];
   return { items, tooltip };
+}
+
+/**
+ * UI-015: collapse the settings-UI state to "off, no URL" and rebuild the tray.
+ * Called on every failed bind so the menu never shows "Open Settings" with an
+ * empty `_settingsUrl`. The `_settingsEnabled === !!_settingsUrl` invariant must
+ * hold after every state change.
+ */
+function _markSettingsUnavailable(): void {
+  _settingsEnabled = false;
+  _settingsUrl     = "";
+  _rebuildTray();
 }
 
 function _rebuildTray(): void {
@@ -2098,6 +2112,15 @@ async function main() {
     // Start the email scheduler (loads persisted pending emails, begins 60s poll)
     schedulerService.start();
 
+    // PERM-010: periodically flush per-agent call counters to disk. recordCall
+    // bumps totalCalls/lastCallAt in memory and defers the fsync for hot-path
+    // cheapness; without a periodic flush (and the shutdown flush below) every
+    // restart silently dropped the counts since the last grant status change.
+    setInterval(() => {
+      try { agentGrants.flushCounters(); }
+      catch (err: unknown) { logger.debug("agent-grant counter flush failed", "MCPServer", err); }
+    }, 5 * 60_000).unref();
+
     // ── Background auto-sync ────────────────────────────────────────────────
     if (config.autoSync && (config.syncInterval ?? 0) > 0) {
       const intervalMs = (config.syncInterval as number) * 60 * 1000;
@@ -2247,6 +2270,10 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
     // 1. Stop bridge watchdog
     if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
+
+    // PERM-010: flush any unpersisted per-agent call counters before exit.
+    try { agentGrants.flushCounters(); }
+    catch (err: unknown) { logger.debug("agent-grant counter flush on shutdown failed", "MCPServer", err); }
 
     // 2. Stop scheduler (persists pending items before close)
     schedulerService.stop();

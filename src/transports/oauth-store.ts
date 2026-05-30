@@ -14,7 +14,7 @@
  *     survivable restarts.
  */
 
-import { randomBytes, randomUUID } from "crypto";
+import { createHash, randomBytes, randomUUID } from "crypto";
 
 export interface RegisteredClient {
   client_id: string;
@@ -75,12 +75,25 @@ export const OAUTH_MAX_TOKENS  = 5000;
 export class OAuthStore {
   private clients = new Map<string, RegisteredClient>();
   private codes = new Map<string, PendingAuth>();
+  /**
+   * XPORT-005: tokens are keyed by sha256(token), never the raw token. The
+   * user-supplied bearer is hashed before the Map lookup, so the comparison is
+   * over fixed-length digests rather than letting V8's hash-table short-circuit
+   * on the first byte of the attacker-controlled string — consistent with the
+   * `timingSafeEqual` posture the rest of the codebase uses. The reverse index
+   * stores hashes too.
+   */
   private tokens = new Map<string, IssuedToken>();
-  /** Reverse index clientId → tokens, so revoking a grant can invalidate all
-   *  outstanding access tokens for that client immediately rather than waiting
-   *  for the 24 h TTL to expire. Kept consistent with `tokens` via the
+  /** Reverse index clientId → token-hashes, so revoking a grant can invalidate
+   *  all outstanding access tokens for that client immediately rather than
+   *  waiting for the 24 h TTL to expire. Kept consistent with `tokens` via the
    *  issueToken / revokeToken / evict / sweep paths. */
   private tokensByClient = new Map<string, Set<string>>();
+
+  /** sha256(token) hex — the key under which a token's record lives. */
+  private static hashToken(token: string): string {
+    return createHash("sha256").update(token, "utf-8").digest("hex");
+  }
 
   /** Drop the oldest entry from a Map (relies on Map's insertion-order iteration). */
   private evictOldest<K, V>(m: Map<K, V>): void {
@@ -91,13 +104,14 @@ export class OAuthStore {
   private indexToken(rec: IssuedToken): void {
     let set = this.tokensByClient.get(rec.clientId);
     if (!set) { set = new Set(); this.tokensByClient.set(rec.clientId, set); }
-    set.add(rec.token);
+    set.add(OAuthStore.hashToken(rec.token));
   }
 
-  private unindexToken(token: string, clientId: string): void {
+  /** `hash` is sha256(token) — the same key used in the primary tokens Map. */
+  private unindexToken(hash: string, clientId: string): void {
     const set = this.tokensByClient.get(clientId);
     if (!set) return;
-    set.delete(token);
+    set.delete(hash);
     if (set.size === 0) this.tokensByClient.delete(clientId);
   }
 
@@ -154,26 +168,28 @@ export class OAuthStore {
         if (old) this.unindexToken(first.value, old.clientId);
       }
     }
-    this.tokens.set(token, rec);
+    this.tokens.set(OAuthStore.hashToken(token), rec);
     this.indexToken(rec);
     return rec;
   }
 
   verifyToken(token: string): IssuedToken | null {
-    const rec = this.tokens.get(token);
+    const hash = OAuthStore.hashToken(token);
+    const rec = this.tokens.get(hash);
     if (!rec) return null;
     if (Date.now() > rec.expiresAt) {
-      this.tokens.delete(token);
-      this.unindexToken(token, rec.clientId);
+      this.tokens.delete(hash);
+      this.unindexToken(hash, rec.clientId);
       return null;
     }
     return rec;
   }
 
   revokeToken(token: string): boolean {
-    const rec = this.tokens.get(token);
-    const removed = this.tokens.delete(token);
-    if (removed && rec) this.unindexToken(token, rec.clientId);
+    const hash = OAuthStore.hashToken(token);
+    const rec = this.tokens.get(hash);
+    const removed = this.tokens.delete(hash);
+    if (removed && rec) this.unindexToken(hash, rec.clientId);
     return removed;
   }
 

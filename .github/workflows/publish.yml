@@ -104,6 +104,10 @@ jobs:
         if npm view "@chandshy/mailpouch@${VERSION}" version --registry https://npm.pkg.github.com 2>/dev/null | grep -q "${VERSION}"; then
           echo "Version ${VERSION} already published to GitHub Packages — skipping"
         else
+          # BUILD-023: back up package.json, rename for the scoped GPR publish,
+          # then restore — so any later step in this job sees the original,
+          # unmutated workspace.
+          cp package.json /tmp/pkg.bak
           node -e "
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -112,6 +116,7 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2));
           "
           npm publish
+          mv /tmp/pkg.bak package.json
         fi
       env:
         NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
