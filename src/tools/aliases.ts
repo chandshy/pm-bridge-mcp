@@ -172,7 +172,8 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
     }
     // clampOptionalInt rejects NaN/Infinity (which passed `typeof === "number"`
-    // and survived Math.max(1, NaN) as NaN onto the page_size query string) — TOOL-006.
+    // and survived Math.max(1, NaN) as NaN into listAliases' caller-side
+    // pagination cap, looping unbounded) — TOOL-006.
     const pageSize = clampOptionalInt(args.pageSize, 200, 1, 1000);
     const aliases = await simpleloginService.listAliases(pageSize);
     return ok({ aliases });

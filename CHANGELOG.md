@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TOOL-003** `get_contacts` clamps `limit` to `[1, maxEmailListResults]`; a negative value can no longer reach `Math.min`.
 - **TOOL-004** `get_volume_trends` clamps `days` to `[1, 365]`; `-10`/`0`/`NaN`/`Infinity` no longer forward raw.
 - **TOOL-005** `get_logs` collapses a `NaN` `limit` to the default instead of propagating `NaN` through `Math.trunc/min/max` into `logger.getLogs`.
-- **TOOL-006** `alias_list` / `alias_get_activity` collapse a `NaN` `pageSize` to the default; `page_size=NaN` can no longer reach the SimpleLogin query string.
+- **TOOL-006** `alias_list` / `alias_get_activity` collapse a `NaN` `pageSize` to the default, so a non-finite value can no longer break the SimpleLogin caller-side pagination cap (`collected.length < pageSize`).
 - **TOOL-007** `alias_create_custom` rejects empty/whitespace `aliasPrefix`/`signedSuffix` before calling SimpleLogin.
 - **TOOL-008** `get_correspondence_profile` no longer falsely asserts "no prior correspondence"; when the analytics top-500 scan cap is hit it reports `exhaustive: false` and an honest "not among the top N" message.
 - **TOOL-009** `fts_search` clamps `limit` to the documented `1–200` bound and rejects negative/`NaN` `sinceEpoch` at the handler boundary.

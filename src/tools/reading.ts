@@ -819,13 +819,13 @@ export const handlers: Record<string, ToolHandler> = {
     // seeing. PARSE-002 (audit-2026-05-28).
     const allowedFolders = getCallerAllowedFolders();
     // Clamp limit to the input-schema's documented 1–200 bound (defaulting to
-    // 50); reject non-finite limit/sinceEpoch so NaN/Infinity never reach the
+    // 20); reject non-finite limit/sinceEpoch so NaN/Infinity never reach the
     // FTS query (TOOL-009). Range validation lives in the handler, not the
     // service (another batch owns fts-service.ts).
     const limit = clampOptionalInt(args.limit, 20, 1, 200);
     if (args.sinceEpoch !== undefined &&
         (typeof args.sinceEpoch !== "number" || !Number.isFinite(args.sinceEpoch) || args.sinceEpoch < 0)) {
-      throw new McpError(ErrorCode.InvalidParams, "'sinceEpoch' must be a non-negative finite number (epoch ms) when provided.");
+      throw new McpError(ErrorCode.InvalidParams, "'sinceEpoch' must be a non-negative finite number (epoch seconds) when provided.");
     }
     const sinceEpoch = typeof args.sinceEpoch === "number" ? args.sinceEpoch : undefined;
     const hits = fts.search({
