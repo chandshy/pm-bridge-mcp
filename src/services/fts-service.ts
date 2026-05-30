@@ -201,6 +201,47 @@ export class FtsIndexService {
     return res.changes > 0;
   }
 
+  /**
+   * Atomically clear the index and repopulate it from `records`. The clear and
+   * the bulk upsert run inside a single transaction, so a throw mid-rebuild
+   * (e.g. a malformed record) rolls the whole thing back and leaves the prior
+   * index intact rather than wiping it. Returns the number of records indexed.
+   *
+   * Callers must prefer this over a bare clear()+upsertMany() pair: a separate
+   * clear() commits immediately and a subsequent failure leaves an empty index
+   * (PARSE-003, audit-2026-05-28).
+   */
+  rebuild(records: FtsRecord[]): number {
+    const tx = this.db.transaction((batch: FtsRecord[]) => {
+      this.db.exec(`DELETE FROM messages`);
+      for (const r of batch) this.upsert(r);
+      return batch.length;
+    });
+    return tx(records);
+  }
+
+  /**
+   * Run a prepared FTS query, translating an FTS5 query-DSL syntax error into a
+   * clean empty result instead of letting better-sqlite3's SqliteError escape
+   * to the MCP client. The MATCH operand is a user-supplied query in FTS5's own
+   * mini-language (quotes, NEAR(), column filters, etc.); a stray `"` or `(`
+   * raises `fts5: syntax error near "..."`. SQL injection is already impossible
+   * (the operand is a bound parameter) — this only swallows malformed-DSL
+   * throws (PARSE-001, audit-2026-05-28). Any other error is re-thrown.
+   */
+  private runMatch(stmt: SqliteStatement, params: unknown[]): unknown[] {
+    try {
+      return stmt.all(...params) as unknown[];
+    } catch (err) {
+      const msg = (err as Error)?.message ?? "";
+      if (/fts5: syntax error|malformed MATCH|unterminated string/i.test(msg)) {
+        logger.debug(`FTS query syntax rejected: ${msg}`, "FtsIndexService");
+        return [];
+      }
+      throw err;
+    }
+  }
+
   search(opts: FtsSearchOptions): FtsHit[] {
     const limit = Math.min(Math.max(1, opts.limit ?? 20), 200);
     const folder = opts.folder?.trim();
@@ -237,11 +278,11 @@ export class FtsIndexService {
       const params: unknown[] = [opts.query, ...opts.allowedFolders];
       if (folder) params.push(folder);
       params.push(limit);
-      hits = stmt.all(...params) as unknown[];
+      hits = this.runMatch(stmt, params);
     } else {
       hits = folder
-        ? (this.stmts.searchFolder.all(opts.query, folder, limit) as unknown[])
-        : (this.stmts.searchAll.all(opts.query, limit) as unknown[]);
+        ? this.runMatch(this.stmts.searchFolder, [opts.query, folder, limit])
+        : this.runMatch(this.stmts.searchAll, [opts.query, limit]);
     }
     const rows = hits as Array<Record<string, unknown>>;
     let mapped: FtsHit[] = rows.map(r => ({

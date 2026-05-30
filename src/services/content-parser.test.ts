@@ -258,4 +258,69 @@ describe("parseIcs", () => {
     expect(meeting?.summary).toBe("mix");
     expect(meeting?.start).toBe("20260420T140000Z");
   });
+
+  // ─── audit-2026-05-28 parser hardening (v3.0.54) ───────────────────────────
+
+  it("PARSE-010: captures DTSTART;TZID parameter as startTzid", () => {
+    const ics = [
+      "BEGIN:VEVENT",
+      "SUMMARY:Zoned",
+      "DTSTART;TZID=America/Los_Angeles:20260601T090000",
+      "END:VEVENT",
+    ].join("\r\n");
+    const meeting = parseIcs(ics);
+    expect(meeting?.start).toBe("20260601T090000");
+    expect(meeting?.startTzid).toBe("America/Los_Angeles");
+  });
+
+  it("PARSE-010: leaves startTzid undefined for a UTC DTSTART", () => {
+    const ics = "BEGIN:VEVENT\nSUMMARY:utc\nDTSTART:20260601T090000Z\nEND:VEVENT";
+    expect(parseIcs(ics)?.startTzid).toBeUndefined();
+  });
+
+  it("PARSE-011: parses a BEGIN:VEVENT line carrying parameters", () => {
+    const ics = [
+      "BEGIN:VEVENT;X-MICROSOFT-CDO-BUSYSTATUS=BUSY",
+      "SUMMARY:Legacy",
+      "DTSTART:20260601T090000Z",
+      "END:VEVENT",
+    ].join("\r\n");
+    expect(parseIcs(ics)?.summary).toBe("Legacy");
+  });
+
+  it("PARSE-012: keeps SUMMARY when the first line has a leading space", () => {
+    // Leading whitespace on the very first line is not a fold continuation.
+    const ics = " BEGIN:VEVENT\nSUMMARY:Indented\nDTSTART:20260601T090000Z\nEND:VEVENT";
+    expect(parseIcs(ics)?.summary).toBe("Indented");
+  });
+});
+
+describe("extractActionItems — audit-2026-05-28 hardening (v3.0.54)", () => {
+  it("PARSE-018: dedups items differing only by trailing punctuation", () => {
+    const items = extractActionItems(["- Fix bug.", "- Fix bug!", "- Fix bug"].join("\n"));
+    expect(items).toHaveLength(1);
+  });
+
+  it("PARSE-019: recognizes Unicode and em-dash bullets", () => {
+    const body = [
+      "→ send the report",
+      "▪ review the draft",
+      "‣ schedule the kickoff",
+      "— call the vendor",
+    ].join("\n");
+    const texts = extractActionItems(body).map(i => i.text);
+    expect(texts).toContain("send the report");
+    expect(texts).toContain("review the draft");
+    expect(texts).toContain("schedule the kickoff");
+    expect(texts).toContain("call the vendor");
+  });
+
+  it("PARSE-013: enforces the body cap in bytes for multibyte input", () => {
+    // 60k 2-byte chars = 120 KB > 100 KB cap. A char-count slice would keep
+    // all 60k chars (only 60k of the 100k budget), letting a trailing marker
+    // survive; a byte slice cuts at ~50k chars and drops it.
+    const padding = "é".repeat(60 * 1024);
+    const items = extractActionItems(padding + "\nTODO: never seen because truncated");
+    expect(items.find(i => /never seen/.test(i.text))).toBeUndefined();
+  });
 });
