@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.58] — 2026-05-30
+
+### Fixed
+Validator unification + draft/send symmetry + IMAP/parser residuals (W3-A batch of the 2026-05-28 audit). Scope: `src/utils/helpers.ts`, `src/services/simple-imap-service.ts`, `src/tools/sending.ts`, `src/tools/drafts.ts`, `src/tools/reading.ts`.
+
+- **SMTP-011** — `saveDraft` now returns a structured, actionable error ("No Drafts folder found…") instead of appending to a literal "Drafts" path; `findDraftsFolder` returns `null` when no Drafts mailbox is resolvable.
+- **SMTP-012** — `saveDraft` strips CR/LF/NUL from `subject`/`to`/`cc`/`bcc` (not just `inReplyTo`/`references`/attachments), closing the header-injection asymmetry the old comment falsely claimed.
+- **VALID-002** — `search_emails` length-caps `body`/`text`/`bcc` at 500 chars; the service's `sanitizeImapStr` now also strips `\r`/`\n`/NUL to block IMAP command-line smuggling.
+- **VALID-003** — unified the two divergent `validateFolderName` implementations: the IMAP service now delegates to a single shared `validateImapPath()` in `helpers.ts`.
+- **VALID-005** — `saveDraft` enforces the same attachment count (20) and per-file/total size caps (25 MB) as the SMTP send path.
+- **VALID-006** — `validateAttachments` now caps per-file and aggregate attachment content size.
+- **VALID-015** — tools route `args.attachments` through a new `sanitizeAttachments()` that keeps only known fields, stripping attacker-controlled keys (`path`/`href`/`raw`/`encoding`) that nodemailer would otherwise honor.
+- **PARSE-008** — `stripHtml` now decodes HTML entities (incl. numeric decimal/hex) BEFORE stripping tags, so encoded `&lt;script&gt;` cannot emerge as live markup in FTS/bodyPreview.
+- **PARSE-009** — `stripHtml` strips HTML comments (`<!-- … -->`) up front so their contents don't survive as prose.
+- **PARSE-003 (wiring)** — `fts_rebuild` tool handler switched from non-atomic `clear()`+`upsertMany()` to the atomic `rebuild(records)` (the atomic method shipped in v3.0.54).
+
 ## [3.0.57] — 2026-05-30
 
 ### Fixed
