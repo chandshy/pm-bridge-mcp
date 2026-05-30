@@ -313,6 +313,49 @@ export function optionalFolderHint(raw: unknown, fieldName: string = "folder"): 
 }
 
 /**
+ * Coerce an optional numeric tool argument into a finite integer clamped to
+ * `[min, max]`, returning `fallback` when the value is absent or non-finite.
+ *
+ * Centralises the numeric-hygiene pattern that several tool handlers got
+ * subtly wrong (TOOL-003/004/005/006/009 in the 2026-05-28 audit):
+ *   - `(args.x as number) || dflt` lets a truthy negative (`-50`) through.
+ *   - `typeof x === "number"` passes `NaN`/`Infinity`, which then survive
+ *     `Math.min(Math.max(1, NaN), cap)` as `NaN` and reach the service/wire.
+ *
+ * `NaN`, `Infinity`, `-Infinity`, and non-number types all collapse to
+ * `fallback`; finite values are truncated toward zero, then clamped.
+ *
+ * @param raw      - Raw argument value from the MCP tool call (type `unknown`).
+ * @param fallback - Value used when `raw` is absent or non-finite.
+ * @param min      - Inclusive lower bound after coercion.
+ * @param max      - Inclusive upper bound after coercion.
+ */
+export function clampOptionalInt(
+  raw: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return Math.min(Math.max(min, fallback), max);
+  }
+  return Math.min(Math.max(min, Math.trunc(raw)), max);
+}
+
+/**
+ * Require a non-empty (after trim) string tool argument. Returns the trimmed
+ * value on success or throws `McpError(InvalidParams, …)`. Used for fields
+ * where an empty string would reach an upstream API and yield an opaque 4xx
+ * (TOOL-007: `aliasPrefix`/`signedSuffix`; TOOL-002: `reason`).
+ */
+export function requireNonEmptyString(raw: unknown, fieldName: string): string {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new McpError(ErrorCode.InvalidParams, `${fieldName} is required and must be a non-empty string.`);
+  }
+  return raw.trim();
+}
+
+/**
  * Validate the shape of an `attachments` argument before passing it to a service.
  *
  * Each element must be a plain object with:

@@ -7,7 +7,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { readFileSync } from "fs";
 import { fileURLToPath as _fileURLToPath } from "url";
 import nodePath from "path";
-import { validateTargetFolder } from "../utils/helpers.js";
+import { validateTargetFolder, clampOptionalInt } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
@@ -226,9 +226,10 @@ export const handlers: Record<string, ToolHandler> = {
     const level = rawLevel && VALID_LEVELS.has(rawLevel)
       ? (rawLevel as "debug" | "info" | "warn" | "error")
       : undefined;
-    const rawLimit = typeof args.limit === "number" ? args.limit : 100;
-    const limit   = Math.min(Math.max(1, Math.trunc(rawLimit)), 500);
-    const logs    = logger.getLogs(level, limit);
+    // clampOptionalInt drops NaN/Infinity (which `typeof === "number"` let
+    // through and Math.trunc/min/max then propagated as NaN) — TOOL-005.
+    const limit = clampOptionalInt(args.limit, 100, 1, 500);
+    const logs  = logger.getLogs(level, limit);
     return ok({ logs });
   },
 

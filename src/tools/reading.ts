@@ -17,6 +17,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
+  clampOptionalInt,
   isValidEmail,
   optionalFolderHint,
   requireNumericEmailId,
@@ -333,6 +334,7 @@ export const defsLate: ToolDef[] = [
         lastInteraction: { type: ["string", "null"], format: "date-time" },
         averageResponseTime: { type: ["number", "null"], description: "Minutes; null when not computable" },
         isFavorite: { type: "boolean" },
+        exhaustive: { type: "boolean", description: "False when the contact ranked beyond the analytics top-500 scan and a lower-ranked record may exist" },
       },
       required: ["email", "emailsSent", "emailsReceived"],
     },
@@ -523,9 +525,16 @@ export const handlers: Record<string, ToolHandler> = {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
     if (email.body && email.body.length > limits.maxEmailBodyChars) {
+      // Clone before truncating: imapService may cache the returned object, so
+      // mutating email.body in place would persist the truncation into later
+      // calls made with a higher maxEmailBodyChars (TOOL-025).
       const originalLen = email.body.length;
-      email.body = email.body.substring(0, limits.maxEmailBodyChars)
-        + `\n\n[...body truncated at ${limits.maxEmailBodyChars.toLocaleString()} chars — original was ${originalLen.toLocaleString()} chars]`;
+      const truncated = {
+        ...email,
+        body: email.body.substring(0, limits.maxEmailBodyChars)
+          + `\n\n[...body truncated at ${limits.maxEmailBodyChars.toLocaleString()} chars — original was ${originalLen.toLocaleString()} chars]`,
+      };
+      return ok(truncated as unknown as Record<string, unknown>);
     }
     return ok(email as unknown as Record<string, unknown>);
   },
@@ -533,6 +542,12 @@ export const handlers: Record<string, ToolHandler> = {
   search_emails: async (ctx) => {
     const { args, imapService, ok, limits } = ctx;
     const folder = (args.folder as string) || "INBOX";
+    // Runtime-guard the array cast: a client passing folders:"INBOX" (string)
+    // would otherwise iterate per-character into validateTargetFolder; folders:{}
+    // would silently fall through with folders.length === undefined (TOOL-001).
+    if (args.folders !== undefined && !Array.isArray(args.folders)) {
+      throw new McpError(ErrorCode.InvalidParams, "'folders' must be an array of folder paths when provided.");
+    }
     const folders = args.folders as string[] | undefined;
     if (!folders) {
       const seFolderErr = validateTargetFolder(folder);
@@ -753,9 +768,21 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "email must be a valid address.");
     }
     await getAnalyticsEmails().catch(() => null);
-    const contacts = analyticsService.getContacts(500);
+    // analyticsService.getContacts hard-clamps to its top 500 ranked contacts,
+    // so a low-frequency-but-real correspondent ranked beyond 500 will not be
+    // found here. Report the result honestly as "not in the top N" rather than
+    // asserting "no prior correspondence", which would be a false negative
+    // (TOOL-008). A full-set lookup would require an analyticsService.findContact
+    // accessor, which lives in a file owned by a sibling batch.
+    const CONTACT_SCAN_CAP = 500;
+    const contacts = analyticsService.getContacts(CONTACT_SCAN_CAP);
     const found = contacts.find(c => c.email.toLowerCase() === emailArg);
     if (!found) {
+      const exhaustive = contacts.length < CONTACT_SCAN_CAP;
+      const message = exhaustive
+        ? `No prior correspondence with ${emailArg} in the analytics window.`
+        : `${emailArg} is not among the top ${CONTACT_SCAN_CAP} contacts in the analytics window; ` +
+          `a lower-ranked correspondence record may exist but is not reported here.`;
       return ok({
         email: emailArg,
         emailsSent: 0,
@@ -764,7 +791,8 @@ export const handlers: Record<string, ToolHandler> = {
         lastInteraction: null,
         averageResponseTime: null,
         isFavorite: false,
-      }, `No prior correspondence with ${emailArg} in the analytics window.`);
+        exhaustive,
+      }, message);
     }
     return ok({
       email: found.email,
@@ -790,11 +818,21 @@ export const handlers: Record<string, ToolHandler> = {
     // bodies from Trash/Spam/Archive that the caller has no business
     // seeing. PARSE-002 (audit-2026-05-28).
     const allowedFolders = getCallerAllowedFolders();
+    // Clamp limit to the input-schema's documented 1–200 bound (defaulting to
+    // 50); reject non-finite limit/sinceEpoch so NaN/Infinity never reach the
+    // FTS query (TOOL-009). Range validation lives in the handler, not the
+    // service (another batch owns fts-service.ts).
+    const limit = clampOptionalInt(args.limit, 20, 1, 200);
+    if (args.sinceEpoch !== undefined &&
+        (typeof args.sinceEpoch !== "number" || !Number.isFinite(args.sinceEpoch) || args.sinceEpoch < 0)) {
+      throw new McpError(ErrorCode.InvalidParams, "'sinceEpoch' must be a non-negative finite number (epoch ms) when provided.");
+    }
+    const sinceEpoch = typeof args.sinceEpoch === "number" ? args.sinceEpoch : undefined;
     const hits = fts.search({
       query: q,
-      limit: typeof args.limit === "number" ? args.limit : undefined,
+      limit,
       folder: typeof args.folder === "string" ? args.folder : undefined,
-      sinceEpoch: typeof args.sinceEpoch === "number" ? args.sinceEpoch : undefined,
+      sinceEpoch,
       allowedFolders,
     }).map(h => ({
       id: h.id,

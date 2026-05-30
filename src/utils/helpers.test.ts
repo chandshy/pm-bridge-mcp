@@ -19,6 +19,8 @@ import {
   generateId,
   retry,
   sleep,
+  clampOptionalInt,
+  requireNonEmptyString,
 } from './helpers.js';
 
 describe('helpers', () => {
@@ -3694,6 +3696,43 @@ describe('helpers', () => {
       const result = await retry(fn, 5, 0);
       expect(result).toBe('done');
       expect(calls).toBe(1);
+    });
+  });
+
+  describe('clampOptionalInt', () => {
+    it('returns the clamped fallback for undefined/null/non-number', () => {
+      expect(clampOptionalInt(undefined, 100, 1, 500)).toBe(100);
+      expect(clampOptionalInt(null, 100, 1, 500)).toBe(100);
+      expect(clampOptionalInt('50', 100, 1, 500)).toBe(100);
+    });
+    it('collapses NaN/Infinity/-Infinity to the fallback', () => {
+      expect(clampOptionalInt(Number.NaN, 100, 1, 500)).toBe(100);
+      expect(clampOptionalInt(Infinity, 100, 1, 500)).toBe(100);
+      expect(clampOptionalInt(-Infinity, 100, 1, 500)).toBe(100);
+    });
+    it('clamps a negative finite value up to min', () => {
+      expect(clampOptionalInt(-50, 100, 1, 500)).toBe(1);
+    });
+    it('clamps an over-large value down to max', () => {
+      expect(clampOptionalInt(99999, 100, 1, 500)).toBe(500);
+    });
+    it('truncates toward zero before clamping', () => {
+      expect(clampOptionalInt(42.9, 100, 1, 500)).toBe(42);
+    });
+    it('clamps the fallback itself into range', () => {
+      expect(clampOptionalInt(undefined, 9999, 1, 200)).toBe(200);
+    });
+  });
+
+  describe('requireNonEmptyString', () => {
+    it('returns the trimmed value for a valid string', () => {
+      expect(requireNonEmptyString('  hi  ', 'field')).toBe('hi');
+    });
+    it('throws on empty/whitespace/non-string', () => {
+      expect(() => requireNonEmptyString('', 'reason')).toThrow(McpError);
+      expect(() => requireNonEmptyString('   ', 'reason')).toThrow(McpError);
+      expect(() => requireNonEmptyString(undefined, 'reason')).toThrow(McpError);
+      expect(() => requireNonEmptyString(42, 'reason')).toThrow(McpError);
     });
   });
 });
