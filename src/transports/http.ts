@@ -90,8 +90,24 @@ const tokenMatches = constantTimeEqual;
 function extractBearer(req: IncomingMessage): string | null {
   const raw = req.headers["authorization"];
   if (!raw || typeof raw !== "string") return null;
-  const m = /^Bearer\s+(\S+)$/i.exec(raw.trimEnd());
+  // XPORT-014: match RFC 6750 §2.1 exactly — one SP between "Bearer" and the
+  // token, optional trailing whitespace. The earlier `\s+` + `trimEnd()` form
+  // accepted tabs/multiple spaces between the scheme and token but rejected a
+  // trailing space, an inconsistency that masked malformed clients.
+  const m = /^Bearer ([^\s]+)\s*$/i.exec(raw);
   return m ? m[1] : null;
+}
+
+/**
+ * XPORT-011: defence-in-depth security headers, mirroring the set the settings
+ * server applies. Applied on every transport response so a JSON / 401 / 404
+ * body can't be sniffed, framed, or cached by an intermediary.
+ */
+function setSecurityHeaders(res: ServerResponse): void {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cache-Control", "no-store");
 }
 
 async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<unknown> {
@@ -201,6 +217,15 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   const issuerHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   const derivedIssuer = `${scheme}://${issuerHost}:${opts.port}`;
   const issuer = opts.oauthIssuer ?? derivedIssuer;
+
+  // XPORT-012: validate the OAuth-without-password misconfiguration BEFORE we
+  // subscribe to the notifications bus. The earlier ordering registered the
+  // grant-change listener and then threw, orphaning the subscription handle
+  // (the caller never received `unsubGrantChanges` to clean it up).
+  if (opts.oauthEnabled && !opts.oauthAdminPassword) {
+    throw new Error("OAuth is enabled but no oauthAdminPassword is set. Generate one or disable OAuth.");
+  }
+
   const oauthStore = new OAuthStore();
   // Invalidate outstanding access tokens immediately when a grant transitions
   // out of "active". Without this, a revoked agent's existing token stayed
@@ -222,10 +247,6 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       )
     : null;
 
-  if (opts.oauthEnabled && !opts.oauthAdminPassword) {
-    throw new Error("OAuth is enabled but no oauthAdminPassword is set. Generate one or disable OAuth.");
-  }
-
   const sweep = setInterval(() => {
     oauthStore.sweep();
     unauthLimiter.sweep();
@@ -234,6 +255,8 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
 
   const listener = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? "/", `${scheme}://${host}:${opts.port}`);
+    // XPORT-011: every response carries the defence-in-depth header set.
+    setSecurityHeaders(res);
 
     // Unauthenticated endpoints — all rate-limited per client IP.
     if (req.method === "GET" && url.pathname === "/health") {
@@ -242,11 +265,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       }
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({
-        status: "ok",
-        transport: "streamable-http",
-        oauth: !!oauthHandlers,
-      }));
+      // XPORT-010: the health probe is unauthenticated, so it must not leak
+      // deployment fingerprint (transport flavour, whether OAuth/DCR is open).
+      // Return the liveness signal only.
+      res.end(JSON.stringify({ status: "ok" }));
       return;
     }
 

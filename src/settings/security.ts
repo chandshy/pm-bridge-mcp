@@ -287,6 +287,33 @@ export function hasValidAccessToken(
   }
 }
 
+/**
+ * UI-014: bootstrap-only token check for the shell HTML served on "/".
+ *
+ * The shell page is loaded by a top-level browser *navigation*, which cannot
+ * carry a custom `X-Access-Token` header — so the documented LAN bootstrap URL
+ * passes the token as `?token=…`. The API endpoints stay header-only (query
+ * tokens leak into history / referer / proxy logs), but "/" must still be gated
+ * in LAN mode or any device on the network could fetch the page and read the
+ * embedded per-process CSRF token. This accepts the token from EITHER the
+ * header (SPA re-fetch) or the `?token=` query (initial navigation), compared
+ * constant-time.
+ */
+export function hasValidBootstrapToken(
+  req:   http.IncomingMessage,
+  url:   URL,
+  token: AccessToken,
+): boolean {
+  if (hasValidAccessToken(req, url, token)) return true;
+  const q = url.searchParams.get("token");
+  if (!q || q.length !== token.value.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(q, "utf-8"), Buffer.from(token.value, "utf-8"));
+  } catch {
+    return false;
+  }
+}
+
 // ─── TLS certificate generation ───────────────────────────────────────────────
 
 export interface TlsCredentials {

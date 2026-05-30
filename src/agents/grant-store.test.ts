@@ -137,6 +137,11 @@ describe("AgentGrantStore", () => {
   });
 
   it("prune drops revoked/expired grants older than the retention window", () => {
+    // TEST-017: anchor "now" and the backdated timestamp to fixed instants and
+    // pass the anchor into prune(now) instead of deriving from Date.now() — no
+    // wall-clock drift between the backdate and the cutoff calculation.
+    const NOW = Date.parse("2026-05-01T00:00:00Z");
+    const REVOKED_AT = new Date(NOW - 120 * 86_400_000).toISOString();
     const s = new AgentGrantStore(path);
     s.createPending({ clientId: "pmc_1", clientName: "A" });
     s.deny("pmc_1");
@@ -144,19 +149,21 @@ describe("AgentGrantStore", () => {
     // reloads from disk under the lock (disk is the source of truth), so an
     // in-memory-only edit would be refreshed away before prune evaluates it.
     const raw = JSON.parse(readFileSync(path, "utf-8")) as { grants: { revokedAt?: string }[] };
-    raw.grants[0].revokedAt = new Date(Date.now() - 120 * 86_400_000).toISOString();
+    raw.grants[0].revokedAt = REVOKED_AT;
     writeFileSync(path, JSON.stringify(raw, null, 2));
-    const removed = s.prune(30);
+    const removed = s.prune(30, NOW);
     expect(removed).toBe(1);
     expect(s.get("pmc_1")).toBeUndefined();
   });
 
   it("prune leaves pending/active grants untouched regardless of age", () => {
+    // TEST-017: fixed anchor, explicit prune(now).
+    const NOW = Date.parse("2026-05-01T00:00:00Z");
     const s = new AgentGrantStore(path);
     s.createPending({ clientId: "pmc_1", clientName: "Ancient" });
     const g = s.get("pmc_1")!;
-    g.createdAt = new Date(Date.now() - 365 * 86_400_000).toISOString();
-    expect(s.prune(30)).toBe(0);
+    g.createdAt = new Date(NOW - 365 * 86_400_000).toISOString();
+    expect(s.prune(30, NOW)).toBe(0);
     expect(s.get("pmc_1")).toBeDefined();
   });
 

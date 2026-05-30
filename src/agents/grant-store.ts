@@ -38,6 +38,15 @@ export interface ApproveArgs {
   note?: string;
 }
 
+/**
+ * XPORT-021: ceiling on simultaneously-pending (not-yet-reviewed) grants. The
+ * DCR endpoint creates a pending grant per registration; a per-IP rate limiter
+ * caps the burst but a slow flood could still grow the settings-UI grant list
+ * without bound. When the cap is reached we evict the oldest pending grant
+ * before admitting a new one, so the review queue stays usefully small.
+ */
+const MAX_PENDING_GRANTS = 50;
+
 export class AgentGrantStore {
   private grants = new Map<string, AgentGrant>();
   private readonly path: string;
@@ -140,6 +149,16 @@ export class AgentGrantStore {
       const existing = this.grants.get(args.clientId);
       if (existing) return existing;
 
+      // XPORT-021: bound the pending-review queue. Evict the oldest pending
+      // grant(s) (by createdAt) once we'd exceed the cap so a registration
+      // flood can't grow the settings-UI list unboundedly.
+      const pending = [...this.grants.values()]
+        .filter(g => g.status === "pending")
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      for (let i = 0; i <= pending.length - MAX_PENDING_GRANTS; i++) {
+        this.grants.delete(pending[i].clientId);
+      }
+
       const grant: AgentGrant = {
         clientId: args.clientId,
         clientName: args.clientName || "(unnamed client)",
@@ -217,7 +236,8 @@ export class AgentGrantStore {
     // Only persist periodically-ish to avoid fsync on every single tool
     // call. We flush on every mutation anyway when the grant *changes*;
     // this method deliberately does NOT persist so hot paths stay cheap.
-    // A future sweep step can flush these updates.
+    // PERM-010: index.ts now calls flushCounters() on a 5-minute interval and
+    // again in gracefulShutdown, so these in-memory increments survive restart.
   }
 
   /** Force-flush any in-memory call-count updates to disk. */

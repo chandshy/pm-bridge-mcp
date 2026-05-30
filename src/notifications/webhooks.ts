@@ -115,6 +115,22 @@ export function detectFormat(url: string): WebhookFormat {
   return "cloudevents";
 }
 
+/**
+ * UI-017: a DCR client_name is attacker-controlled. When interpolated into a
+ * Slack `text` or Discord `content` it can trigger a real `@here`/`@everyone`
+ * ping or render a deceptive `<url|label>` link. Neutralise the platform
+ * control sequences (`@`, `<`, `>`, backtick) so the name renders as inert
+ * text. (The name is already stripped of control chars at DCR registration;
+ * this guards the chat-mention vector specifically.)
+ */
+function neutralizeChatMentions(name: string): string {
+  return name
+    .replace(/@/g, "@​")   // break @here / @everyone / <@id> mentions
+    .replace(/</g, "(")
+    .replace(/>/g, ")")
+    .replace(/`/g, "'");
+}
+
 /** Build the outgoing body for a given format + grant event. */
 export function buildPayload(ev: GrantChangedEvent, format: WebhookFormat): Record<string, unknown> {
   const g = ev.grant;
@@ -124,15 +140,14 @@ export function buildPayload(ev: GrantChangedEvent, format: WebhookFormat): Reco
     ev.kind === "grant-denied"   ? "was denied" :
     ev.kind === "grant-revoked"  ? "was revoked" :
                                     "expired";
-  const line = `Agent '${g.clientName}' ${action}.`;
   const detail = `preset: ${g.preset} · status: ${g.status}` +
     (g.conditions?.expiresAt ? ` · expires ${g.conditions.expiresAt}` : "");
 
-  if (format === "slack") {
-    return { text: `*mailpouch* — ${line}\n${detail}` };
-  }
-  if (format === "discord") {
-    return { content: `**mailpouch** — ${line}\n${detail}` };
+  if (format === "slack" || format === "discord") {
+    const safeLine = `Agent '${neutralizeChatMentions(g.clientName)}' ${action}.`;
+    return format === "slack"
+      ? { text: `*mailpouch* — ${safeLine}\n${detail}` }
+      : { content: `**mailpouch** — ${safeLine}\n${detail}` };
   }
   if (format === "raw") {
     return { kind: ev.kind, seq: ev.seq, grant: g };

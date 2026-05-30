@@ -38,6 +38,28 @@ const DCR_CLIENT_NAME_MAX = 100;
 /** RFC 7636 §4.2 code_challenge shape — base64url, 43–128 chars. */
 const CODE_CHALLENGE_RE = /^[A-Za-z0-9_\-.~]{43,128}$/;
 
+/** XPORT-016: printable-ASCII guard for the OAuth `state` parameter. */
+const STATE_PRINTABLE_RE = /^[\x20-\x7E]*$/;
+
+/**
+ * XPORT-017: RFC 8707 resource indicators must be an absolute http(s) URI. An
+ * empty / malformed value was previously normalised to `undefined`, which made
+ * the per-token resource binding a no-op (the verifier short-circuits when
+ * `rec.resource` is falsy), so a token issued without `resource` could be
+ * replayed against any MCP endpoint on the same host. Returns the parsed
+ * absolute URL string, or null when absent/invalid.
+ */
+function normalizeResource(raw: string | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * XPORT-009: redirect_uri scheme allowlist. The DCR endpoint is public, so a
  * `new URL(u)` parse alone accepts `javascript:`, `data:`, `file:` and any
@@ -337,6 +359,10 @@ export class OAuthHandlers {
     }
     if (method !== "S256") { error(res, 400, "invalid_request", "PKCE S256 is required."); return { handled: true }; }
     if (state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
+    // XPORT-016: reject control / non-ASCII characters in `state`. It is echoed
+    // back in the redirect and into whatever the client uses to look it up; a
+    // CRLF / NUL-laced value has no legitimate use.
+    if (!STATE_PRINTABLE_RE.test(state)) { error(res, 400, "invalid_request", "state contains non-printable characters."); return { handled: true }; }
     // RFC 7636 §4.2: code_challenge is base64url(SHA256(verifier)), which is
     // exactly 43 chars of URL-safe alphabet. Reject anything longer or with
     // non-base64url characters.
@@ -424,6 +450,20 @@ export class OAuthHandlers {
       return { handled: true };
     }
     if (body.state && body.state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
+    if (body.state && !STATE_PRINTABLE_RE.test(body.state)) { error(res, 400, "invalid_request", "state contains non-printable characters."); return { handled: true }; }
+
+    // XPORT-017: bind every issued code to a resource. A caller-supplied
+    // `resource` must be a valid absolute http(s) URI; an absent / malformed
+    // one defaults to this server's canonical resource so the per-token check
+    // is never silently skipped.
+    let resource: string;
+    if (body.resource) {
+      const parsed = normalizeResource(body.resource);
+      if (!parsed) { error(res, 400, "invalid_target", "resource must be an absolute http(s) URI."); return { handled: true }; }
+      resource = parsed;
+    } else {
+      resource = this.cfg.resource;
+    }
 
     const rec = this.store.issueAuthCode({
       clientId: client.client_id,
@@ -431,7 +471,7 @@ export class OAuthHandlers {
       codeChallenge,
       codeChallengeMethod: "S256",
       scopes: (body.scope ?? SCOPES.join(" ")).split(/\s+/).filter(Boolean),
-      resource: body.resource || undefined,
+      resource,
       state: body.state,
     });
 
@@ -486,9 +526,14 @@ export class OAuthHandlers {
       return { handled: true };
     }
     // Resource Indicators (RFC 8707): if the request included `resource`, it
-    // must match the one from authorize; if neither set one, we accept it.
+    // must match the one bound at authorize time.
+    // XPORT-004: collapse the mismatch into the same opaque `invalid_grant` the
+    // code/client/redirect/PKCE failures above use. Returning the distinguishable
+    // `invalid_target` only after the code+PKCE validated made it a
+    // confirmed-good-code oracle (an attacker learned the code was valid up to
+    // that point).
     if (resource && auth.resource && resource !== auth.resource) {
-      error(res, 400, "invalid_target", "resource does not match the authorization request.");
+      error(res, 400, "invalid_grant", "Invalid authorization code.");
       return { handled: true };
     }
 

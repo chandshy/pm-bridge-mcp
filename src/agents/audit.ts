@@ -61,13 +61,37 @@ export class AgentAuditLog {
         try { renameSync(from, to); } catch (err) { logger.debug(`rotate rename ${from} → ${to} failed`, "AgentAuditLog", err); }
       }
     }
-    // Gzip the current file into .1.gz, then truncate the live file.
+    // PERM-012: rename the live file out of the way FIRST, then gzip the
+    // renamed copy out-of-line. `rename(2)` is atomic on POSIX, so any
+    // concurrent `appendFileSync(this.path, …)` lands in a fresh file rather
+    // than in the snapshot we're about to compress — closing the
+    // read→truncate window where a row written between `readFileSync` and the
+    // truncating `writeFileSync` was silently lost.
+    const staged = `${this.path}.rotating`;
     try {
-      const raw = readFileSync(this.path);
-      writeFileSync(`${this.path}.1.gz`, gzipSync(raw), { encoding: undefined, mode: 0o600 });
-      writeFileSync(this.path, "", { encoding: "utf-8", mode: 0o600 });
+      renameSync(this.path, staged);
     } catch (err) {
-      logger.warn(`AgentAuditLog: rotation failed, keeping current file`, "AgentAuditLog", err);
+      logger.warn(`AgentAuditLog: rotation rename failed, keeping current file`, "AgentAuditLog", err);
+      return;
+    }
+    try {
+      const raw = readFileSync(staged);
+      writeFileSync(`${this.path}.1.gz`, gzipSync(raw), { encoding: undefined, mode: 0o600 });
+      unlinkSync(staged);
+    } catch (err) {
+      // Compression failed after the live file was renamed away. Don't leave the
+      // rows orphaned in `${path}.rotating` — the NEXT rotation's rename would
+      // clobber them. If no new live file exists yet (the common case), move the
+      // staged copy back so appends continue it; otherwise park it under a unique
+      // name for manual recovery rather than losing it.
+      try {
+        if (!existsSync(this.path)) {
+          renameSync(staged, this.path);
+        } else {
+          renameSync(staged, `${this.path}.recover-${this.now()}`);
+        }
+      } catch { /* best-effort recovery */ }
+      logger.warn(`AgentAuditLog: rotation compress failed; staged copy recovered`, "AgentAuditLog", err);
     }
     // Evict generations beyond KEEP_GENERATIONS.
     for (let i = KEEP_GENERATIONS + 1; i < KEEP_GENERATIONS + 5; i++) {

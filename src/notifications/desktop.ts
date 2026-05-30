@@ -75,12 +75,29 @@ export interface DesktopNotifierDeps {
   runner?: (cmd: string, args: string[]) => Promise<{ code: number }>;
 }
 
+/** UI-008: hard ceiling on a notifier subprocess. PowerShell toasts and a
+ *  notify-send against a missing DBus session can hang indefinitely; kill the
+ *  child after this many ms and treat it as a failure. */
+const NOTIFIER_TIMEOUT_MS = 3000;
+
 function defaultRunner(cmd: string, args: string[]): Promise<{ code: number }> {
   return new Promise((resolve) => {
     try {
       const child = spawn(cmd, args, { stdio: "ignore", detached: false });
-      child.on("error", () => resolve({ code: -1 }));
-      child.on("close", (code) => resolve({ code: code ?? 0 }));
+      let settled = false;
+      const done = (code: number): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code });
+      };
+      const timer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        done(-1);
+      }, NOTIFIER_TIMEOUT_MS);
+      timer.unref?.();
+      child.on("error", () => done(-1));
+      child.on("close", (code) => done(code ?? 0));
     } catch {
       resolve({ code: -1 });
     }

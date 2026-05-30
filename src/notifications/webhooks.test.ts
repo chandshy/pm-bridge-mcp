@@ -93,6 +93,18 @@ describe("buildPayload", () => {
     expect(p.kind).toBe("grant-denied");
     expect(p.grant).toBeTruthy();
   });
+
+  it("UI-017 — neutralizes Slack/Discord mentions in a hostile clientName", () => {
+    const ev = stubEvent("grant-created");
+    ev.grant.clientName = "@here <https://evil/|click>";
+    const slack = buildPayload(ev, "slack");
+    const discord = buildPayload(ev, "discord");
+    // No live @here ping and no clickable <url|label> link survive.
+    expect(slack.text).not.toContain("@here ");
+    expect(String(slack.text)).not.toMatch(/<https:\/\/evil\/\|click>/);
+    expect(discord.content).not.toContain("@here ");
+    expect(String(discord.content)).not.toMatch(/<https:\/\/evil\/\|click>/);
+  });
 });
 
 describe("WebhookDispatcher.deliver — SSRF guard", () => {

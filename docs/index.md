@@ -34,7 +34,7 @@
 | Analytics | `get_email_stats`, `get_email_analytics`, `get_volume_trends`, `get_contacts` | none | HELP §9, README_FIRST_AI |
 | SimpleLogin aliases | `alias_list`, `alias_create_random`, `alias_create_custom`, `alias_toggle`, `alias_delete`, `alias_get_activity` | Setup → Optional Integrations | HELP §4, README_FIRST_AI |
 | Proton Pass | `pass_list`, `pass_search`, `pass_get` | Setup → Optional Integrations | HELP §4, README_FIRST_AI |
-| System / Bridge | `get_connection_status`, `sync_emails`, `clear_cache`, `get_logs`, `start_bridge`, `shutdown_server`, `restart_server` | Setup tab | README_FIRST_AI |
+| System / Bridge | `get_connection_status`, `sync_emails`, `clear_cache`, `get_logs`, `get_server_version`, `start_bridge`, `shutdown_server`, `restart_server` | Setup tab | README_FIRST_AI |
 | Permissions | presets, per-tool rate limits, custom | Permissions tab | HELP §3, README |
 | Per-agent grants | — | Agents tab | HELP §10, README |
 | Escalation | `request_permission_escalation`, `check_escalation_status` | Agents tab | HELP §11, README_FIRST_AI |

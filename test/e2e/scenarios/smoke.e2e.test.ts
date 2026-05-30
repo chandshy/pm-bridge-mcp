@@ -9,6 +9,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import { PROMO_CREDIT_KARMA } from "../fixtures/seed-data.js";
+import { allToolDefs } from "../../../src/tools/registry.js";
+import { toolsForTier, parseToolTier } from "../../../src/config/schema.js";
 
 describe("smoke.e2e — harness boots and round-trips", () => {
   let h: E2EHarness;
@@ -31,12 +33,22 @@ describe("smoke.e2e — harness boots and round-trips", () => {
 
   it("MCP listTools returns the mailpouch tool surface", async () => {
     const { tools } = await h.client.listTools();
-    const names = new Set(tools.map((t) => t.name));
+    const names = tools.map((t) => t.name).sort();
+    const set = new Set(names);
     // Sample assertions across categories.
-    expect(names.has("get_emails")).toBe(true);
-    expect(names.has("bulk_move_emails")).toBe(true);
-    expect(names.has("delete_email")).toBe(true);
-    expect(names.has("get_folders")).toBe(true);
+    expect(set.has("get_emails")).toBe(true);
+    expect(set.has("bulk_move_emails")).toBe(true);
+    expect(set.has("delete_email")).toBe(true);
+    expect(set.has("get_folders")).toBe(true);
+    // TEST-020: lock the WHOLE surface so a tool silently disappearing (or an
+    // accidental rename) fails loudly instead of slipping past the 4 spot
+    // checks. Assert against the registry filtered by the same tier the server
+    // applies (the harness runs no tier override → "complete"), rather than a
+    // committed snapshot — vitest won't write a new snapshot in CI, and this is
+    // self-updating when the registry changes.
+    const visible = toolsForTier(parseToolTier(undefined));
+    const expectedNames = allToolDefs().map((d) => d.name).filter((n) => visible.has(n)).sort();
+    expect(names).toEqual(expectedNames);
   });
 
   it("ImapFixtures APPEND + listUids round-trips", async () => {

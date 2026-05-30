@@ -47,6 +47,7 @@ test/e2e/.tmp/
 .mailpouch.bridge-test.json
 
 # Preship gate artifacts
+# BUILD-025: smoke-tarball stages into os.tmpdir(), never the repo, so the
+# `/tmp/...` patterns (which gitignore interprets relative to repo root) matched
+# nothing. The `mailpouch-*.tgz` line covers a stray local `npm pack`.
 mailpouch-*.tgz
-/tmp/preship-pack-*
-/tmp/preship-smoke-*

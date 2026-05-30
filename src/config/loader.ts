@@ -36,6 +36,20 @@ import { CredentialEncryption } from "../crypto/credential-encryption.js";
 import { tracer } from "../utils/tracer.js";
 import { logger } from "../utils/logger.js";
 
+/**
+ * PERM-015: explicit set of bulk (mass-acting) action tools that get the
+ * supervised "high cap" rate limit. Prefix-matching on `bulk_` silently missed
+ * any future mass tool with a different prefix (e.g. `mark_all_read`); an
+ * explicit list forces a deliberate addition when such a tool ships.
+ */
+const SUPERVISED_BULK_ACTION_TOOLS: readonly string[] = [
+  "bulk_mark_read",
+  "bulk_star",
+  "bulk_move_emails",
+  "bulk_move_to_label",
+  "bulk_remove_label",
+];
+
 /** Clamp a numeric value to [min, max], falling back to min for non-finite input. */
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
@@ -105,9 +119,11 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
     }
     tools["schedule_email"].rateLimit = 100;
     tools["remind_if_no_reply"].rateLimit = 200;
-    // Bulk non-delete actions: high cap.
-    for (const tool of TOOL_CATEGORIES.actions.tools) {
-      if (tool.startsWith("bulk_")) tools[tool].rateLimit = 100;
+    // Bulk non-delete actions: high cap. PERM-015: match an explicit allowlist
+    // rather than the `bulk_` prefix so a future non-`bulk_` mass tool can't
+    // slip through unthrottled.
+    for (const tool of SUPERVISED_BULK_ACTION_TOOLS) {
+      if (tool in tools) tools[tool as ToolName].rateLimit = 100;
     }
     // Deletion: lower cap — irreversible.
     for (const tool of TOOL_CATEGORIES.deletion.tools) {

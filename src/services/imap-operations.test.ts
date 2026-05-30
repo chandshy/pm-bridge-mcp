@@ -202,6 +202,31 @@ function connectSvc(svc: SimpleIMAPService, clientOverrides: Record<string, unkn
   return client;
 }
 
+// ─── TEST-022: lock the compound cache-key wire format ────────────────────────
+//
+// The cache key is `${folder}:${uid}`. Move/delete tests exercise it
+// indirectly; this locks it explicitly so a future refactor that changes the
+// separator or field order is caught immediately rather than silently producing
+// cache misses (which would degrade to slow folder scans, not a hard failure).
+
+describe("SimpleIMAPService cache-key format (TEST-022)", () => {
+  it("stores under `${folder}:${uid}` and reads back per-folder", () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).setCacheEntry("1234", makeEmail("1234", "Archive"));
+
+    // Internal map key must be exactly "Archive:1234".
+    const keys = [...(svc as any).emailCache.keys()] as string[];
+    expect(keys).toContain("Archive:1234");
+
+    // Folder-scoped lookup hits only when both folder and uid match.
+    expect((svc as any).getCacheEntry("1234", "Archive")?.id).toBe("1234");
+    expect((svc as any).getCacheEntry("1234", "INBOX")).toBeUndefined();
+
+    // Folder-agnostic lookup matches on the `:uid` suffix.
+    expect((svc as any).findCacheEntryByUid("1234")?.id).toBe("1234");
+  });
+});
+
 // ─── markEmailRead ────────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.markEmailRead", () => {
@@ -1862,6 +1887,8 @@ describe("UID existence pre-flight: missing UIDs count as failed, not silent suc
 
     expect(results.success).toBe(0);
     expect(results.failed).toBe(2);
+    // TEST-021: assert the error count matches `failed`, not just errors[0].
+    expect(results.errors).toHaveLength(2);
     expect(results.errors.join(" ")).toMatch(/not found in folder Labels\/BulkTest/);
   });
 
@@ -1873,6 +1900,7 @@ describe("UID existence pre-flight: missing UIDs count as failed, not silent suc
 
     expect(results.success).toBe(0);
     expect(results.failed).toBe(2);
+    expect(results.errors).toHaveLength(2); // TEST-021
     // messageMove must NOT have been called — no UIDs to move
     expect(client.messageMove).not.toHaveBeenCalled();
   });
@@ -1885,6 +1913,7 @@ describe("UID existence pre-flight: missing UIDs count as failed, not silent suc
 
     expect(results.success).toBe(0);
     expect(results.failed).toBe(2);
+    expect(results.errors).toHaveLength(2); // TEST-021
     expect(client.messageFlagsAdd).not.toHaveBeenCalled();
   });
 
