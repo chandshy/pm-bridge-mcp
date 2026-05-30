@@ -678,14 +678,13 @@ Use these when you need higher permissions than currently granted.
 Ask the human to temporarily grant a higher preset.
 
 ```
-targetPreset  string   "send_only" | "supervised" | "full"
-reason        string   Plain-language explanation of why you need this. Max 500 chars.
-newTools      string[] Optional list of specific tools you need.
+target_preset  string   "send_only" | "supervised" | "full"  (required)
+reason         string   Plain-language explanation of why you need this. (required)
 ```
 
-Returns `{ ok, challengeId?, error? }`. If `ok` is true, you receive a
-`challengeId` to poll. The human will see the request in the settings UI
-(http://localhost:8765) or in the terminal.
+Returns `{ status: "pending", challenge_id, targetPreset, currentPreset, expiresAt }`.
+Use the `challenge_id` to poll `check_escalation_status`. The human will see the
+request in the settings UI (http://localhost:8765) or in the terminal.
 
 **Important:**
 - You cannot approve your own escalation. A human must do it.

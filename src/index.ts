@@ -1696,6 +1696,7 @@ async function _startSettingsServerDaemon(): Promise<void> {
     try {
       const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */, {
         onRestartRequested: () => setImmediate(() => gracefulShutdown("update_restart")),
+        onShutdownRequested: () => setImmediate(() => gracefulShutdown("ui-shutdown").catch(() => process.exit(1))),
       });
       _settingsStop    = stop;
       _settingsUrl     = `${scheme}://localhost:${port}`;

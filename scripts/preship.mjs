@@ -88,10 +88,13 @@ const fastSteps = [
   STEP_NODE("license-inv", "check-licenses.mjs"),
   STEP_NPM("build", "build"),
   STEP_NPM("unit", "test"),
+  // tarball-smoke lives in the fast tier (~5s): it's the only gate that catches
+  // a missing bin shebang, a dropped `files` entry, or ESM/CJS divergence — a
+  // pre-push must not be able to land a broken published tarball silently.
+  STEP_NODE("tarball-smoke", "smoke-tarball.mjs"),
 ];
 
 const heavySteps = [
-  STEP_NODE("tarball-smoke", "smoke-tarball.mjs"),
   STEP_NPM("e2e:greenmail", "test:e2e:local"),
   {
     name: "e2e:bridge",

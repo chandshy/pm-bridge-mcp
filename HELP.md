@@ -160,7 +160,7 @@ Disable if you prefer to poll the **Agents tab** manually, or if you're running 
 
 ```
 fts_search("project deadline", folder: "INBOX", limit: 20)
-fts_search('"exact phrase" AND budget', after: "2025-01-01")
+fts_search('"exact phrase" AND budget', sinceEpoch: 1735689600)
 fts_search('from:alice subject:invoice')
 ```
 
@@ -191,7 +191,7 @@ The index is stored at `~/.mailpouch-fts.db` (SQLite, mode 0600).
 `remind_if_no_reply` attaches a reminder to an outbound email. If no reply arrives before the deadline, the reminder fires:
 
 ```
-remind_if_no_reply(emailId: "...", days: 3, note: "Follow up on contract")
+remind_if_no_reply(email_id: "...", after_days: 3, note: "Follow up on contract")
 ```
 
 - `check_reminders` — manually check which reminders are due (also runs automatically on the minute tick)
@@ -272,7 +272,7 @@ You approve or deny in the Agents tab by clicking **Approve** (requires typing "
 
 Rate limit: max 5 escalation requests per hour, max 1 pending at a time per client.
 
-Escalation events are logged to `~/.mailpouch-escalation-audit.jsonl`.
+Escalation events are logged to `~/.mailpouch.audit.jsonl`.
 
 ---
 
@@ -384,8 +384,7 @@ Enable **Debug logging** in Settings → Setup, then check Settings → Logs tab
 
 ```
 ~/.mailpouch.json         main config
-~/.mailpouch.audit.jsonl  tool call audit log (hashed args)
-~/.mailpouch-escalation-audit.jsonl  escalation audit log
+~/.mailpouch.audit.jsonl  escalation audit log
 ~/.mailpouch-fts.db       FTS index (SQLite)
 ~/.mailpouch-pass-audit.jsonl  Pass access audit log
 ```
