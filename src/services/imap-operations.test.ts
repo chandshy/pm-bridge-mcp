@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SimpleIMAPService, chunkUidsForWire } from "./simple-imap-service.js";
+import { SimpleIMAPService, chunkUidsForWire, IMAPNotConnectedError, normalizeAddressList } from "./simple-imap-service.js";
 import type { EmailMessage } from "../types/index.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -705,13 +705,16 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
     expect((svc as any).emailCache.has("INBOX:91")).toBe(false);
   });
 
-  it("falls back to per-email delete when batch fails", async () => {
+  // IMAP-016: when the bulk delete chunk fails, the fallback must NOT issue N
+  // serial EXPUNGEs (each messageDelete is a full EXPUNGE round-trip that holds
+  // the mailbox lock and blocks IDLE). Instead it flags \Deleted per UID (cheap
+  // STORE) and runs exactly ONE trailing EXPUNGE for all flagged UIDs.
+  it("falls back to flag-then-single-expunge when batch fails (IMAP-016)", async () => {
     const svc = new SimpleIMAPService();
-    const client = connectSvc(svc, {
-      messageDelete: vi.fn()
-        .mockRejectedValueOnce(new Error("batch error"))
-        .mockResolvedValue(undefined),
-    });
+    const messageDelete = vi.fn()
+      .mockRejectedValueOnce(new Error("batch error")) // the chunk EXPUNGE fails
+      .mockResolvedValue(undefined);                   // the trailing EXPUNGE succeeds
+    const client = connectSvc(svc, { messageDelete });
     seedUids(client, "INBOX", [92, 93]);
     (svc as any).setCacheEntry("92", makeEmail("92", "INBOX"));
     (svc as any).setCacheEntry("93", makeEmail("93", "INBOX"));
@@ -720,12 +723,21 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
 
     expect(results.success).toBe(2);
     expect(results.failed).toBe(0);
+    // Per-UID fallback marks \Deleted, never per-UID EXPUNGE.
+    expect(client.messageFlagsAdd).toHaveBeenCalledWith("92", ["\\Deleted"], { uid: true });
+    expect(client.messageFlagsAdd).toHaveBeenCalledWith("93", ["\\Deleted"], { uid: true });
+    // messageDelete called exactly twice total: the failed chunk + ONE trailing
+    // EXPUNGE of the flagged set — NOT once per UID.
+    expect(messageDelete).toHaveBeenCalledTimes(2);
+    expect(messageDelete).toHaveBeenLastCalledWith("92,93", { uid: true });
   });
 
   it("records per-email failure in fallback mode", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc, {
-      messageDelete: vi.fn().mockRejectedValue(new Error("EXPUNGED")),
+      // The chunk EXPUNGE fails, then the per-UID \Deleted STORE also fails.
+      messageDelete: vi.fn().mockRejectedValue(new Error("batch error")),
+      messageFlagsAdd: vi.fn().mockRejectedValue(new Error("EXPUNGED")),
     });
     seedUids(client, "INBOX", [94]);
     (svc as any).setCacheEntry("94", makeEmail("94", "INBOX"));
@@ -757,12 +769,12 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
     expect(results.errors[0]).toContain("[object Object]"); // String({code:99})
   });
 
-  it("handles non-Error in per-email delete fallback (line 1665 branch 1)", async () => {
+  it("handles non-Error in per-email delete fallback", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc, {
-      messageDelete: vi.fn()
-        .mockRejectedValueOnce(new Error("batch fail"))
-        .mockRejectedValueOnce("delete-error-string"),
+      messageDelete: vi.fn().mockRejectedValueOnce(new Error("batch fail")),
+      // The per-UID \Deleted STORE throws a non-Error value.
+      messageFlagsAdd: vi.fn().mockRejectedValueOnce("delete-error-string"),
     });
     seedUids(client, "INBOX", [96]);
     (svc as any).setCacheEntry("96", makeEmail("96", "INBOX"));
@@ -1145,21 +1157,24 @@ async function* asyncMessages(msgs: unknown[]) {
 }
 
 describe("SimpleIMAPService.getEmails", () => {
-  it("returns [] when ensureConnection throws", async () => {
+  // IMAP-012: a connection failure must surface as a typed error, NOT a silent
+  // empty array. An empty array is indistinguishable from a genuinely empty
+  // folder, so a model could report "you have 0 emails" while the bridge is down.
+  it("throws IMAPNotConnectedError when ensureConnection throws", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
     vi.spyOn(svc as any, "ensureConnection").mockRejectedValue(new Error("no config"));
 
-    expect(await svc.getEmails("INBOX")).toEqual([]);
+    await expect(svc.getEmails("INBOX")).rejects.toBeInstanceOf(IMAPNotConnectedError);
   });
 
-  it("returns [] when client is null after ensureConnection", async () => {
+  it("throws IMAPNotConnectedError when client is null after ensureConnection", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
     vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
     (svc as any).client = null;
 
-    expect(await svc.getEmails("INBOX")).toEqual([]);
+    await expect(svc.getEmails("INBOX")).rejects.toBeInstanceOf(IMAPNotConnectedError);
   });
 
   it("returns [] when mailbox has 0 messages", async () => {
@@ -2145,5 +2160,196 @@ describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
     expect(results.failed).toBe(0);
     // First call was the chunked one that failed; subsequent calls are per-UID.
     expect(client.messageMove).toHaveBeenCalledTimes(1 + uids.length);
+  });
+});
+
+// ─── v3.0.52 IMAP service hardening regressions ──────────────────────────────
+
+// IMAP-004: header search field/value must be sanitised like every other
+// SEARCH input — a raw '"' in the value or a malformed field name lets a caller
+// craft arbitrary IMAP SEARCH terms (defence-in-depth through `search_emails`).
+describe("SimpleIMAPService.searchSingleFolder header sanitisation (IMAP-004)", () => {
+  function searchSvc(searchSpy: ReturnType<typeof vi.fn>): SimpleIMAPService {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      // Returning [] short-circuits the rest of the method after criteria build.
+      search: searchSpy,
+    };
+    return svc;
+  }
+
+  it("strips quote/backslash from the header value before passing to search", async () => {
+    const search = vi.fn().mockResolvedValue([]);
+    const svc = searchSvc(search);
+
+    await (svc as any).searchSingleFolder("INBOX", {
+      header: { field: "X-Test", value: '"\r\nLOGOUT' },
+    }, 50);
+
+    expect(search).toHaveBeenCalledTimes(1);
+    const criteria = search.mock.calls[0][0];
+    // The injected quote (and backslash) are gone; the wire string can no
+    // longer close imapflow's quoted argument early.
+    expect(criteria.header["X-Test"]).not.toContain('"');
+    expect(criteria.header["X-Test"]).not.toContain("\\");
+  });
+
+  it("rejects a header field name that is not RFC 5322 field-name grammar", async () => {
+    const search = vi.fn().mockResolvedValue([]);
+    const svc = searchSvc(search);
+
+    await expect(
+      (svc as any).searchSingleFolder("INBOX", {
+        header: { field: 'X-Test"\r\nA0001 LOGOUT', value: "x" },
+      }, 50),
+    ).rejects.toThrow(/Invalid header field name/);
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it("accepts a well-formed header field name", async () => {
+    const search = vi.fn().mockResolvedValue([]);
+    const svc = searchSvc(search);
+
+    await (svc as any).searchSingleFolder("INBOX", {
+      header: { field: "List-Unsubscribe", value: "anything" },
+    }, 50);
+
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(search.mock.calls[0][0].header["List-Unsubscribe"]).toBe("anything");
+  });
+});
+
+// IMAP-005: the IDLE EXISTS/EXPUNGE handlers evict INBOX cache entries by
+// snapshotting keys first and matching the folder case-insensitively, so an
+// entry cached under an aliased path (`Inbox`) is still invalidated.
+describe("SimpleIMAPService.evictInboxCacheEntries (IMAP-005)", () => {
+  it("evicts INBOX entries regardless of folder-name case", () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).setCacheEntry("1", makeEmail("1", "INBOX"));
+    (svc as any).setCacheEntry("2", makeEmail("2", "Inbox"));
+    (svc as any).setCacheEntry("3", makeEmail("3", "Sent"));
+    expect((svc as any).emailCache.size).toBe(3);
+
+    (svc as any).evictInboxCacheEntries();
+
+    // Both INBOX and Inbox evicted; Sent untouched.
+    expect((svc as any).emailCache.has("INBOX:1")).toBe(false);
+    expect((svc as any).emailCache.has("Inbox:2")).toBe(false);
+    expect((svc as any).emailCache.has("Sent:3")).toBe(true);
+  });
+});
+
+// IMAP-007: mailparser's `to`/`cc` can be a single AddressObject OR an array of
+// them (multiple To: header lines). The old singular-only shape collapsed the
+// array case to [], silently dropping recipients.
+describe("normalizeAddressList (IMAP-007)", () => {
+  it("returns [] for undefined", () => {
+    expect(normalizeAddressList(undefined)).toEqual([]);
+  });
+
+  it("handles the singular AddressObject shape", () => {
+    expect(normalizeAddressList({ text: "a@x.com", value: [] } as any)).toEqual(["a@x.com"]);
+  });
+
+  it("flattens an array of AddressObjects (multiple To: header lines)", () => {
+    const result = normalizeAddressList([
+      { text: "a@x.com", value: [] },
+      { text: "b@y.com", value: [] },
+    ] as any);
+    expect(result).toEqual(["a@x.com", "b@y.com"]);
+  });
+});
+
+// IMAP-010: checkAndUpdateUidValidity must not silently swallow errors — a
+// thrown comparison is exactly when stale cache is most dangerous, so it logs
+// at warn AND conservatively clears the cache.
+describe("SimpleIMAPService.checkAndUpdateUidValidity error path (IMAP-010)", () => {
+  it("clears the cache when reading the mailbox throws", () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).setCacheEntry("1", makeEmail("1", "INBOX"));
+    expect((svc as any).emailCache.size).toBe(1);
+    // mailbox getter throws when accessed.
+    Object.defineProperty((svc as any).client = {}, "mailbox", {
+      get() { throw new Error("reconnect race"); },
+    });
+
+    expect(() => (svc as any).checkAndUpdateUidValidity("INBOX")).not.toThrow();
+    expect((svc as any).emailCache.size).toBe(0);
+  });
+});
+
+// IMAP-014: protected-folder checks must trim+casefold AND consult specialUse,
+// not just compare against literal English names.
+describe("SimpleIMAPService protected folders (IMAP-014)", () => {
+  function svcWithFolders(folders: Array<{ path: string; specialUse?: string }>): SimpleIMAPService {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    (svc as any).client = {
+      mailboxDelete: vi.fn().mockResolvedValue(undefined),
+      mailboxRename: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.spyOn(svc, "getFolders").mockResolvedValue(folders as any);
+    vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
+    return svc;
+  }
+
+  it("rejects deletion of INBOX with trailing whitespace", async () => {
+    const svc = svcWithFolders([{ path: "INBOX", specialUse: "\\Inbox" }]);
+    await expect(svc.deleteFolder("INBOX  ")).rejects.toThrow(/protected/);
+  });
+
+  it("rejects deletion of a localised special-use mailbox", async () => {
+    const svc = svcWithFolders([{ path: "Papelera", specialUse: "\\Trash" }]);
+    await expect(svc.deleteFolder("Papelera")).rejects.toThrow(/protected/);
+  });
+
+  it("rejects renaming a localised special-use mailbox", async () => {
+    const svc = svcWithFolders([{ path: "Papelera", specialUse: "\\Trash" }]);
+    await expect(svc.renameFolder("Papelera", "Garbage")).rejects.toThrow(/protected/);
+  });
+
+  it("allows deletion of an ordinary user folder", async () => {
+    const svc = svcWithFolders([{ path: "Projects" }]);
+    await expect(svc.deleteFolder("Projects")).resolves.toBe(true);
+  });
+});
+
+// PARSE-014: downloadAttachment rejects oversize attachments up front instead
+// of re-fetching + base64-encoding the whole thing in memory.
+describe("SimpleIMAPService.downloadAttachment size guard (PARSE-014)", () => {
+  it("throws before fetching when the attachment exceeds the size cap", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
+    const fetchFullSource = vi.spyOn(svc as any, "fetchEmailFullSource");
+    const big = makeEmail("1", "INBOX");
+    (big as any).attachments = [{
+      filename: "huge.pdf",
+      contentType: "application/pdf",
+      size: 50 * 1024 * 1024, // 50 MB — over the 25 MB cap
+    }];
+    vi.spyOn(svc as any, "findCacheEntryByUid").mockReturnValue(big);
+
+    await expect(svc.downloadAttachment("1", 0)).rejects.toThrow(/too large/i);
+    // Must short-circuit before the full-source re-fetch.
+    expect(fetchFullSource).not.toHaveBeenCalled();
+  });
+
+  it("allows an attachment within the size cap", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
+    const small = makeEmail("2", "INBOX");
+    (small as any).attachments = [{
+      filename: "ok.pdf",
+      contentType: "application/pdf",
+      size: 1024,
+      content: Buffer.from("hello"),
+    }];
+    vi.spyOn(svc as any, "findCacheEntryByUid").mockReturnValue(small);
+
+    const result = await svc.downloadAttachment("2", 0);
+    expect(result?.filename).toBe("ok.pdf");
+    expect(result?.content).toBe(Buffer.from("hello").toString("base64"));
   });
 });

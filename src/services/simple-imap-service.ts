@@ -5,7 +5,7 @@
 import { ImapFlow, type SearchObject } from 'imapflow';
 import { readFileSync, statSync } from 'fs';
 import { join as pathJoin } from 'path';
-import type { ParsedMail, Attachment } from 'mailparser';
+import type { ParsedMail, Attachment, AddressObject } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
@@ -33,6 +33,20 @@ function compareSemver(a: string, b: string): number {
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
 interface AppendResult { uid?: number }
+
+/**
+ * Thrown when an IMAP read path cannot reach the server. IMAP-012: read
+ * methods used to catch the connection failure and return `[]`, which a caller
+ * (or a model summarising "you have 0 emails") could not distinguish from a
+ * genuinely empty folder. Surfacing a typed error lets the MCP dispatcher
+ * serialise it as a structured error response instead of silent misinformation.
+ */
+export class IMAPNotConnectedError extends Error {
+  constructor(message = 'IMAP connection unavailable') {
+    super(message);
+    this.name = 'IMAPNotConnectedError';
+  }
+}
 
 /**
  * imapflow bodyStructure tree node — the shape of each node returned by
@@ -93,6 +107,27 @@ function truncateBody(body: string, maxLength: number = 300): string {
   }
 
   return truncated + '...';
+}
+
+/**
+ * Normalise a mailparser address field into a flat array of display strings.
+ *
+ * IMAP-007: `ParsedMail.to` / `.cc` are typed `AddressObject | AddressObject[]
+ * | undefined`. When a message carries multiple separate `To:` header lines
+ * (legal per RFC 5322 §3.6.3, and emitted by Proton on bridged forwards) the
+ * field becomes an array; the old `parsed.to?.text ? [parsed.to.text] : []`
+ * shape then collapsed to `[]` and the recipient list silently disappeared.
+ */
+export function normalizeAddressList(
+  field: AddressObject | AddressObject[] | undefined,
+): string[] {
+  if (!field) return [];
+  const objs = Array.isArray(field) ? field : [field];
+  const result: string[] = [];
+  for (const obj of objs) {
+    if (obj?.text) result.push(obj.text);
+  }
+  return result;
 }
 
 /**
@@ -195,6 +230,22 @@ export class SimpleIMAPService {
   }
 
   /**
+   * Evict every cached INBOX entry. Called from the IDLE EXISTS/EXPUNGE
+   * handlers. IMAP-005: snapshot the keys first (`Array.from`) so a concurrent
+   * `setCacheEntry` from a parallel main-client fetch cannot corrupt the
+   * iteration, and match the folder case-insensitively so entries cached under
+   * an aliased INBOX path (`Inbox`, `inbox`) are still invalidated.
+   */
+  private evictInboxCacheEntries(): void {
+    for (const cacheKey of Array.from(this.emailCache.keys())) {
+      const entry = this.emailCache.get(cacheKey);
+      if (entry && entry.email.folder.toLowerCase() === 'inbox') {
+        this.evictCacheEntry(cacheKey);
+      }
+    }
+  }
+
+  /**
    * Clear the entire emailCache and reset the byte estimate to zero.
    * Use in place of direct `this.emailCache.clear()` everywhere.
    */
@@ -263,8 +314,17 @@ export class SimpleIMAPService {
         this.clearCacheAll();
       }
       this.uidValidityMap.set(folder, currentValidity);
-    } catch {
-      // Silently ignore — UIDVALIDITY tracking is best-effort
+    } catch (error) {
+      // IMAP-010: UIDVALIDITY tracking failing is exactly when stale cache is
+      // most dangerous (a server-side mailbox rebuild we can't observe). Drop
+      // the whole cache conservatively and surface the error at warn so the
+      // failure is debuggable instead of silently swallowed.
+      logger.warn(
+        `UIDVALIDITY check failed for folder "${folder}" — clearing email cache as a precaution`,
+        'IMAPService',
+        error,
+      );
+      this.clearCacheAll();
     }
   }
 
@@ -291,6 +351,11 @@ export class SimpleIMAPService {
   }
 
   private static readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  /** PARSE-014: upper bound on a single attachment download. Raw + base64 +
+   *  parser overhead are held in memory simultaneously, so the effective peak
+   *  is ~2.5x this. 25 MB matches Proton's own attachment limit. */
+  private static readonly MAX_ATTACHMENT_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 
   private getCacheEntry(uid: string, folder: string): EmailMessage | undefined {
     const key = `${folder}:${uid}`;
@@ -343,6 +408,13 @@ export class SimpleIMAPService {
    * a comma-joined UID set bounded by `chunkUidsForWire`; if a chunk fails,
    * its UIDs fall back to the per-UID `perUid` callback. `onSuccess` /
    * `onFailure` let callers update their own counters and cache.
+   *
+   * IMAP-016: `finalize` (optional) runs exactly once after all chunks, and
+   * only if the per-UID fallback was actually exercised. Delete callers pass a
+   * single trailing `expunge()` here and make `perUid` a cheap `STORE +FLAGS
+   * \Deleted` — so a failed bulk delete degrades to N STOREs + 1 EXPUNGE
+   * instead of N serial EXPUNGE round-trips that hold the mailbox lock (and
+   * block IDLE) for minutes on Bridge.
    */
   private async chunkedBatchOp(
     present: string[],
@@ -352,8 +424,10 @@ export class SimpleIMAPService {
     onFailure: (uid: string, msg: string) => void,
     opName: string,
     folder: string,
+    finalize?: () => Promise<unknown>,
   ): Promise<void> {
     const chunks = chunkUidsForWire(present);
+    let fallbackUsed = false;
     for (const uidSet of chunks) {
       const chunkUids = uidSet.split(',');
       try {
@@ -368,6 +442,7 @@ export class SimpleIMAPService {
         for (const id of chunkUids) {
           try {
             await perUid(id);
+            fallbackUsed = true;
             onSuccess(id);
           } catch (e: unknown) {
             const m = e instanceof Error ? e.message : String(e);
@@ -376,6 +451,9 @@ export class SimpleIMAPService {
           }
         }
       }
+    }
+    if (fallbackUsed && finalize) {
+      await finalize();
     }
   }
 
@@ -791,13 +869,19 @@ export class SimpleIMAPService {
     try {
       await this.ensureConnection();
     } catch (error) {
-      logger.warn('IMAP not connected, returning empty array', 'IMAPService');
-      return [];
+      // IMAP-012: do NOT return [] here — an empty array is indistinguishable
+      // from a genuinely empty folder. Surface the connection failure.
+      logger.warn('IMAP not connected for getEmails', 'IMAPService', error);
+      throw new IMAPNotConnectedError(
+        `Cannot fetch emails from "${folder}": IMAP connection unavailable`,
+      );
     }
 
     if (!this.client) {
-      logger.warn('IMAP client not available, returning empty array', 'IMAPService');
-      return [];
+      logger.warn('IMAP client not available for getEmails', 'IMAPService');
+      throw new IMAPNotConnectedError(
+        `Cannot fetch emails from "${folder}": IMAP client not available`,
+      );
     }
 
     try {
@@ -967,8 +1051,8 @@ export class SimpleIMAPService {
             const emailMessage: EmailMessage = {
               id: message.uid.toString(),
               from: parsed.from?.text || '',
-              to: parsed.to?.text ? [parsed.to.text] : [],
-              cc: parsed.cc?.text ? [parsed.cc.text] : [],
+              to: normalizeAddressList(parsed.to),
+              cc: normalizeAddressList(parsed.cc),
               subject: parsed.subject || '(No Subject)',
               body: fullBody, // Full body for individual email view
               bodyPreview: truncateBody(plainBody),
@@ -1075,8 +1159,19 @@ export class SimpleIMAPService {
 
       // Additional header fields
       if (options.bcc) searchCriteria.bcc = sanitizeImapStr(options.bcc);
-      // header is { [field]: value } in the SearchObject API (not a tuple)
-      if (options.header) searchCriteria.header = { [options.header.field]: options.header.value };
+      // header is { [field]: value } in the SearchObject API (not a tuple).
+      // IMAP-004: the field+value here were the only SEARCH inputs not passed
+      // through sanitizeImapStr. A raw '"' in the value closes imapflow's
+      // quoted string early; a malformed field name breaks the
+      // `SEARCH HEADER <field-name> <value>` grammar. Sanitise the value and
+      // enforce the RFC 5322 field-name grammar on the field.
+      if (options.header) {
+        const field = options.header.field;
+        if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(field)) {
+          throw new Error(`Invalid header field name: ${JSON.stringify(field)}`);
+        }
+        searchCriteria.header = { [field]: sanitizeImapStr(options.header.value) };
+      }
 
       // Flag criteria — imapflow uses boolean: true = flag set, false = flag not set
       if (options.answered !== undefined) searchCriteria.answered = options.answered;
@@ -1150,8 +1245,8 @@ export class SimpleIMAPService {
           const emailMessage: EmailMessage = {
             id: message.uid.toString(),
             from: parsed.from?.text || '',
-            to: parsed.to?.text ? [parsed.to.text] : [],
-            cc: parsed.cc?.text ? [parsed.cc.text] : [],
+            to: normalizeAddressList(parsed.to),
+            cc: normalizeAddressList(parsed.cc),
             subject: parsed.subject || '(No Subject)',
             body: fullBody,
             bodyPreview: truncateBody(plainBody),
@@ -1334,6 +1429,18 @@ export class SimpleIMAPService {
 
     let att = emailMeta.attachments[idx];
 
+    // PARSE-014: downloading re-fetches the full RFC822 source then base64-
+    // encodes the whole attachment in memory (~raw + ~1.33x base64 + parser
+    // overhead held simultaneously). True streaming is a larger refactor;
+    // until then a bounded-size guard rejects oversize attachments before we
+    // commit that memory, with a clear error instead of an OOM.
+    if (typeof att.size === 'number' && att.size > SimpleIMAPService.MAX_ATTACHMENT_DOWNLOAD_BYTES) {
+      throw new Error(
+        `Attachment is too large to download (${Math.round(att.size / (1024 * 1024))} MB; ` +
+        `limit ${Math.round(SimpleIMAPService.MAX_ATTACHMENT_DOWNLOAD_BYTES / (1024 * 1024))} MB).`,
+      );
+    }
+
     // GAP 7.5: attachment content is stripped from cache — re-fetch full source on demand
     if (!att.content) {
       logger.debug('Attachment content not in cache, re-fetching full email source', 'IMAPService', { emailId, attachmentIndex });
@@ -1389,8 +1496,8 @@ export class SimpleIMAPService {
             return {
               id: message.uid.toString(),
               from: parsed.from?.text || '',
-              to: parsed.to?.text ? [parsed.to.text] : [],
-              cc: parsed.cc?.text ? [parsed.cc.text] : [],
+              to: normalizeAddressList(parsed.to),
+              cc: normalizeAddressList(parsed.cc),
               subject: parsed.subject || '(No Subject)',
               body: fullBody,
               bodyPreview: truncateBody(plainBody),
@@ -2176,14 +2283,22 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
+        // IMAP-016: per-UID fallback flags \Deleted (cheap STORE, no EXPUNGE)
+        // and records the UID; the single trailing EXPUNGE in `finalize`
+        // removes all flagged UIDs in one round-trip instead of N serial
+        // EXPUNGEs holding the mailbox lock (and blocking IDLE).
+        const flaggedForExpunge: string[] = [];
         await this.chunkedBatchOp(
           present,
           (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          (id) => this.client!.messageDelete(id, { uid: true }),
+          async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
           (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
           (id, msg) => { results.failed++; results.errors.push(`Failed to delete email ${id}: ${msg}`); },
           'Bulk delete',
           folder,
+          () => flaggedForExpunge.length
+            ? this.client!.messageDelete(flaggedForExpunge.join(','), { uid: true })
+            : Promise.resolve(),
         );
       } finally {
         lock.release();
@@ -2557,14 +2672,19 @@ export class SimpleIMAPService {
         }
       }
       if (present.length > 0) {
+        // IMAP-016: see bulkDeleteEmails — flag \Deleted per UID then one EXPUNGE.
+        const flaggedForExpunge: string[] = [];
         await this.chunkedBatchOp(
           present,
           (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          (id) => this.client!.messageDelete(id, { uid: true }),
+          async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
           (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
           (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
           'Bulk delete-from-folder',
           folder,
+          () => flaggedForExpunge.length
+            ? this.client!.messageDelete(flaggedForExpunge.join(','), { uid: true })
+            : Promise.resolve(),
         );
       }
     } finally { lock.release(); }
@@ -2608,6 +2728,37 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.createFolder')
   }
 
+  /** Special-use attributes that mark a mailbox as undeletable / unrenamable. */
+  private static readonly PROTECTED_SPECIAL_USE = new Set([
+    '\\Inbox', '\\Sent', '\\Drafts', '\\Trash', '\\Junk', '\\Archive', '\\All', '\\Flagged',
+  ]);
+  private static readonly PROTECTED_NAMES = new Set([
+    'inbox', 'sent', 'drafts', 'trash', 'spam', 'junk', 'archive', 'all mail', 'starred',
+  ]);
+
+  /**
+   * IMAP-014: decide whether a folder is a protected system mailbox before a
+   * destructive op. Trims + casefolds the input (so `'INBOX  '` can't slip
+   * through a literal compare) and, when folder discovery is available, also
+   * matches on the server-reported `specialUse` attribute so localised paths
+   * (e.g. `Papelera` for `\Trash`) are still protected.
+   */
+  private async isProtectedFolder(folderName: string): Promise<boolean> {
+    const normalized = folderName.trim().toLowerCase();
+    if (SimpleIMAPService.PROTECTED_NAMES.has(normalized)) return true;
+    try {
+      const folders = await this.getFolders();
+      const match = folders.find(f => f.path.trim().toLowerCase() === normalized);
+      if (match?.specialUse && SimpleIMAPService.PROTECTED_SPECIAL_USE.has(match.specialUse)) {
+        return true;
+      }
+    } catch (error) {
+      // Discovery failed — fall back to the name check already performed above.
+      logger.warn('Folder discovery failed during protected-folder check', 'IMAPService', error);
+    }
+    return false;
+  }
+
   /**
    * Delete a folder (must be empty)
    */
@@ -2618,9 +2769,10 @@ export class SimpleIMAPService {
       throw new Error('IMAP client not connected');
     }
 
-    // Prevent deletion of system folders
-    const protectedFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam', 'Archive', 'All Mail', 'Starred'];
-    if (protectedFolders.some(f => folderName.toLowerCase() === f.toLowerCase())) {
+    // Prevent deletion of system folders (IMAP-014: trim+casefold the input and
+    // also resolve special-use so a localised/whitespace-padded path can't slip
+    // a destructive op past a literal English-name check).
+    if (await this.isProtectedFolder(folderName)) {
       throw new Error(`Cannot delete protected folder: ${folderName}`);
     }
 
@@ -2659,9 +2811,8 @@ export class SimpleIMAPService {
       throw new Error('IMAP client not connected');
     }
 
-    // Prevent renaming of system folders
-    const protectedFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam', 'Archive', 'All Mail', 'Starred'];
-    if (protectedFolders.some(f => oldName.toLowerCase() === f.toLowerCase())) {
+    // Prevent renaming of system folders (IMAP-014: see isProtectedFolder).
+    if (await this.isProtectedFolder(oldName)) {
       throw new Error(`Cannot rename protected folder: ${oldName}`);
     }
 
@@ -2785,17 +2936,12 @@ export class SimpleIMAPService {
           // Listen for new messages (EXISTS) or deletions (EXPUNGE)
           this.idleClient.on('exists', (data: { count?: number }) => {
             logger.debug('IDLE: new messages detected, invalidating cache', 'IMAPService', { count: data.count });
-            // Invalidate only INBOX email cache entries (not all folders)
-            for (const [id, entry] of this.emailCache) {
-              if (entry.email.folder === 'INBOX') this.evictCacheEntry(id);
-            }
+            this.evictInboxCacheEntries();
           });
 
           this.idleClient.on('expunge', () => {
             logger.debug('IDLE: expunge detected, invalidating INBOX cache', 'IMAPService');
-            for (const [id, entry] of this.emailCache) {
-              if (entry.email.folder === 'INBOX') this.evictCacheEntry(id);
-            }
+            this.evictInboxCacheEntries();
           });
 
           // Start IDLE — this blocks until the server sends a response or timeout
