@@ -8,6 +8,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { isValidEmail, optionalFolderHint, validateAttachments, sanitizeAttachments, requireNumericEmailId } from "../utils/helpers.js";
+import { escapeHtml } from "../services/smtp-service.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
@@ -127,10 +128,13 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'isHtml' must be a boolean when provided.");
     }
-    if (args.subject !== undefined && typeof args.subject !== "string") {
-      throw new McpError(ErrorCode.InvalidParams, "'subject' must be a string.");
+    // SMTP-013: `subject` is in the schema's `required` list, but MCP transports
+    // don't reliably enforce inputSchema — enforce it here so a `{to, body}` call
+    // can't reach nodemailer with an empty Subject header.
+    if (args.subject === undefined || typeof args.subject !== "string" || !(args.subject as string).trim()) {
+      throw new McpError(ErrorCode.InvalidParams, "'subject' must be a non-empty string.");
     }
-    if (args.subject !== undefined && typeof args.subject === "string" && (args.subject as string).length > MAX_SUBJECT_LENGTH) {
+    if ((args.subject as string).length > MAX_SUBJECT_LENGTH) {
       throw new McpError(ErrorCode.InvalidParams, `'subject' must not exceed ${MAX_SUBJECT_LENGTH} characters (RFC 2822 limit).`);
     }
     const VALID_PRIORITIES = new Set(["high", "normal", "low"]);
@@ -164,7 +168,7 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   reply_to_email: async (ctx) => {
-    const { args, imapService, smtpService, config, actionOk, MAX_BODY_LENGTH } = ctx;
+    const { args, imapService, smtpService, config, actionOk, MAX_BODY_LENGTH, MAX_SUBJECT_LENGTH } = ctx;
     const emailId = requireNumericEmailId(args.emailId);
     if (!args.body || typeof args.body !== "string" || !(args.body as string).trim()) {
       throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string.");
@@ -186,9 +190,14 @@ export const handlers: Record<string, ToolHandler> = {
     const replyToAddress = original.from.match(/<([^>]+)>/)?.[1] ?? original.from.trim();
 
     const cleanSubject = original.subject.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
-    const subject = cleanSubject.toLowerCase().startsWith("re:")
+    const replySubjectRaw = cleanSubject.toLowerCase().startsWith("re:")
       ? cleanSubject
       : `Re: ${cleanSubject}`;
+    // SMTP-009: cap to MAX_SUBJECT_LENGTH like the forward path — a 998-char
+    // original + "Re: " prefix otherwise bypasses the send_email guard.
+    const subject = replySubjectRaw.length > MAX_SUBJECT_LENGTH
+      ? replySubjectRaw.slice(0, MAX_SUBJECT_LENGTH)
+      : replySubjectRaw;
 
     const ccAddresses: string[] = [];
     if (args.replyAll) {
@@ -252,7 +261,12 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.message !== undefined && typeof args.message !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'message' must be a string when provided.");
     }
-    const userMessage = args.message ? `${args.message as string}\n\n` : "";
+    // SMTP-010: isHtml is inherited from the forwarded original, so when the
+    // original is HTML, args.message is spliced into an HTML body unescaped —
+    // letting an agent inject markup/script. Escape it in the HTML case.
+    const rawUserMessage = (args.message as string | undefined) ?? "";
+    const safeUserMessage = fwdOriginal.isHtml ? escapeHtml(rawUserMessage) : rawUserMessage;
+    const userMessage = args.message ? `${safeUserMessage}\n\n` : "";
     const fwdBody = `${userMessage}${fwdHeader}\n${fwdOriginal.body ?? ""}`;
     if (fwdBody.length > MAX_BODY_LENGTH) {
       throw new McpError(ErrorCode.InvalidParams, `Forwarded body must not exceed ${MAX_BODY_LENGTH} bytes (${MAX_BODY_LENGTH / 1024 / 1024} MB).`);

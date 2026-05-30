@@ -90,12 +90,23 @@ describe('getPendingFilePath / getAuditLogPath', () => {
   });
 
   it('uses env var overrides (MAILPOUCH_*) when set', () => {
-    clearEnv();
-    process.env.MAILPOUCH_PENDING = '/tmp/test-pending-new.json';
-    process.env.MAILPOUCH_AUDIT   = '/tmp/test-audit-new.jsonl';
-    expect(getPendingFilePath()).toBe('/tmp/test-pending-new.json');
-    expect(getAuditLogPath()).toBe('/tmp/test-audit-new.jsonl');
-    clearEnv();
+    // TEST-009: use a unique per-run temp dir (not a fixed /tmp path) so two
+    // parallel CI lanes don't collide, and restore env via try/finally.
+    const prevPending = process.env.MAILPOUCH_PENDING;
+    const prevAudit   = process.env.MAILPOUCH_AUDIT;
+    const dir = mkdtempSync(join(tmpdir(), 'escalation-env-'));
+    const pendingPath = join(dir, 'pending.json');
+    const auditPath   = join(dir, 'audit.jsonl');
+    try {
+      process.env.MAILPOUCH_PENDING = pendingPath;
+      process.env.MAILPOUCH_AUDIT   = auditPath;
+      expect(getPendingFilePath()).toBe(pendingPath);
+      expect(getAuditLogPath()).toBe(auditPath);
+    } finally {
+      if (prevPending !== undefined) process.env.MAILPOUCH_PENDING = prevPending; else delete process.env.MAILPOUCH_PENDING;
+      if (prevAudit !== undefined) process.env.MAILPOUCH_AUDIT = prevAudit; else delete process.env.MAILPOUCH_AUDIT;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

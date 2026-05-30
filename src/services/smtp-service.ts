@@ -9,7 +9,7 @@ import { join as pathJoin } from "path";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from "./bridge-tls.js";
-import { parseEmails, isValidEmail } from "../utils/helpers.js";
+import { parseEmails, parseEmailsDetailed, isValidEmail } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
 
@@ -22,7 +22,7 @@ function stripHeaderInjection(s: string): string {
 }
 
 /** Escape special HTML characters to prevent injection in email bodies */
-function escapeHtml(str: string): string {
+export function escapeHtml(str: string): string {
   return str
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -289,10 +289,22 @@ export class SMTPService {
       };
     }
 
-    // Parse and validate recipients
-    const toAddresses = Array.isArray(options.to)
-      ? options.to
-      : parseEmails(options.to);
+    // Parse and validate recipients.
+    // SMTP-014: for the primary `to` field, hard-fail on partial drops so a
+    // typo'd address can't silently shrink the recipient set (especially for
+    // scheduled sends, which surface the failure 60+s after the user asked).
+    let toAddresses: string[];
+    if (Array.isArray(options.to)) {
+      toAddresses = options.to;
+    } else {
+      const parsedTo = parseEmailsDetailed(options.to);
+      if (parsedTo.dropped.length > 0) {
+        throw new Error(
+          `Invalid recipient address(es) in "to": ${parsedTo.dropped.join(", ")}. Fix or remove them and retry.`,
+        );
+      }
+      toAddresses = parsedTo.valid;
+    }
     const ccAddresses = options.cc
       ? Array.isArray(options.cc)
         ? options.cc

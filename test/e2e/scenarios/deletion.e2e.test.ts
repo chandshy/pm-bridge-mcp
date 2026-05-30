@@ -43,9 +43,14 @@ describe("deletion.e2e", () => {
   describe("delete_email — destructive gate", () => {
     it("rejects when confirmed flag is missing", async () => {
       const uid = await h.imap.appendSeed("INBOX", PROMO_CREDIT_KARMA);
+      const before = await h.imap.messageCount("INBOX");
       const raw = await h.call("delete_email", { emailId: String(uid) });
       expect(raw.isError).toBe(true);
+      // TEST-024: the confirmation gate must fire BEFORE any IMAP mutation —
+      // assert both that the message survives AND that the folder count is
+      // unchanged, so a "delete first, then refuse" bug can't pass silently.
       expect(await h.imap.uidExists("INBOX", uid)).toBe(true);
+      expect(await h.imap.messageCount("INBOX")).toBe(before);
     });
 
     it("deletes when confirmed:true is supplied", async () => {

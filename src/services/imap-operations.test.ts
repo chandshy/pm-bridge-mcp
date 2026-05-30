@@ -9,8 +9,30 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SimpleIMAPService, chunkUidsForWire, IMAPNotConnectedError, normalizeAddressList } from "./simple-imap-service.js";
-import type { EmailMessage } from "../types/index.js";
+import { SimpleIMAPService, chunkUidsForWire, IMAPNotConnectedError, normalizeAddressList, expandImapSequence } from "./simple-imap-service.js";
+import type { EmailFolder, EmailMessage } from "../types/index.js";
+
+// TEST-006: this suite previously imported `beforeEach` but never used it, so
+// spies/module state leaked across tests. Restore all mocks between tests.
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
+
+/**
+ * TEST-007: produce a full `EmailFolder` (including `specialUse`) so getFolders
+ * mocks don't drift from the real interface and silently feed `undefined`
+ * `specialUse` into code paths that read it.
+ */
+function makeFolder(overrides: Partial<EmailFolder> & { path: string }): EmailFolder {
+  return {
+    name: overrides.name ?? overrides.path,
+    path: overrides.path,
+    totalMessages: overrides.totalMessages ?? 0,
+    unreadMessages: overrides.unreadMessages ?? 0,
+    specialUse: overrides.specialUse,
+    folderType: overrides.folderType ?? "user-folder",
+  };
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -522,7 +544,7 @@ describe("SimpleIMAPService.setFlag", () => {
     (svc as any).isConnected = true;
     (svc as any).client = client;
     vi.spyOn(svc, "getFolders").mockResolvedValue([
-      { name: "INBOX", path: "INBOX", totalMessages: 1, unreadMessages: 0, folderType: "system" as const },
+      makeFolder({ path: "INBOX", totalMessages: 1, folderType: "system", specialUse: "\\Inbox" }),
     ]);
 
     const result = await svc.setFlag(emailId, "\\Answered", true);
@@ -545,7 +567,7 @@ describe("SimpleIMAPService.setFlag", () => {
     (svc as any).client = client;
     // Only one folder, fetch throws, so email is not found → throws "not found in any folder"
     vi.spyOn(svc, "getFolders").mockResolvedValue([
-      { name: "INBOX", path: "INBOX", totalMessages: 0, unreadMessages: 0, folderType: "system" as const },
+      makeFolder({ path: "INBOX", folderType: "system", specialUse: "\\Inbox" }),
     ]);
 
     await expect(svc.setFlag(emailId, "\\Answered")).rejects.toThrow("not found in any folder");
@@ -1682,7 +1704,7 @@ describe("SimpleIMAPService.setFlag non-matching UID", () => {
     (svc as any).isConnected = true;
     (svc as any).client = client;
     vi.spyOn(svc, "getFolders").mockResolvedValue([
-      { name: "INBOX", path: "INBOX", totalMessages: 0, unreadMessages: 0, folderType: "system" as const },
+      makeFolder({ path: "INBOX", folderType: "system", specialUse: "\\Inbox" }),
     ]);
 
     // Non-matching uid → found=false → folder never set → throws "not found"
@@ -2313,6 +2335,78 @@ describe("SimpleIMAPService protected folders (IMAP-014)", () => {
   it("allows deletion of an ordinary user folder", async () => {
     const svc = svcWithFolders([{ path: "Projects" }]);
     await expect(svc.deleteFolder("Projects")).resolves.toBe(true);
+  });
+});
+
+// IMAP-011: expandImapSequence must reject NaN/`*`/inverted ranges and cap the
+// produced count instead of OOMing on a hostile `1:1000000000`.
+describe("expandImapSequence (IMAP-011)", () => {
+  it("expands a simple range and comma list", () => {
+    expect(expandImapSequence("1:3")).toEqual([1, 2, 3]);
+    expect(expandImapSequence("1,3,5")).toEqual([1, 3, 5]);
+    expect(expandImapSequence("7")).toEqual([7]);
+  });
+
+  it("rejects the unbounded `*` form instead of silently returning [1]", () => {
+    expect(() => expandImapSequence("1:*")).toThrow();
+  });
+
+  it("rejects non-numeric input instead of returning [NaN]", () => {
+    expect(() => expandImapSequence("a:b")).toThrow();
+  });
+
+  it("rejects an inverted range", () => {
+    expect(() => expandImapSequence("5:1")).toThrow();
+  });
+
+  it("caps an enormous range instead of allocating a billion elements", () => {
+    expect(() => expandImapSequence("1:1000000000")).toThrow(/too large/i);
+  });
+});
+
+// IMAP-015: UID validation must reject structurally-impossible UIDs (non-32-bit,
+// leading zero, arbitrary-length decimals) — not just `\d+`.
+describe("validateEmailId (IMAP-015)", () => {
+  function validate(id: string): void {
+    (new SimpleIMAPService() as any).validateEmailId(id);
+  }
+
+  it("accepts an ordinary UID", () => {
+    expect(() => validate("12345")).not.toThrow();
+  });
+
+  it("accepts the max 32-bit UID", () => {
+    expect(() => validate("4294967295")).not.toThrow();
+  });
+
+  it("rejects a 50-digit pseudo-UID", () => {
+    expect(() => validate("1".repeat(50))).toThrow(/Invalid email ID/);
+  });
+
+  it("rejects a value above the 32-bit ceiling", () => {
+    expect(() => validate("4294967296")).toThrow(/Invalid email ID/);
+  });
+
+  it("rejects a leading-zero UID", () => {
+    expect(() => validate("0123")).toThrow(/Invalid email ID/);
+  });
+});
+
+// IMAP-019: a rejected logout() must still null the client + clear isConnected
+// so the next ensureConnection() doesn't trust a dead socket.
+describe("disconnect error path (IMAP-019)", () => {
+  it("forces local teardown even when logout() rejects", async () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    (svc as any).client = {
+      logout: vi.fn().mockRejectedValue(new Error("socket closed")),
+    };
+
+    await svc.disconnect();
+
+    expect((svc as any).client).toBeNull();
+    expect((svc as any).isConnected).toBe(false);
+    expect(svc.isActive()).toBe(false);
   });
 });
 

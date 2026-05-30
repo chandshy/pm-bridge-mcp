@@ -17,6 +17,7 @@ import { handlers as readingHandlers } from "./reading.js";
 import { handlers as analyticsHandlers } from "./analytics.js";
 import { handlers as aliasHandlers } from "./aliases.js";
 import { handlers as systemHandlers } from "./system.js";
+import { handlers as sendingHandlers } from "./sending.js";
 import { handlers as escalationHandlers, type EscalationContext } from "./escalation.js";
 
 const DEFAULT_LIMITS = {
@@ -308,6 +309,82 @@ describe("tool input hygiene (v3.0.53)", () => {
       expect((res.structuredContent as { body: string }).body).toContain("truncated");
       expect(cached.body).toBe(longBody);
       expect(cached.body.length).toBe(longBody.length);
+    });
+  });
+
+  // ── SMTP-009/010/013 — sending-tool validation parity ─────────────────────
+  describe("sending tool hardening (SMTP-009/010/013)", () => {
+    const sendOk = { success: true as const, messageId: "msg-1" };
+    function sendCtx(overrides: Partial<ToolCallContext>): ToolCallContext {
+      const sendEmail = vi.fn().mockResolvedValue(sendOk);
+      return makeCtx({
+        actionOk: (messageId?: string) => ({
+          content: [{ type: "text" as const, text: JSON.stringify({ success: true, messageId }) }],
+          structuredContent: { success: true, messageId },
+        }),
+        MAX_SUBJECT_LENGTH: 100,
+        MAX_BODY_LENGTH: 1_000_000,
+        smtpService: { sendEmail } as never,
+        config: { smtp: { username: "me@example.com" } } as never,
+        ...overrides,
+      });
+    }
+
+    it("SMTP-013: send_email rejects an omitted subject", async () => {
+      const ctx = sendCtx({ args: { to: "a@example.com", body: "hi" } });
+      await expect(sendingHandlers.send_email(ctx)).rejects.toBeInstanceOf(McpError);
+    });
+
+    it("SMTP-013: send_email rejects a blank subject", async () => {
+      const ctx = sendCtx({ args: { to: "a@example.com", body: "hi", subject: "   " } });
+      await expect(sendingHandlers.send_email(ctx)).rejects.toBeInstanceOf(McpError);
+    });
+
+    it("SMTP-009: reply_to_email caps the Re: subject to MAX_SUBJECT_LENGTH", async () => {
+      const sendEmail = vi.fn().mockResolvedValue(sendOk);
+      const longSubject = "x".repeat(998);
+      const ctx = sendCtx({
+        args: { emailId: "1", body: "reply" },
+        smtpService: { sendEmail } as never,
+        imapService: {
+          getEmailById: vi.fn().mockResolvedValue({ id: "1", from: "p@example.com", subject: longSubject, to: [], cc: [] }),
+          setFlag: vi.fn().mockResolvedValue(true),
+        } as never,
+      });
+      await sendingHandlers.reply_to_email(ctx);
+      const sent = sendEmail.mock.calls[0][0] as { subject: string };
+      expect(sent.subject.length).toBeLessThanOrEqual(100);
+    });
+
+    it("SMTP-010: forward_email escapes the user message when the original is HTML", async () => {
+      const sendEmail = vi.fn().mockResolvedValue(sendOk);
+      const ctx = sendCtx({
+        args: { emailId: "1", to: "dest@example.com", message: "<script>alert(1)</script>" },
+        smtpService: { sendEmail } as never,
+        imapService: {
+          getEmailById: vi.fn().mockResolvedValue({ id: "1", from: "p@example.com", subject: "Hi", date: new Date(), to: [], isHtml: true, body: "<p>orig</p>" }),
+          setFlag: vi.fn().mockResolvedValue(true),
+        } as never,
+      });
+      await sendingHandlers.forward_email(ctx);
+      const sent = sendEmail.mock.calls[0][0] as { body: string };
+      expect(sent.body).not.toContain("<script>");
+      expect(sent.body).toContain("&lt;script&gt;");
+    });
+
+    it("SMTP-010: forward_email leaves the user message intact when the original is plain text", async () => {
+      const sendEmail = vi.fn().mockResolvedValue(sendOk);
+      const ctx = sendCtx({
+        args: { emailId: "1", to: "dest@example.com", message: "see < below" },
+        smtpService: { sendEmail } as never,
+        imapService: {
+          getEmailById: vi.fn().mockResolvedValue({ id: "1", from: "p@example.com", subject: "Hi", date: new Date(), to: [], isHtml: false, body: "orig" }),
+          setFlag: vi.fn().mockResolvedValue(true),
+        } as never,
+      });
+      await sendingHandlers.forward_email(ctx);
+      const sent = sendEmail.mock.calls[0][0] as { body: string };
+      expect(sent.body).toContain("see < below");
     });
   });
 });

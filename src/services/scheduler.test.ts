@@ -597,4 +597,46 @@ describe("SchedulerService", () => {
     // "failed" state, the record is honestly "cancelled".
     expect(svc.list().find(i => i.id === id)!.status).toBe("cancelled");
   });
+
+  it("SMTP-015: an active SMTP backoff defers the rest of the batch without bumping retryCount", async () => {
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "msg-1" });
+    const smtp = {
+      sendEmail,
+      // Backoff is already tripped before this batch runs.
+      backoff: { isBlocked: () => true },
+    } as unknown as SMTPService;
+
+    const svc = new SchedulerService(smtp, storePath);
+    const id1 = svc.schedule(makeOptions(), futureDate(120));
+    const id2 = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    await svc.processDue();
+
+    // No send attempted, and crucially no retryCount burned — both items remain
+    // cleanly "pending" for a later tick once the backoff window elapses.
+    expect(sendEmail).not.toHaveBeenCalled();
+    const items = svc.list();
+    expect(items.find(i => i.id === id1)!.status).toBe("pending");
+    expect(items.find(i => i.id === id2)!.status).toBe("pending");
+    expect(items.find(i => i.id === id1)!.retryCount ?? 0).toBe(0);
+    expect(items.find(i => i.id === id2)!.retryCount ?? 0).toBe(0);
+  });
+
+  it("SMTP-018: pruneHistory runs on persist(), not only at load()", () => {
+    const svc = new SchedulerService(makeSMTP(), storePath);
+    // Seed more terminal (cancelled) records than the history cap by scheduling
+    // + cancelling, then assert the on-disk blob is pruned without a restart.
+    const ids: string[] = [];
+    for (let i = 0; i < 1010; i++) {
+      ids.push(svc.schedule(makeOptions(), futureDate(120)));
+    }
+    for (const id of ids) svc.cancel(id);
+
+    // A final persist (triggered by the last cancel) must have pruned the
+    // non-pending history down to the cap on disk — not waited for next start.
+    const onDisk = JSON.parse(readFileSync(storePath, "utf-8")) as Array<{ status: string }>;
+    const nonPending = onDisk.filter(r => r.status !== "pending");
+    expect(nonPending.length).toBeLessThanOrEqual(1000);
+  });
 });
