@@ -548,7 +548,7 @@ export async function withConfigWriteLockAsync<T>(fn: () => Promise<T>): Promise
 export async function loadCredentialsFromKeychain(): Promise<{
   password: string;
   smtpToken: string;
-  storage: "keychain" | "encrypted-file" | "config";
+  storage: "keychain" | "encrypted-file" | "config" | "decrypt-failed";
 } | null> {
   const tags: { hasPassword?: boolean; hasSmtpToken?: boolean; storage?: string } = {};
   return tracer.span('config.loadKeychain', tags, async () => {
@@ -610,13 +610,15 @@ export async function loadCredentialsFromKeychain(): Promise<{
         return { password, smtpToken, storage: "encrypted-file" as const };
       }
       // Fail closed: a valid-shaped encrypted blob that failed to decrypt must
-      // not degrade to plaintext from this same file. Return null rather than
-      // masking the compromise indicator by using the legacy plaintext branch.
+      // not degrade to plaintext from this same file. Return a DISTINCT
+      // "decrypt-failed" sentinel (not null, which callers can't tell apart from
+      // "no credentials" and would answer by reading the plaintext field
+      // themselves) so the caller can refuse the plaintext fallback explicitly.
       if (decryptFailed) {
         tags.hasPassword = false;
         tags.hasSmtpToken = false;
-        tags.storage = "encrypted-file-decrypt-failed";
-        return null;
+        tags.storage = "decrypt-failed";
+        return { password: "", smtpToken: "", storage: "decrypt-failed" as const };
       }
     }
   }

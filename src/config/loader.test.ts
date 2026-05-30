@@ -600,7 +600,14 @@ describe("loadCredentialsFromKeychain", () => {
 
     const result = await loadCredentialsFromKeychain();
     // Fail closed — never serve the coexisting plaintext from the same file.
-    expect(result).toBeNull();
+    // A DISTINCT "decrypt-failed" sentinel is returned (not null and not the
+    // plaintext) so the caller can tell tamper apart from "no credentials" and
+    // refuse the plaintext fallback explicitly (see index.ts).
+    expect(result).not.toBeNull();
+    expect(result?.storage).toBe("decrypt-failed");
+    expect(result?.password).toBe("");
+    expect(result?.smtpToken).toBe("");
+    expect(result?.password).not.toBe("attacker-known-string");
   });
 
   it("still serves valid encrypted-file credentials when decrypt succeeds (no regression)", async () => {
