@@ -2296,9 +2296,15 @@ export class SimpleIMAPService {
           (id, msg) => { results.failed++; results.errors.push(`Failed to delete email ${id}: ${msg}`); },
           'Bulk delete',
           folder,
-          () => flaggedForExpunge.length
-            ? this.client!.messageDelete(flaggedForExpunge.join(','), { uid: true })
-            : Promise.resolve(),
+          // Chunk the trailing EXPUNGE through chunkUidsForWire so a large
+          // fallback set can't re-introduce IMAP-002's unbounded command line
+          // (Copilot review on #154). Still O(N/chunk) round-trips, not the
+          // O(N) serial EXPUNGEs IMAP-016 set out to avoid.
+          async () => {
+            for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
+              await this.client!.messageDelete(uidSet, { uid: true });
+            }
+          },
         );
       } finally {
         lock.release();
@@ -2682,9 +2688,13 @@ export class SimpleIMAPService {
           (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
           'Bulk delete-from-folder',
           folder,
-          () => flaggedForExpunge.length
-            ? this.client!.messageDelete(flaggedForExpunge.join(','), { uid: true })
-            : Promise.resolve(),
+          // Chunk the trailing EXPUNGE (Copilot review on #154) — see
+          // bulkDeleteEmails. Bounds the command line; O(N/chunk) round-trips.
+          async () => {
+            for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
+              await this.client!.messageDelete(uidSet, { uid: true });
+            }
+          },
         );
       }
     } finally { lock.release(); }
