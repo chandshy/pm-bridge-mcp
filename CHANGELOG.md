@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.54] — 2026-05-29
+
+### Fixed
+Parser/analytics correctness batch from the 2026-05-28 audit (DATA-PARSERS findings PARSE-001/003/004/005/006/007/010/011/012/013/015/016/017/018/019). Scope: `fts-service.ts`, `analytics-service.ts`, `content-parser.ts`.
+
+- **`fts_search` no longer throws on malformed FTS5 query syntax** (PARSE-001). `search()` passed the raw user query straight into `MATCH ?`; a stray `"`, `(`, or column-filter garbage raised an uncaught `SqliteError: fts5: syntax error` to the MCP client. (SQL injection was already impossible — the operand is a bound parameter.) Added a `runMatch()` wrapper around every `.all()` call site that catches FTS5 query-DSL syntax errors and returns a clean empty result; any other error is re-thrown unchanged.
+- **`FtsIndexService.rebuild()` clears and repopulates the index atomically** (PARSE-003). The previous flow (`clear()` then `upsertMany()`) committed the `DELETE` immediately, so a throw mid-repopulate left the index empty until the user noticed and re-triggered a rebuild. New `rebuild(records)` wraps the delete + bulk upsert in a single `db.transaction`, rolling back to the prior index on any failure. (The `fts_rebuild` tool handler in `src/tools/reading.ts` should be switched from `clear()`+`upsertMany()` to `rebuild()` — owned by the tools batch.)
+- **Contact cap no longer drops the user's own most-frequent recipients** (PARSE-004). `processContacts()` enforced the 10,000-contact cap in insertion order, iterating inbox before sent — so a flood of one-off inbox senders (newsletters, bounces) could exhaust the cap and silently drop every sent-to recipient. Sent recipients are now processed first, guaranteeing high-value contacts claim their map slots.
+- **Analytics now uses a single host-local time basis** (PARSE-005/006). `volumeTrends` previously bucketed by UTC ISO date while `peakActivityHours` used host-local `getHours()`, so two charts from the same dataset disagreed and evening mail drifted up to a day. Volume-trend day buckets now use host-local calendar dates (`localDateKey()`), matching peak-hours. Day buckets are seeded by walking back N *calendar* days via local y/m/d construction so a DST transition can't collapse or skip a day. No timezone library introduced.
+- **`responseTimeStats.median` is the conventional median** (PARSE-007). For even-length arrays it now returns the mean of the two middle values (`[1,2,3,4] → 2.5`) instead of the upper-middle element (`3`).
+- **`responseTimeStats` matches replies across angle-bracket variation** (PARSE-016). The Message-ID → date lookup now normalizes both the stored header and `inReplyTo` by stripping surrounding `<>`/whitespace, so a mailparser-style `<abc@x.com>` matches a bare `abc@x.com`; previously the lookup missed every reply and the whole block returned `null`.
+- **Undefined attachment sizes no longer poison storage stats** (PARSE-015). `att.size` (runtime `number | undefined`) is now added as `att.size ?? 0` in both `getEmailStats` and `calculateAttachmentStats`, preventing a single missing size from turning `storageUsedMB`/`totalSizeMB` into `NaN`.
+- **`inferOrganization` handles government domains correctly** (PARSE-017). `'gov'` was listed in both the TLD and compound-SLD branches; the duplicate left `cdc.gov` mis-cased and made the compound branch unreachable for it. Acronym TLDs (`edu`/`gov`/`mil`) now upper-case the whole label (`cdc.gov → CDC`), and `gov` in the compound branch only fires for real compounds like `gov.uk` (`hmrc.gov.uk → Hmrc`).
+- **iCal `DTSTART;TZID=...` zone is preserved** (PARSE-010). `splitProperty` now returns the property's parameter map; `parseIcs` persists the TZID on a new optional `Meeting.startTzid` field. The `start` value itself stays the raw RFC 5545 date-time string.
+- **iCal `BEGIN:VEVENT` lines with parameters are recognized** (PARSE-011). Legacy producers emit `BEGIN:VEVENT;X-MICROSOFT-CDO-BUSYSTATUS=BUSY`; the strict-equality block-start check silently produced `null`. Block boundaries are now matched on the parsed property name/value (and `END:VEVENT;…` is tolerated).
+- **iCal `unfoldLines` trims leading whitespace on the first line** (PARSE-012). A leading space/tab on the very first line is not a fold continuation (nothing to fold onto); it is now stripped so `splitProperty` doesn't read a property name of `" SUMMARY"` and drop the field.
+- **`extractActionItems` enforces its body cap in bytes** (PARSE-013). The 100 KB cap checked UTF-8 byte length but truncated with a character-count `.slice()`, letting ~4× the bytes through for multibyte bodies. Truncation now slices a `Buffer` and decodes back.
+- **`extractActionItems` dedup is punctuation-insensitive** (PARSE-018). The dedup key now also strips trailing `[.,;:!?]` so `Fix bug.` and `Fix bug!` collapse to one item.
+- **`extractActionItems` recognizes more bullet markers** (PARSE-019). `BULLET_RE` now matches `‣ ▪ ◦ ◾ ○ ▶ →` and the em-dash `—` used as a dash bullet in Mac/Office plaintext.
+
+### Notes
+- PARSE-002 was resolved in v3.0.48; PARSE-014 is owned by the IMAP batch (lives in `simple-imap-service.ts`).
+- PARSE-008/009 (`stripHtml` entity-decode order and HTML-comment stripping) also live in `simple-imap-service.ts` and are deferred to the IMAP batch — see audit annotations.
+
 ## [3.0.53] — 2026-05-29
 
 ### Fixed — tool-surface input hygiene (numeric + cast validation)

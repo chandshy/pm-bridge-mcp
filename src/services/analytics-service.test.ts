@@ -742,4 +742,108 @@ describe('AnalyticsService', () => {
       expect(Array.isArray(result.topSenders)).toBe(true);
     });
   });
+
+  // ─── audit-2026-05-28 parser/analytics hardening (v3.0.54) ─────────────────
+
+  function inboxMsg(over: Partial<EmailMessage>): EmailMessage {
+    return {
+      id: Math.random().toString(36).slice(2),
+      from: 'x@example.com', to: ['me@proton.me'], subject: 's', body: 'b',
+      isHtml: false, date: new Date('2024-01-15T10:00:00Z'), folder: 'INBOX',
+      isRead: true, isStarred: false, hasAttachment: false, ...over,
+    };
+  }
+  function sentMsg(over: Partial<EmailMessage>): EmailMessage {
+    return inboxMsg({ folder: 'Sent', from: 'me@proton.me', ...over });
+  }
+
+  describe('PARSE-007 — median of even-length response-time arrays', () => {
+    it('returns the mean of the two middle values, not the upper-middle', () => {
+      // Construct 4 replies with response times of 1h, 2h, 3h, 4h.
+      const base = new Date('2024-03-01T00:00:00Z').getTime();
+      const inbox: EmailMessage[] = [];
+      const sent: EmailMessage[] = [];
+      [1, 2, 3, 4].forEach((h, i) => {
+        const mid = `<orig-${i}@x.com>`;
+        inbox.push(inboxMsg({ date: new Date(base), headers: { 'message-id': mid } }));
+        sent.push(sentMsg({ date: new Date(base + h * 3600_000), inReplyTo: mid }));
+      });
+      const svc = new AnalyticsService();
+      svc.updateEmails(inbox, sent);
+      const rt = svc.getEmailAnalytics().responseTimeStats;
+      expect(rt).not.toBeNull();
+      // median of [1,2,3,4] = 2.5, not 3
+      expect(rt!.median).toBe(2.5);
+    });
+  });
+
+  describe('PARSE-016 — Message-ID angle-bracket normalization', () => {
+    it('matches a bracketed stored Message-ID against a bare inReplyTo', () => {
+      const orig = new Date('2024-03-01T00:00:00Z');
+      const inbox = [inboxMsg({ date: orig, headers: { 'message-id': '<abc@x.com>' } })];
+      const sent = [sentMsg({ date: new Date(orig.getTime() + 3600_000), inReplyTo: 'abc@x.com' })];
+      const svc = new AnalyticsService();
+      svc.updateEmails(inbox, sent);
+      const rt = svc.getEmailAnalytics().responseTimeStats;
+      expect(rt).not.toBeNull();
+      expect(rt!.sampleSize).toBe(1);
+    });
+  });
+
+  describe('PARSE-015 — undefined attachment size does not produce NaN', () => {
+    it('treats a missing att.size as 0 in storage stats', () => {
+      const msg = inboxMsg({
+        hasAttachment: true,
+        attachments: [{ filename: 'a.pdf', contentType: 'application/pdf', size: undefined as unknown as number }],
+      });
+      const svc = new AnalyticsService();
+      svc.updateEmails([msg]);
+      expect(Number.isNaN(svc.getEmailStats().storageUsedMB)).toBe(false);
+      expect(Number.isNaN(svc.getEmailAnalytics().attachmentStats.totalSizeMB)).toBe(false);
+    });
+  });
+
+  describe('PARSE-004 — sent recipients survive the contact cap', () => {
+    it('keeps high-value sent recipients even when inbox would exhaust the cap', () => {
+      // Smaller cap proxy: 10 005 distinct inbox senders + a few sent recipients.
+      const inbox = Array.from({ length: 10_005 }, (_, i) =>
+        inboxMsg({ from: `news-${i}@bulk.example.com` }));
+      const sent = [sentMsg({ to: ['vip@partner.com'] })];
+      const svc = new AnalyticsService();
+      svc.updateEmails(inbox, sent);
+      const recipients = svc.getContacts(50, 'sent');
+      expect(recipients.some(c => c.email === 'vip@partner.com')).toBe(true);
+    });
+  });
+
+  describe('PARSE-005/006 — volume trends bucket by local day', () => {
+    it('buckets an email by its host-local calendar date', () => {
+      // Use a recent local 21:00 timestamp so it falls inside the window.
+      // 21:00 local on a day where UTC would roll it to the next date for any
+      // negative-offset zone — the bucket must follow the LOCAL day.
+      const now = new Date();
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2, 21, 0, 0);
+      const svc = new AnalyticsService();
+      svc.updateEmails([inboxMsg({ date: d })]);
+      const trends = svc.getVolumeTrends(30);
+      const localKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const bucket = trends.find(t => t.date === localKey);
+      expect(bucket?.received).toBe(1);
+    });
+  });
+
+  describe('PARSE-017 — inferOrganization gov handling', () => {
+    it('upper-cases acronym TLDs (cdc.gov → CDC) and title-cases gov.uk compound', () => {
+      const svc = new AnalyticsService();
+      svc.updateEmails([
+        inboxMsg({ from: 'alerts@cdc.gov' }),
+        inboxMsg({ from: 'info@hmrc.gov.uk' }),
+      ]);
+      const contacts = svc.getContacts(50, 'received');
+      const cdc = contacts.find(c => c.email === 'alerts@cdc.gov');
+      const hmrc = contacts.find(c => c.email === 'info@hmrc.gov.uk');
+      expect(cdc?.organization).toBe('CDC');
+      expect(hmrc?.organization).toBe('Hmrc');
+    });
+  });
 });

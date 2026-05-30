@@ -26,6 +26,29 @@ function emailDomain(email: string): string {
 }
 
 /**
+ * Canonicalize a Message-ID / In-Reply-To header for cross-folder matching:
+ * trim whitespace and strip a single pair of surrounding angle brackets so the
+ * mailparser-style `<id@host>` form matches a bare `id@host`. Returns "" for
+ * nullish input.
+ */
+function normalizeMessageId(raw: string | undefined): string {
+  if (!raw) return '';
+  return raw.trim().replace(/^<+/, '').replace(/>+$/, '').trim();
+}
+
+/**
+ * Local-time YYYY-MM-DD key for a Date. Uses host-local accessors (not UTC) so
+ * volume-trend day buckets line up with the user's lived calendar day. See the
+ * TIME BASIS note on calculateVolumeTrends (PARSE-005/006, audit-2026-05-28).
+ */
+function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
  * Infer a human-readable organisation name from a domain.
  * Returns undefined for known personal providers (gmail, yahoo, etc.)
  * and for addresses without a recognisable company segment.
@@ -43,12 +66,20 @@ function inferOrganization(domain: string): string | undefined {
   const tld  = parts[parts.length - 1];
   const sld  = parts[parts.length - 2];
 
-  // Academic / government TLDs — org is the label just before the TLD
+  // Academic / government TLDs — org is the label just before the TLD.
+  // Known acronym TLDs upper-case the whole label (mit.edu → "MIT", cdc.gov →
+  // "CDC") rather than title-casing it ("Mit"/"Cdc").
   if (['edu', 'gov', 'mil', 'ac'].includes(tld)) {
-    return sld.charAt(0).toUpperCase() + sld.slice(1);
+    return ['edu', 'gov', 'mil'].includes(tld)
+      ? sld.toUpperCase()
+      : sld.charAt(0).toUpperCase() + sld.slice(1);
   }
 
-  // Compound SLDs like co.uk, com.au — org is one level higher
+  // Compound SLDs like co.uk, com.au, gov.uk — org is one level higher, and
+  // only when there's a label in front (parts.length >= 3). 'gov' appears here
+  // for gov.uk-style domains; the root-TLD case (cdc.gov) is already handled by
+  // the TLD branch above, so listing 'gov' in both lists previously left this
+  // branch unreachable for it and mis-cased gov.uk (PARSE-017, audit-2026-05-28).
   if (['co', 'com', 'org', 'net', 'gov'].includes(sld) && parts.length >= 3) {
     const org = parts[parts.length - 3];
     if (PERSONAL_DOMAINS.has(org)) return undefined;
@@ -120,17 +151,15 @@ export class AnalyticsService {
    * Build the contact map from both inbox (received) and sent emails.
    * - inbox emails → the `from` address sent a message to us
    * - sent emails  → the `to` addresses received a message from us
+   *
+   * Sent recipients are processed FIRST. The MAX_CONTACTS cap drops new
+   * contacts in insertion order once full; people the user actually emails are
+   * the highest-value contacts, so they must claim their map slots before a
+   * flood of one-off inbox senders (newsletters, bounces) can exhaust the cap
+   * (PARSE-004, audit-2026-05-28).
    */
   private processContacts(): void {
     this.contacts.clear();
-
-    for (const email of this.inboxEmails) {
-      const fromAddress = extractEmailAddress(email.from);
-      const fromName    = extractName(email.from);
-      if (fromAddress) {
-        this.updateContact(fromAddress, 'received', email.date, fromName);
-      }
-    }
 
     for (const email of this.sentEmails) {
       for (const to of email.to) {
@@ -139,6 +168,14 @@ export class AnalyticsService {
         if (toAddress) {
           this.updateContact(toAddress, 'sent', email.date, toName);
         }
+      }
+    }
+
+    for (const email of this.inboxEmails) {
+      const fromAddress = extractEmailAddress(email.from);
+      const fromName    = extractName(email.from);
+      if (fromAddress) {
+        this.updateContact(fromAddress, 'received', email.date, fromName);
       }
     }
 
@@ -237,7 +274,9 @@ export class AnalyticsService {
       totalBytes += email.body?.length ?? 0;
       if (email.attachments) {
         for (const att of email.attachments) {
-          totalBytes += att.size;
+          // att.size is number|undefined; an unguarded += yields NaN that then
+          // poisons storageUsedMB (PARSE-015, audit-2026-05-28).
+          totalBytes += att.size ?? 0;
         }
       }
     }
@@ -309,19 +348,24 @@ export class AnalyticsService {
   private calculateResponseTimeStats(): EmailAnalytics['responseTimeStats'] {
     const responseTimes: number[] = [];
 
-    // Build a lookup from Message-ID to inbox email date
+    // Build a lookup from Message-ID to inbox email date. Both the stored
+    // header and inReplyTo are normalized by stripping surrounding angle
+    // brackets and whitespace so `<abc@x.com>` (mailparser default) matches a
+    // bare `abc@x.com`; without this the lookup misses every reply and the
+    // whole stat block returns null even with data (PARSE-016, audit-2026-05-28).
     const inboxById = new Map<string, Date>();
     for (const email of this.inboxEmails) {
       const msgIdRaw = email.headers?.['message-id'];
       const msgId = Array.isArray(msgIdRaw) ? msgIdRaw[0] : msgIdRaw;
-      if (msgId) {
-        inboxById.set(msgId.trim(), email.date);
+      const key = normalizeMessageId(msgId);
+      if (key) {
+        inboxById.set(key, email.date);
       }
     }
 
     for (const sent of this.sentEmails) {
       if (!sent.inReplyTo) continue;
-      const originalDate = inboxById.get(sent.inReplyTo.trim());
+      const originalDate = inboxById.get(normalizeMessageId(sent.inReplyTo));
       if (!originalDate) continue;
 
       const diffHours = (sent.date.getTime() - originalDate.getTime()) / (1000 * 60 * 60);
@@ -335,7 +379,12 @@ export class AnalyticsService {
 
     responseTimes.sort((a, b) => a - b);
     const average = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
-    const median = responseTimes[Math.floor(responseTimes.length / 2)];
+    // Conventional median: mean of the two middle elements for even-length
+    // arrays, not the upper-middle element (PARSE-007, audit-2026-05-28).
+    const n = responseTimes.length;
+    const median = n % 2
+      ? responseTimes[(n - 1) / 2]
+      : (responseTimes[n / 2 - 1] + responseTimes[n / 2]) / 2;
 
     return {
       average: parseFloat(average.toFixed(1)),
@@ -348,30 +397,35 @@ export class AnalyticsService {
 
   /**
    * Volume trends split by received (inbox) and sent (sent folder).
+   *
+   * TIME BASIS: host-local time. Day boundaries (this method) and the hour of
+   * day (calculatePeakActivityHours) are both computed against the host's local
+   * zone so the two charts derived from the same dataset agree, and so a "Mon"
+   * bar reflects the day the user actually experienced rather than UTC. An
+   * email received at 9 PM ET Monday now counts toward Monday, not Tuesday-UTC
+   * (PARSE-005/006, audit-2026-05-28). No TZ library is used — date keys come
+   * from local Date accessors via localDateKey().
+   *
+   * Buckets are seeded by walking back `days` *calendar* days using local
+   * y/m/d construction (not fixed 86.4M-ms steps), so a DST transition can
+   * never collapse two local days onto one key or skip a day.
    */
   private calculateVolumeTrends(days: number): EmailAnalytics['volumeTrends'] {
     const trends = new Map<string, { received: number; sent: number }>();
 
-    // Use pure UTC arithmetic so DST transitions don't cause two local days
-    // to collapse onto the same ISO date string, which would produce fewer
-    // than `days` buckets.
     const now = new Date();
-    const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-    const msPerDay = 86_400_000;
     for (let i = 0; i < days; i++) {
-      const dateStr = new Date(todayUtc - i * msPerDay).toISOString().split('T')[0];
-      trends.set(dateStr, { received: 0, sent: 0 });
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      trends.set(localDateKey(d), { received: 0, sent: 0 });
     }
 
     for (const email of this.inboxEmails) {
-      const dateStr = email.date.toISOString().split('T')[0];
-      const entry = trends.get(dateStr);
+      const entry = trends.get(localDateKey(email.date));
       if (entry) entry.received++;
     }
 
     for (const email of this.sentEmails) {
-      const dateStr = email.date.toISOString().split('T')[0];
-      const entry = trends.get(dateStr);
+      const entry = trends.get(localDateKey(email.date));
       if (entry) entry.sent++;
     }
 
@@ -380,6 +434,8 @@ export class AnalyticsService {
       .sort((a, b) => a.date.localeCompare(b.date));
   }
 
+  // Peak activity hours use email.date.getHours() (host-local), matching the
+  // local-day basis of calculateVolumeTrends — see that method's TIME BASIS note.
   private calculatePeakActivityHours(): { hour: number; count: number }[] {
     const hourCounts = new Map<number, number>();
     for (let i = 0; i < 24; i++) hourCounts.set(i, 0);
@@ -404,7 +460,7 @@ export class AnalyticsService {
       if (email.attachments) {
         totalAttachments += email.attachments.length;
         for (const att of email.attachments) {
-          totalSizeBytes += att.size;
+          totalSizeBytes += att.size ?? 0; // guard number|undefined → no NaN (PARSE-015)
           const type = att.contentType?.split('/')[0] || 'other';
           typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
         }

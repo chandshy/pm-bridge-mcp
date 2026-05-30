@@ -20,6 +20,9 @@ export interface ActionItem {
 export interface Meeting {
   summary: string;
   start: string;
+  /** IANA/Olson zone from a `DTSTART;TZID=...` parameter, when present. The
+   *  `start` value itself stays the raw RFC 5545 date-time string. */
+  startTzid?: string;
   end?: string;
   location?: string;
   organizer?: string;
@@ -53,8 +56,10 @@ const ACTION_VERBS = [
 ];
 const ACTION_VERB_RE = new RegExp(`\\b(${ACTION_VERBS.join("|")})\\b`, "i");
 
-/** Bullet markers we recognise at the start of a line. */
-const BULLET_RE = /^\s*(?:[-*•]|\d+[.)]|\[[ xX]\])\s+/;
+/** Bullet markers we recognise at the start of a line. Includes the Unicode
+ *  bullets Mac/Office plaintext commonly emits (‣ ▪ ◦ ◾ ○ ▶ →) and the em-dash
+ *  (—) used as a dash bullet (PARSE-019, audit-2026-05-28). */
+const BULLET_RE = /^\s*(?:[-*•‣▪◦◾○▶→—]|\d+[.)]|\[[ xX]\])\s+/;
 
 /** Explicit "TODO:" / "ACTION:" / "ACTION ITEM:" markers — prefix is stripped. */
 const TODO_MARKER_RE = /^\s*(?:TODO|ACTION(?:\s+ITEM)?|FOLLOW[\s-]?UP)\s*:\s*/i;
@@ -80,10 +85,14 @@ const DEADLINE_RE = /\b(?:by|due(?:\s+by)?|before)\s+([A-Za-z0-9][\w,:/ -]{2,40}
 export function extractActionItems(body: string): ActionItem[] {
   if (typeof body !== "string" || body.length === 0) return [];
 
-  // Cap input size to avoid pathological scans. Byte length on UTF-8 rather
-  // than char count — emojis etc. shouldn't let a 1 MB body sneak through.
-  const truncated = Buffer.byteLength(body, "utf-8") > MAX_BODY_BYTES
-    ? body.slice(0, MAX_BODY_BYTES)
+  // Cap input size to avoid pathological scans. Both the check and the cut are
+  // in UTF-8 *bytes*: slicing a Buffer and decoding back keeps the cap honest
+  // for multibyte bodies, where a char-count slice would let ~4x the bytes
+  // through (PARSE-013, audit-2026-05-28). A multibyte char straddling the
+  // boundary decodes to U+FFFD, which is harmless for downstream line scanning.
+  const bytes = Buffer.from(body, "utf-8");
+  const truncated = bytes.length > MAX_BODY_BYTES
+    ? bytes.subarray(0, MAX_BODY_BYTES).toString("utf-8")
     : body;
 
   const lines = truncated.split(/\r?\n/);
@@ -119,7 +128,9 @@ export function extractActionItems(body: string): ActionItem[] {
     // email bodies are full of those and false-positive rate gets ugly.
     if (!hasMarker && !hasAssignee && !(hasBullet && hasVerb)) continue;
 
-    const key = text.toLowerCase().replace(/\s+/g, " ").trim();
+    // Dedup key is case-, whitespace-, and trailing-punctuation-insensitive so
+    // "Fix bug." and "Fix bug!" collapse to one item (PARSE-018, audit-2026-05-28).
+    const key = text.toLowerCase().replace(/\s+/g, " ").trim().replace(/[.,;:!?]+$/, "");
     if (seen.has(key)) continue;
     seen.add(key);
 
@@ -155,12 +166,18 @@ function unfoldLines(text: string): string[] {
   const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const rawLines = normalized.split("\n");
   const folded: string[] = [];
-  for (const line of rawLines) {
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
     if (line.startsWith(" ") || line.startsWith("\t")) {
       if (folded.length > 0) {
         folded[folded.length - 1] += line.slice(1);
         continue;
       }
+      // A leading space/tab on the very first line is not a fold continuation
+      // (there's nothing to fold onto). Trim it so splitProperty doesn't read
+      // the property name as " SUMMARY" and drop it (PARSE-012, audit-2026-05-28).
+      folded.push(line.replace(/^[ \t]+/, ""));
+      continue;
     }
     folded.push(line);
   }
@@ -169,16 +186,27 @@ function unfoldLines(text: string): string[] {
 
 /**
  * Split a property line like `ATTENDEE;CN=Alice;RSVP=TRUE:mailto:a@x.com`
- * into its name, parameters, and value.
+ * into its name, parameters, and value. Parameter keys are upper-cased; values
+ * keep their original case (TZID zone names are case-sensitive).
  */
-function splitProperty(line: string): { name: string; value: string } | null {
+function splitProperty(
+  line: string,
+): { name: string; value: string; params: Record<string, string> } | null {
   const colonIdx = line.indexOf(":");
   if (colonIdx < 0) return null;
   const left = line.slice(0, colonIdx);
   const value = line.slice(colonIdx + 1);
   const semiIdx = left.indexOf(";");
   const name = (semiIdx < 0 ? left : left.slice(0, semiIdx)).trim().toUpperCase();
-  return { name, value };
+  const params: Record<string, string> = {};
+  if (semiIdx >= 0) {
+    for (const part of left.slice(semiIdx + 1).split(";")) {
+      const eq = part.indexOf("=");
+      if (eq < 0) continue;
+      params[part.slice(0, eq).trim().toUpperCase()] = part.slice(eq + 1).trim();
+    }
+  }
+  return { name, value, params };
 }
 
 /**
@@ -215,16 +243,24 @@ export function parseIcs(text: string): Meeting | null {
   // Locate the first VEVENT block. ICS files often contain multiple VEVENTs
   // (recurring exceptions, etc.) — we return just the first to keep the tool
   // response shape simple; callers that need more can iterate themselves.
+  // A VEVENT block may legally carry parameters on its BEGIN line, e.g.
+  // `BEGIN:VEVENT;X-MICROSOFT-CDO-BUSYSTATUS=BUSY` from some legacy producers.
+  // Match on the property name/value rather than strict equality so those
+  // aren't silently skipped (PARSE-011, audit-2026-05-28).
+  const isBoundary = (line: string, keyword: "BEGIN" | "END", value: string): boolean => {
+    const prop = splitProperty(line);
+    return prop !== null && prop.name === keyword &&
+      prop.value.trim().toUpperCase().split(";")[0] === value;
+  };
   let inEvent = false;
   let eventLines: string[] = [];
   for (const line of lines) {
-    const upper = line.trim().toUpperCase();
-    if (upper === "BEGIN:VEVENT") {
+    if (isBoundary(line, "BEGIN", "VEVENT")) {
       inEvent = true;
       eventLines = [];
       continue;
     }
-    if (upper === "END:VEVENT") {
+    if (isBoundary(line, "END", "VEVENT")) {
       if (inEvent) break;
     }
     if (inEvent) eventLines.push(line);
@@ -233,6 +269,7 @@ export function parseIcs(text: string): Meeting | null {
 
   let summary: string | undefined;
   let start: string | undefined;
+  let startTzid: string | undefined;
   let end: string | undefined;
   let location: string | undefined;
   let organizer: string | undefined;
@@ -243,7 +280,7 @@ export function parseIcs(text: string): Meeting | null {
   for (const raw of eventLines) {
     const prop = splitProperty(raw);
     if (!prop) continue;
-    const { name, value } = prop;
+    const { name, value, params } = prop;
 
     switch (name) {
       case "SUMMARY":
@@ -251,6 +288,9 @@ export function parseIcs(text: string): Meeting | null {
         break;
       case "DTSTART":
         start = value.trim();
+        // Capture the zone from `DTSTART;TZID=America/New_York:...` so the
+        // naïve local date-time string isn't presented zoneless (PARSE-010).
+        if (params.TZID) startTzid = params.TZID;
         break;
       case "DTEND":
         end = value.trim();
@@ -286,6 +326,7 @@ export function parseIcs(text: string): Meeting | null {
   if (!summary || !start) return null;
 
   const meeting: Meeting = { summary, start };
+  if (startTzid) meeting.startTzid = startTzid;
   if (end) meeting.end = end;
   if (location) meeting.location = location;
   if (organizer) meeting.organizer = organizer;

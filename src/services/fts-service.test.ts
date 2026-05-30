@@ -245,4 +245,53 @@ describeMaybe("FtsIndexService", () => {
       expect(svc.stats().messageCount).toBe(3);
     });
   });
+
+  // ─── audit-2026-05-28 parser/analytics hardening (v3.0.54) ─────────────────
+
+  describe("PARSE-001 — malformed FTS5 query returns empty, does not throw", () => {
+    it("swallows an unterminated-quote query", () => {
+      svc.upsert(sampleRecord({ subject: "hello world" }));
+      expect(() => svc.search({ query: '"unterminated' })).not.toThrow();
+      expect(svc.search({ query: '"unterminated' })).toEqual([]);
+    });
+
+    it("swallows a bare unbalanced paren / column-filter garbage", () => {
+      svc.upsert(sampleRecord());
+      expect(() => svc.search({ query: "foo (((" })).not.toThrow();
+      expect(svc.search({ query: "foo (((" })).toEqual([]);
+      // Also exercise the allowedFolders SQL path.
+      expect(svc.search({ query: '"bad', allowedFolders: ["INBOX"] })).toEqual([]);
+    });
+
+    it("still returns hits for a well-formed query", () => {
+      svc.upsert(sampleRecord({ subject: "roadmap sync" }));
+      expect(svc.search({ query: "roadmap" }).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("PARSE-003 — rebuild is atomic", () => {
+    it("repopulates the index in a single transaction", () => {
+      svc.upsert(sampleRecord({ id: "old", subject: "stale entry" }));
+      const indexed = svc.rebuild([
+        sampleRecord({ id: "n1", subject: "fresh one" }),
+        sampleRecord({ id: "n2", subject: "fresh two" }),
+      ]);
+      expect(indexed).toBe(2);
+      expect(svc.stats().messageCount).toBe(2);
+      // Old record is gone; new ones are searchable.
+      expect(svc.search({ query: "stale" })).toEqual([]);
+      expect(svc.search({ query: "fresh" }).length).toBe(2);
+    });
+
+    it("leaves the prior index intact when a record throws mid-rebuild", () => {
+      svc.upsert(sampleRecord({ id: "keep", subject: "keep me" }));
+      // A record whose body is a non-string Buffer makes upsert's bound write
+      // throw; the transaction must roll back the DELETE.
+      const bad = sampleRecord({ id: "bad" });
+      (bad as { body: unknown }).body = Symbol("not bindable");
+      expect(() => svc.rebuild([bad])).toThrow();
+      expect(svc.stats().messageCount).toBe(1);
+      expect(svc.search({ query: "keep" }).length).toBe(1);
+    });
+  });
 });
