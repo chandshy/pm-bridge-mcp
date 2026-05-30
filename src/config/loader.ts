@@ -8,7 +8,7 @@
  * to reduce the risk of credential exposure.
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, statSync, openSync, closeSync, unlinkSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, resolve, normalize } from "path";
 import { randomBytes } from "crypto";
@@ -349,9 +349,98 @@ export function loadConfig(): ServerConfig | null {
   return config;
 }
 
+// ─── Config file lock (CRED-008) ─────────────────────────────────────────────
+//
+// Read-modify-write callers (saveConfig, and writeRegistry's load→merge→save)
+// race with each other and with the settings-UI POST handler. Without a lock,
+// two near-simultaneous renames clobber one another (last-writer-wins) and a
+// reader caught between them can observe a half-merged file. We serialize via
+// an exclusive O_EXCL lock file next to the config — no new dependency.
+
+/** Max attempts to acquire the lock before giving up. */
+const LOCK_MAX_RETRIES = 50;
+/** Delay between lock acquisition attempts (busy-wait; writes are sub-ms). */
+const LOCK_RETRY_DELAY_MS = 20;
+/** A lock file older than this is treated as abandoned by a crashed holder. */
+const LOCK_STALE_MS = 10_000;
+
+/**
+ * Reentrancy depth. writeRegistry holds the lock across its whole
+ * read-modify-write and calls saveConfig() inside it; the inner saveConfig
+ * must reuse the held lock rather than deadlock on its own O_EXCL.
+ */
+let _lockDepth = 0;
+
+/**
+ * In-process async serialization. The on-disk O_EXCL lock guards against OTHER
+ * processes (settings UI, a second MCP), but two concurrent async writers in
+ * THIS process cannot busy-wait on it — a synchronous spin would block the
+ * event loop and deadlock the holder mid-await. This promise chain queues
+ * same-process async writers so they run one at a time.
+ */
+let _asyncLockChain: Promise<void> = Promise.resolve();
+
+function blockMs(ms: number): void {
+  // Synchronous sleep for the sync acquire path (saveConfig). Node lacks a sync
+  // sleep; Atomics.wait on a throwaway buffer is the standard no-dep idiom.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Run `fn` while holding an exclusive lock on `${dest}.lock`. Reentrant for the
+ * same process (depth-counted). Reclaims a stale lock left by a crashed holder.
+ * The lock is always released in the outermost frame via try/finally.
+ */
+function withConfigLock<T>(dest: string, fn: () => T): T {
+  if (_lockDepth > 0) {
+    // Already held by an outer frame in this process — reuse it.
+    _lockDepth++;
+    try { return fn(); }
+    finally { _lockDepth--; }
+  }
+
+  const lockPath = `${dest}.lock`;
+  let fd: number | null = null;
+  for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt++) {
+    try {
+      fd = openSync(lockPath, "wx", 0o600); // O_CREAT | O_EXCL
+      break;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Lock held by someone else — reclaim it if it's stale (crashed holder),
+      // otherwise back off and retry.
+      try {
+        const age = Date.now() - statSync(lockPath).mtimeMs;
+        if (age > LOCK_STALE_MS) {
+          unlinkSync(lockPath);
+          continue; // retry immediately after clearing the stale lock
+        }
+      } catch { /* lock vanished between open and stat — just retry */ }
+      blockMs(LOCK_RETRY_DELAY_MS);
+    }
+  }
+  if (fd === null) {
+    throw new Error(`Could not acquire config lock at ${lockPath} after ${LOCK_MAX_RETRIES} attempts`);
+  }
+
+  _lockDepth++;
+  try {
+    return fn();
+  } finally {
+    _lockDepth--;
+    try { closeSync(fd); } catch { /* already closed */ }
+    try { unlinkSync(lockPath); } catch { /* already removed */ }
+  }
+}
+
 export function saveConfig(config: ServerConfig): void {
   tracer.spanSync('config.save', {}, () => {
   const dest    = getConfigPath();
+  withConfigLock(dest, () => {
   const payload = JSON.stringify(config, null, 2);
   // Atomic write: write to a temp file then rename into place.
   // rename(2) is atomic on POSIX only when both sides live on the same
@@ -362,7 +451,73 @@ export function saveConfig(config: ServerConfig): void {
   writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });
   renameSync(tmp, dest);
   invalidateConfigCache();
+  });
   }); // end tracer.spanSync('config.save')
+}
+
+/**
+ * Run a read-modify-write of the config file under the exclusive lock so the
+ * read (loadConfig) and the write (saveConfig) cannot interleave with a racing
+ * writer. saveConfig() reuses the held lock reentrantly. CRED-008.
+ */
+export function withConfigWriteLock<T>(fn: () => T): T {
+  return withConfigLock(getConfigPath(), fn);
+}
+
+/**
+ * Async variant of withConfigWriteLock for callers whose read-modify-write
+ * spans an await (e.g. writeRegistry, which routes secrets through the
+ * keychain between load and save). The lock is held for the full duration and
+ * released only after the promise settles. CRED-008.
+ */
+export async function withConfigWriteLockAsync<T>(fn: () => Promise<T>): Promise<T> {
+  // Reentrant: an async writer already holding the lock (e.g. a future nested
+  // call) reuses it rather than enqueuing behind itself.
+  if (_lockDepth > 0) {
+    _lockDepth++;
+    try { return await fn(); }
+    finally { _lockDepth--; }
+  }
+
+  // Queue behind any in-flight same-process async writer. Chain on settle (not
+  // resolve) so one writer's failure doesn't wedge the queue.
+  const prior = _asyncLockChain;
+  let release!: () => void;
+  _asyncLockChain = new Promise<void>(r => { release = r; });
+  await prior.catch(() => {});
+
+  const dest = getConfigPath();
+  const lockPath = `${dest}.lock`;
+  let fd: number | null = null;
+  try {
+    for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt++) {
+      try {
+        fd = openSync(lockPath, "wx", 0o600); // O_CREAT | O_EXCL
+        break;
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        try {
+          const age = Date.now() - statSync(lockPath).mtimeMs;
+          if (age > LOCK_STALE_MS) { unlinkSync(lockPath); continue; }
+        } catch { /* lock vanished — retry */ }
+        await sleepMs(LOCK_RETRY_DELAY_MS); // async sleep — never blocks the loop
+      }
+    }
+    if (fd === null) {
+      throw new Error(`Could not acquire config lock at ${lockPath} after ${LOCK_MAX_RETRIES} attempts`);
+    }
+
+    _lockDepth++;
+    try {
+      return await fn();
+    } finally {
+      _lockDepth--;
+      try { closeSync(fd); } catch { /* already closed */ }
+      try { unlinkSync(lockPath); } catch { /* already removed */ }
+    }
+  } finally {
+    release();
+  }
 }
 
 // ─── Keychain-aware credential helpers ──────────────────────────────────────

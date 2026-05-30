@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SchedulerService } from "./scheduler.js";
 import type { SMTPService } from "./smtp-service.js";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -131,17 +131,98 @@ describe("SchedulerService", () => {
     const svc = new SchedulerService(smtp, storePath);
     const id = svc.schedule(makeOptions(), futureDate(120));
     vi.advanceTimersByTime(121 * 1000);
-    // Retry up to MAX_RETRIES (3) times before permanently failing
+    // Retry up to MAX_RETRIES (3) times before permanently failing. Each failed
+    // attempt sets a per-item backoff (SMTP-003), so advance past it between
+    // attempts or the item is skipped as not-yet-eligible.
     await svc.processDue();
     expect(svc.list().find(i => i.id === id)!.status).toBe("pending"); // still retrying
+    vi.advanceTimersByTime(61 * 1000); // past attempt-1 backoff (60s)
     await svc.processDue();
     expect(svc.list().find(i => i.id === id)!.status).toBe("pending"); // still retrying
+    vi.advanceTimersByTime(121 * 1000); // past attempt-2 backoff (120s)
     await svc.processDue();
     const item = svc.list().find(i => i.id === id)!;
     expect(item.status).toBe("failed");
     expect(item.error).toBe("SMTP error");
     expect(item.retryCount).toBe(3);
     expect(smtp.sendEmail).toHaveBeenCalledTimes(3);
+  });
+
+  it("processDue() applies per-item exponential backoff between retries (SMTP-003)", async () => {
+    const smtp = makeSMTP({ success: false, error: "transient" });
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    // First attempt fails → retryCount 1, nextAttemptAt ~60s out.
+    await svc.processDue();
+    const afterFirst = svc.list().find(i => i.id === id)!;
+    expect(afterFirst.retryCount).toBe(1);
+    expect(afterFirst.nextAttemptAt).toBeTruthy();
+    expect(new Date(afterFirst.nextAttemptAt!).getTime()).toBeGreaterThan(Date.now());
+
+    // A poll tick BEFORE the backoff window elapses must NOT re-send.
+    vi.advanceTimersByTime(30 * 1000);
+    await svc.processDue();
+    expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
+    expect(svc.list().find(i => i.id === id)!.retryCount).toBe(1);
+
+    // After the window elapses it retries once more.
+    vi.advanceTimersByTime(31 * 1000);
+    await svc.processDue();
+    expect(smtp.sendEmail).toHaveBeenCalledTimes(2);
+    expect(svc.list().find(i => i.id === id)!.retryCount).toBe(2);
+  });
+
+  it("processDue() clears nextAttemptAt on success", async () => {
+    // Fail once (sets backoff), then succeed; nextAttemptAt should be cleared.
+    const smtp = {
+      sendEmail: vi.fn()
+        .mockResolvedValueOnce({ success: false, error: "x" })
+        .mockResolvedValueOnce({ success: true, messageId: "m" }),
+    } as unknown as SMTPService;
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+    await svc.processDue();
+    expect(svc.list().find(i => i.id === id)!.nextAttemptAt).toBeTruthy();
+    vi.advanceTimersByTime(61 * 1000);
+    await svc.processDue();
+    const item = svc.list().find(i => i.id === id)!;
+    expect(item.status).toBe("sent");
+    expect(item.nextAttemptAt).toBeUndefined();
+  });
+
+  it("processDue() persists after each item's status flip, not only at loop end (SMTP-004)", async () => {
+    // Two due items. The second send stays pending; while it is in flight we
+    // inspect the on-disk store. With per-item persist the first item is
+    // already "sent" on disk — under the old loop-end-only persist a crash here
+    // would re-send it on restart.
+    let resolveSecond!: (v: { success: boolean; messageId: string }) => void;
+    const secondPromise = new Promise<{ success: boolean; messageId: string }>(r => { resolveSecond = r; });
+    const smtp = {
+      sendEmail: vi.fn()
+        .mockResolvedValueOnce({ success: true, messageId: "m1" })
+        .mockReturnValueOnce(secondPromise),
+    } as unknown as SMTPService;
+    const svc = new SchedulerService(smtp, storePath);
+    svc.schedule(makeOptions(), futureDate(120));
+    svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+
+    const due = svc.processDue();
+    // Let the first send resolve and its post-send persist run, while the
+    // second send is still pending (loop has NOT reached its end-of-loop persist).
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const onDisk = JSON.parse(readFileSync(storePath, "utf-8"));
+    const sentCount = onDisk.filter((r: { status: string }) => r.status === "sent").length;
+    expect(sentCount).toBe(1);
+
+    resolveSecond({ success: true, messageId: "m2" });
+    await due;
   });
 
   it("processDue() does not send items that are not due yet", async () => {
@@ -369,9 +450,11 @@ describe("SchedulerService", () => {
     const id = svc.schedule(makeOptions(), futureDate(120));
     vi.advanceTimersByTime(121 * 1000);
 
-    // Exhaust retries
+    // Exhaust retries — advance past each per-item backoff window (SMTP-003).
     await svc.processDue();
+    vi.advanceTimersByTime(61 * 1000);
     await svc.processDue();
+    vi.advanceTimersByTime(121 * 1000);
     await svc.processDue();
 
     const item = svc.list().find(i => i.id === id)!;
@@ -388,9 +471,12 @@ describe("SchedulerService", () => {
     const id = svc.schedule(makeOptions(), futureDate(120));
     vi.advanceTimersByTime(121 * 1000);
 
-    // Run processDue 3 times (MAX_RETRIES) to exhaust retries via the catch branch
+    // Run processDue 3 times (MAX_RETRIES) to exhaust retries via the catch
+    // branch, advancing past each per-item backoff window (SMTP-003).
     await svc.processDue();
+    vi.advanceTimersByTime(61 * 1000);
     await svc.processDue();
+    vi.advanceTimersByTime(121 * 1000);
     await svc.processDue();
 
     const item = svc.list().find(i => i.id === id)!;

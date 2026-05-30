@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ReminderService } from "./reminder-service.js";
-import { rmSync, existsSync } from "fs";
+import { rmSync, existsSync, readdirSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
@@ -201,6 +201,86 @@ describe("ReminderService", () => {
     it("is a no-op when there are no pending reminders", () => {
       const svc = new ReminderService(path);
       expect(svc.detectRepliesAndCancel([{ headers: { "in-reply-to": "<anything@x>" } }])).toEqual([]);
+    });
+  });
+
+  describe("persistence atomicity (SMTP-005/006/007)", () => {
+    it("writes the tmp file alongside the store, not in tmpdir (SMTP-005)", () => {
+      // A persist into a directory whose tmpdir() lives on a different mount must
+      // still succeed. We assert the regression indirectly: after a successful
+      // persist no stray tmp file is left in tmpdir() (the old code wrote
+      // `mailpouch-reminders-*.json.tmp` there), and the on-disk store exists
+      // next to `path`.
+      const svc = new ReminderService(path);
+      svc.add({ messageId: "<a>", recipient: "a@x", subject: "s", sentAt: new Date(), afterDays: 1 });
+      expect(existsSync(path)).toBe(true);
+      const strays = readdirSync(tmpdir()).filter(f => f.startsWith("mailpouch-reminders-") && f.endsWith(".json.tmp"));
+      expect(strays).toEqual([]);
+    });
+
+    // Force a persist() failure by pointing the store at a path whose PARENT
+    // directory does not exist: `writeFileSync(tmp)` then throws ENOENT,
+    // exercising the rollback branch deterministically and cross-platform.
+    function svcWithFailingPersist(): { svc: ReminderService; goodPath: string } {
+      const goodPath = tmpPath();
+      const svc = new ReminderService(goodPath);
+      return { svc, goodPath };
+    }
+
+    it("add() rolls back the in-memory mutation when persist fails (SMTP-006)", () => {
+      const { svc } = svcWithFailingPersist();
+      svc.add({ messageId: "<seed>", recipient: "a@x", subject: "seed", sentAt: new Date(), afterDays: 1 });
+      const before = svc.listAll().length;
+      // Break the destination: replace the store path with a directory so the
+      // rename target is invalid (EISDIR / ENOTEMPTY), failing persist().
+      rmSync((svc as unknown as { path: string }).path, { force: true });
+      mkdirSync((svc as unknown as { path: string }).path);
+      expect(() => svc.add({ messageId: "<b>", recipient: "a@x", subject: "s", sentAt: new Date(), afterDays: 1 })).toThrow();
+      // The failed add must NOT remain in memory.
+      expect(svc.listAll().length).toBe(before);
+      expect(svc.listAll().some(r => r.messageId === "<b>")).toBe(false);
+      rmSync((svc as unknown as { path: string }).path, { recursive: true, force: true });
+    });
+
+    it("cancel() rolls back when persist fails (SMTP-006)", () => {
+      const { svc } = svcWithFailingPersist();
+      const rec = svc.add({ messageId: "<a>", recipient: "a@x", subject: "s", sentAt: new Date(), afterDays: 1 });
+      const p = (svc as unknown as { path: string }).path;
+      rmSync(p, { force: true });
+      mkdirSync(p);
+      expect(() => svc.cancel(rec.id)).toThrow();
+      // Status must still be pending — the failed cancel was rolled back.
+      expect(svc.listPending().map(r => r.id)).toEqual([rec.id]);
+      rmSync(p, { recursive: true, force: true });
+    });
+
+    it("scanDue() rolls back the fired transition when persist fails — at-least-once preserved (SMTP-007)", () => {
+      const { svc } = svcWithFailingPersist();
+      const sentAt = new Date("2026-04-01T00:00:00Z");
+      svc.add({ messageId: "<a>", recipient: "a@x", subject: "due", sentAt, afterDays: 1 });
+      const p = (svc as unknown as { path: string }).path;
+      rmSync(p, { force: true });
+      mkdirSync(p);
+      const now = new Date(sentAt.getTime() + 5 * 86_400_000);
+      expect(() => svc.scanDue(now)).toThrow();
+      // The reminder must remain pending so a later scan re-fires it (no silent loss).
+      expect(svc.listPending()).toHaveLength(1);
+      rmSync(p, { recursive: true, force: true });
+      // After the destination is healthy again, scanDue fires it durably.
+      const fired = svc.scanDue(now);
+      expect(fired).toHaveLength(1);
+    });
+
+    it("scanDue() persists the fired transition before returning (SMTP-007)", () => {
+      const svc = new ReminderService(path);
+      const sentAt = new Date("2026-04-01T00:00:00Z");
+      svc.add({ messageId: "<a>", recipient: "a@x", subject: "due", sentAt, afterDays: 1 });
+      const now = new Date(sentAt.getTime() + 5 * 86_400_000);
+      svc.scanDue(now);
+      // A fresh instance loading from disk must already see the fired state.
+      const reloaded = new ReminderService(path);
+      expect(reloaded.listPending()).toEqual([]);
+      expect(reloaded.listAll().find(r => r.messageId === "<a>")?.status).toBe("fired");
     });
   });
 });

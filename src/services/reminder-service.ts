@@ -11,8 +11,6 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
 import { randomBytes } from "crypto";
 import { logger } from "../utils/logger.js";
 
@@ -69,9 +67,49 @@ export class ReminderService {
 
   private persist(): void {
     const payload: ReminderFile = { version: 1, reminders: this.reminders };
-    const tmp = join(tmpdir(), `mailpouch-reminders-${randomBytes(8).toString("hex")}.json.tmp`);
+    // SMTP-005: write the tmp file alongside the destination, not in tmpdir().
+    // rename(2) is only atomic within a single filesystem; a tmpfs /tmp →
+    // ext4 $HOME rename throws EXDEV on containerised / NFS-home installs.
+    const tmp = `${this.path}.${randomBytes(8).toString("hex")}.tmp`;
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf-8", mode: 0o600 });
     renameSync(tmp, this.path);
+  }
+
+  /**
+   * SMTP-006: persist the current in-memory state, rolling it back to the
+   * supplied snapshot if the write fails. Without this, a failed persist()
+   * (EXDEV, ENOSPC, EACCES) leaves `this.reminders` advanced past disk; a
+   * later successful persist() would then silently flush the half-baked
+   * mutation — e.g. a "fired" reminder the caller never received getting
+   * written as "fired", breaking check_reminders' at-least-once guarantee.
+   *
+   * SMTP-007: scanDue() routes its fire-transition through here, so the
+   * "fired" flip is committed to disk before the method returns or rolled
+   * back atomically with the in-memory state. The at-least-once limitation
+   * (a dropped MCP response after a successful persist) remains by design
+   * pending a dedicated acknowledge tool — see the SMTP-007 audit note.
+   *
+   * @param snapshot Deep copy of `this.reminders` taken BEFORE the mutation.
+   * @throws Re-throws the underlying persist error after rolling back so the
+   *         caller (and the MCP tool layer) sees the failure.
+   */
+  private persistOrRollback(snapshot: Reminder[]): void {
+    try {
+      this.persist();
+    } catch (err) {
+      this.reminders = snapshot;
+      logger.error(
+        `ReminderService: persist failed — rolled back in-memory state to last durable snapshot`,
+        "ReminderService",
+        err,
+      );
+      throw err;
+    }
+  }
+
+  /** Deep-clone the current reminders for use as a rollback snapshot. */
+  private snapshot(): Reminder[] {
+    return this.reminders.map(r => ({ ...r }));
   }
 
   /**
@@ -102,8 +140,9 @@ export class ReminderService {
       status: "pending",
       note: args.note,
     };
+    const snapshot = this.snapshot();
     this.reminders.push(record);
-    this.persist();
+    this.persistOrRollback(snapshot);
     return record;
   }
 
@@ -122,8 +161,9 @@ export class ReminderService {
   cancel(id: string): boolean {
     const r = this.reminders.find(x => x.id === id);
     if (!r || r.status !== "pending") return false;
+    const snapshot = this.snapshot();
     r.status = "cancelled";
-    this.persist();
+    this.persistOrRollback(snapshot);
     return true;
   }
 
@@ -139,6 +179,8 @@ export class ReminderService {
   detectRepliesAndCancel(inbox: Array<{ headers?: Record<string, string | string[]> }>): string[] {
     const pending = this.reminders.filter(r => r.status === "pending");
     if (pending.length === 0) return [];
+
+    const snapshot = this.snapshot();
 
     // Build a lowercased set of the Message-IDs we're watching for,
     // tolerating both <id@host> and bare id@host forms.
@@ -176,7 +218,7 @@ export class ReminderService {
         }
       }
     }
-    if (cancelled.length > 0) this.persist();
+    if (cancelled.length > 0) this.persistOrRollback(snapshot);
     return cancelled;
   }
 
@@ -188,6 +230,7 @@ export class ReminderService {
   scanDue(now: Date = new Date()): Reminder[] {
     const cutoffMs = now.getTime();
     const fired: Reminder[] = [];
+    const snapshot = this.snapshot();
     let mutated = false;
     for (const r of this.reminders) {
       if (r.status === "pending" && Date.parse(r.fireAt) <= cutoffMs) {
@@ -196,20 +239,25 @@ export class ReminderService {
         mutated = true;
       }
     }
-    if (mutated) this.persist();
+    // SMTP-007: commit the "fired" transition to disk BEFORE returning it. On
+    // persist failure persistOrRollback() restores the snapshot and throws, so
+    // we never hand the caller reminders whose fired-state didn't reach disk —
+    // they stay pending and resurface on the next scan (at-least-once).
+    if (mutated) this.persistOrRollback(snapshot);
     return fired;
   }
 
   /** Remove fired/cancelled reminders older than the retention window. */
   prune(retainDays = 30): number {
     const cutoff = Date.now() - retainDays * 24 * 60 * 60 * 1000;
+    const snapshot = this.snapshot();
     const before = this.reminders.length;
     this.reminders = this.reminders.filter(r => {
       if (r.status === "pending") return true;
       return Date.parse(r.fireAt) >= cutoff;
     });
     const removed = before - this.reminders.length;
-    if (removed > 0) this.persist();
+    if (removed > 0) this.persistOrRollback(snapshot);
     return removed;
   }
 }

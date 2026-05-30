@@ -233,6 +233,8 @@ export interface ScheduledEmail {
   createdAt: string; // ISO 8601
   error?: string;
   retryCount?: number;
+  /** ISO-8601 earliest time the next send attempt may run (per-item backoff). */
+  nextAttemptAt?: string;
 }
 
 export interface ConnectionStatus {

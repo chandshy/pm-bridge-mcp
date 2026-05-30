@@ -43,6 +43,11 @@ vi.mock("fs", async () => {
       diskByPath.set(String(to), s);
     }),
     statSync: vi.fn(),   // returns undefined → mtime check throws → cache bypassed
+    // CRED-008 config-lock primitives: no-op so writeRegistry's lock doesn't
+    // touch the real home dir. Real concurrency is covered by config-lock.test.ts.
+    openSync: vi.fn(() => 3),
+    closeSync: vi.fn(),
+    unlinkSync: vi.fn(),
     appendFile: vi.fn((_path: string, _data: string, _enc: string, cb: () => void) => cb()),
   };
 });
