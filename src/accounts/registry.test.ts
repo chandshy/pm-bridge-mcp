@@ -68,6 +68,7 @@ vi.mock("../security/keychain.js", () => ({
 
 import {
   readRegistry,
+  readRegistryWithSecrets,
   createAccount,
   updateAccount,
   deleteAccount,
@@ -267,5 +268,28 @@ describe("accounts registry", () => {
     expect(acct!.password).toBe("stays-on-disk");  // keychain failed → plaintext kept
     expect(acct!.smtpToken).toBeUndefined();        // empty token coerced to undefined
     expect(onDisk.credentialStorage).toBe("config"); // NOT keychain
+  });
+
+  // ─── CRED-005 — readRegistryWithSecrets fetches the keychain at most once ──
+
+  it("CRED-005: hits loadAccountCredentials once per account, not twice", async () => {
+    const keychain = await import("../security/keychain.js");
+    const loadAcct = vi.mocked(keychain.loadAccountCredentials);
+    loadAcct.mockReset();
+    loadAcct.mockResolvedValue({ password: "pw", smtpToken: "tok" });
+    // Two accounts, both with blank password+token on disk so both need a fetch.
+    seedConfig({
+      accounts: [
+        { id: "primary", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "", smtpToken: "" },
+        { id: "acct-2", name: "B", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "b", password: "", smtpToken: "" },
+      ],
+      activeAccountId: "primary",
+    } as Partial<ServerConfig>);
+
+    const reg = await readRegistryWithSecrets();
+    // One keychain fetch per account (was two: one for password, one for token).
+    expect(loadAcct).toHaveBeenCalledTimes(2);
+    expect(reg.accounts.find(a => a.id === "primary")?.password).toBe("pw");
+    expect(reg.accounts.find(a => a.id === "primary")?.smtpToken).toBe("tok");
   });
 });

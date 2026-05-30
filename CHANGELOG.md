@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.62] — 2026-05-30
+
+### Fixed — tools / validators / parsers / credentials low-severity sweep (audit 2026-05-28)
+
+**Validators (`src/utils/helpers.ts`)**
+- VALID-004: `validateLabelName` and `validateFolderName` now delegate to a single shared `validateLeafName(value, fieldName)` core so the byte-identical rules can't drift.
+- VALID-007: every text-shape validator (`validateLeafName`, `validateTargetFolder`, `validateImapPath`) now rejects the full C0/C1 control range plus DEL (`\x7f`), not just C0.
+- VALID-008: `requireNumericEmailId` caps UID strings at 10 digits and rejects leading zeros (except `"0"`).
+- VALID-010: `parseEmails` drops tokens longer than `MAX_ADDRESS_TOKEN` (1024) before running the regex.
+- VALID-011: added `validateRequiredTargetFolder`; `create_folder`/`delete_folder`/`rename_folder` now use it instead of duplicated empty-name guards.
+- VALID-012: `validateImapPath` rejects leading/trailing whitespace.
+- VALID-013: `saveDraft` `inReplyTo` and `references` now share one header-field sanitiser.
+- VALID-016: `fts_search` validates its `folder` filter for parity with `search_emails`.
+- VALID-017: documented `validateTargetFolder("")` empty-as-default contract.
+- VALID-018: `validateAttachments` rejects path separators, traversal, control chars, and over-255-char filenames.
+- VALID-021: `optionalSourceFolder` consolidated into `helpers.ts` (was duplicated in `tools/actions.ts` + `tools/deletion.ts`).
+
+**Tools (`src/tools/*`)**
+- TOOL-011: `get_emails_by_label` outputSchema advertises `EMAIL_SUMMARY_SCHEMA` items + `required`.
+- TOOL-010: `get_thread` narrows returned messages to the summary shape (bounded `bodyPreview`), matching its schema and capping response size.
+- TOOL-013: `fts_rebuild` keys its in-progress guard per resolved DB path so concurrent rebuilds on different accounts don't collide.
+- TOOL-014: `start_bridge` flags `isError: true` when the SMTP/IMAP ports never come up.
+- TOOL-016: `search_emails` rejects negative/non-finite `larger`/`smaller`.
+- TOOL-017: `search_emails` requires parseable date strings for `sentBefore`/`sentSince`.
+
+**Parsers**
+- PARSE-020: `extractEmailAddress` takes the last angle-bracket pair (trailing address) instead of the first, so a hostile `From` header can't poison the contact map.
+
+**Credentials**
+- CRED-005: `readRegistryWithSecrets` fetches each account's keychain entry once instead of twice.
+- CRED-009: the Pass audit log is now hash-chained (`prevHash` + `hash` per row) and documented as best-effort tamper-evident.
+- CRED-011: the v1→v2 credential re-encrypt stages both blobs before saving, so a mid-migration throw can't persist a half-migrated config.
+- CRED-012: SimpleLogin error bodies are scrubbed of the configured API key and opaque token-shaped substrings before they reach logs/responses.
+- CRED-013: the Pass CLI subprocess `cwd` is pinned to the user's home directory.
+- CRED-015: `migrateCredentials` runs its read-modify-write under the config write lock against a deep clone, so concurrent readers never see an in-flight, partially-blanked config.
+
 ## [3.0.61] — 2026-05-30
 
 ### Fixed

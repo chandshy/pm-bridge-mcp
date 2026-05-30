@@ -7,7 +7,7 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { requireNumericEmailId, validateTargetFolder } from "../utils/helpers.js";
+import { optionalSourceFolder, requireNumericEmailId } from "../utils/helpers.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const SOURCE_FOLDER_SCHEMA = {
@@ -15,19 +15,6 @@ const SOURCE_FOLDER_SCHEMA = {
   description:
     "Folder the UID(s) live in (e.g. INBOX, Folders/Work, Labels/Foo). Strongly recommended whenever the UIDs came from a folder other than INBOX — IMAP UIDs are folder-scoped, so without this the wrong folder may be selected.",
 };
-
-/** Validate the optional sourceFolder arg. Uses validateTargetFolder so
- *  full-path strings like `Folders/Work` aren't rejected by the leaf-only
- *  validator. */
-function optionalSourceFolder(raw: unknown): string | undefined {
-  if (raw === undefined || raw === null || raw === "") return undefined;
-  if (typeof raw !== "string") {
-    throw new McpError(ErrorCode.InvalidParams, "'sourceFolder' must be a string when provided.");
-  }
-  const err = validateTargetFolder(raw);
-  if (err) throw new McpError(ErrorCode.InvalidParams, `Invalid sourceFolder: ${err}`);
-  return raw;
-}
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",

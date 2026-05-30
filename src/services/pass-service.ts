@@ -19,16 +19,20 @@
  *
  * - PAT is read from the config file (mode 0600) OR keychain. Never from
  *   env vars the agent can inspect.
- * - Every call is logged to an append-only audit file
+ * - Every call is logged to a hash-chained audit file
  *   (~/.mailpouch-pass-audit.jsonl, mode 0600) with timestamp + tool
- *   name + item ID (but never the secret value itself).
+ *   name + item ID (but never the secret value itself). Each row carries
+ *   `prevHash` + `hash` so a reviewer can detect deletion/edits. The chain
+ *   is best-effort and tamper-EVIDENT, not tamper-proof (CRED-009).
  * - No tool returns or logs the decrypted secret in plain text unless the
  *   user has explicitly confirmed via the elicitation gate. That's the
  *   caller's responsibility — this service exposes the raw CLI output.
  */
 
 import { spawn, spawnSync } from "child_process";
-import { appendFileSync, existsSync, statSync } from "fs";
+import { createHash } from "crypto";
+import { appendFileSync, existsSync, readFileSync, statSync } from "fs";
+import { homedir } from "os";
 import { isAbsolute, sep } from "path";
 import { logger } from "../utils/logger.js";
 
@@ -105,6 +109,12 @@ export class PassService {
   private readonly cliPath: string;
   private readonly pat: string;
   private readonly auditPath: string;
+  /**
+   * CRED-009: rolling hash of the previous audit row, lazily seeded from the
+   * last line on disk. `undefined` means "not yet loaded"; the empty string is
+   * the genesis value for an empty/absent log.
+   */
+  private prevHash: string | undefined;
 
   constructor(args: { personalAccessToken: string; cliPath?: string; auditLogPath: string }) {
     this.pat = args.personalAccessToken;
@@ -137,6 +147,11 @@ export class PassService {
         // SimpleLogin keys in tests, etc.).
         child = spawn(this.cliPath, ["--json", ...args], {
           stdio: ["ignore", "pipe", "pipe"],
+          // CRED-013: pin cwd to the user's home rather than inheriting
+          // process.cwd(). If mailpouch was launched from an attacker-writable
+          // directory (e.g. /tmp), pass-cli could drop session-state files
+          // there. homedir() is the same trust domain that holds the audit log.
+          cwd: homedir(),
           env: {
             PATH: process.env.PATH ?? "",
             HOME: process.env.HOME ?? "",
@@ -187,14 +202,52 @@ export class PassService {
     });
   }
 
-  /** Append one line to the audit log. Never includes secret values. */
+  /**
+   * Lazily recover the `hash` of the last row on disk so a chain survives
+   * process restarts. Best-effort: a missing/empty/corrupt file restarts the
+   * chain from genesis ("").
+   */
+  private loadPrevHash(): string {
+    if (this.prevHash !== undefined) return this.prevHash;
+    let last = "";
+    try {
+      if (existsSync(this.auditPath)) {
+        const lines = readFileSync(this.auditPath, "utf-8").split("\n").filter((l) => l.trim() !== "");
+        const tail = lines[lines.length - 1];
+        if (tail) {
+          const parsed = JSON.parse(tail) as { hash?: unknown };
+          if (typeof parsed.hash === "string") last = parsed.hash;
+        }
+      }
+    } catch {
+      last = "";
+    }
+    this.prevHash = last;
+    return last;
+  }
+
+  /**
+   * Append one line to the audit log. Never includes secret values.
+   *
+   * CRED-009: each row is hash-chained — `hash = sha256(prevHash || canonical)`,
+   * where `canonical` is the row JSON without the `hash` field. A reviewer can
+   * recompute the chain to detect deletion or in-place edits. This is
+   * tamper-EVIDENT, not tamper-PROOF: an attacker with write access can rewrite
+   * the whole file and recompute every hash. The log is best-effort (no fsync,
+   * no rotation lock); treat a broken chain as "investigate", not "trusted".
+   */
   private audit(event: { tool: string; itemId?: string; vault?: string; ok: boolean; error?: string }): void {
     try {
-      const row = {
+      const prevHash = this.loadPrevHash();
+      const base = {
         ts: new Date().toISOString(),
         ...event,
+        prevHash,
       };
+      const hash = createHash("sha256").update(prevHash).update(JSON.stringify(base)).digest("hex");
+      const row = { ...base, hash };
       appendFileSync(this.auditPath, JSON.stringify(row) + "\n", { encoding: "utf-8", mode: 0o600 });
+      this.prevHash = hash;
     } catch (err) {
       logger.warn(`Pass: could not write audit log at ${this.auditPath}`, "PassService", err);
     }

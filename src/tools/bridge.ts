@@ -56,10 +56,15 @@ export const handlers: Record<string, ToolHandler> = {
       state.bridgeAutoStarted = true;
       return ok({ success: true }, "Proton Bridge is running and reachable.");
     }
-    return ok(
-      { success: false, reason: "Bridge launch command sent but ports are not yet reachable. Bridge may still be starting." },
-      "Bridge launch command sent — ports not yet reachable.",
-    );
+    // TOOL-014: the ports never came up. Flag isError so an agent that only
+    // checks result.isError doesn't read this failure as success. The
+    // structured `success: false` + reason are still carried for richer
+    // consumers that unpack structuredContent.
+    return {
+      structuredContent: { success: false, reason: "Bridge launch command sent but ports are not yet reachable. Bridge may still be starting." },
+      content: [{ type: "text" as const, text: "Bridge launch command sent — ports not yet reachable." }],
+      isError: true,
+    };
   },
 
   shutdown_server: async (ctx) => {

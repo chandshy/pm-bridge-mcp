@@ -721,11 +721,19 @@ export async function loadAuxiliaryCredentialsFromKeychain(): Promise<{
 export async function migrateCredentials(): Promise<boolean> {
   const tags: { migrated?: boolean } = {};
   return tracer.span('config.migrateCredentials', tags, async () => {
-  const config = loadConfig();
-  if (!config) {
+  // CRED-015: take the config write lock for the whole read-modify-write so a
+  // concurrent loadCredentialsFromKeychain() can't observe the in-flight,
+  // partially-blanked config object (loadConfig returns the cached reference).
+  return withConfigWriteLockAsync(async () => {
+  const loaded = loadConfig();
+  if (!loaded) {
     tags.migrated = false;
     return false;
   }
+  // Operate on a deep clone, then save once. The cache keeps the un-mutated
+  // reference until saveConfig() invalidates it, so racing readers within the
+  // lock window never see `password=""` + a missing encrypted blob.
+  const config = structuredClone(loaded);
 
   // Plaintext-creds path: hoist to keychain (preferred) or encrypted-file.
   const hasPlaintext = !!(config.connection.password || config.connection.smtpToken);
@@ -741,14 +749,20 @@ export async function migrateCredentials(): Promise<boolean> {
     && CredentialEncryption.needsReencrypt(smtpEncryptedField);
   if (!hasPlaintext && (pwNeedsReencrypt || smtpNeedsReencrypt)) {
     try {
+      // CRED-011: stage BOTH re-encrypted blobs in locals first. If the second
+      // encrypt throws, we must not have already mutated the first field — that
+      // would leave a config with one v2 blob and one v1 blob, and the catch
+      // below would swallow it. Assign + save only once both succeed.
+      let newPasswordEncrypted: typeof config.connection.passwordEncrypted;
+      let newSmtpEncrypted: typeof config.connection.smtpTokenEncrypted;
       if (pwNeedsReencrypt && CredentialEncryption.isValidEncrypted(passwordEncryptedField)) {
-        const plain = CredentialEncryption.decrypt(passwordEncryptedField);
-        config.connection.passwordEncrypted = CredentialEncryption.encrypt(plain);
+        newPasswordEncrypted = CredentialEncryption.encrypt(CredentialEncryption.decrypt(passwordEncryptedField));
       }
       if (smtpNeedsReencrypt && CredentialEncryption.isValidEncrypted(smtpEncryptedField)) {
-        const plain = CredentialEncryption.decrypt(smtpEncryptedField);
-        config.connection.smtpTokenEncrypted = CredentialEncryption.encrypt(plain);
+        newSmtpEncrypted = CredentialEncryption.encrypt(CredentialEncryption.decrypt(smtpEncryptedField));
       }
+      if (newPasswordEncrypted !== undefined) config.connection.passwordEncrypted = newPasswordEncrypted;
+      if (newSmtpEncrypted !== undefined) config.connection.smtpTokenEncrypted = newSmtpEncrypted;
       saveConfig(config);
       tags.migrated = true;
       return true;
@@ -785,5 +799,6 @@ export async function migrateCredentials(): Promise<boolean> {
   saveConfig(config);
   tags.migrated = true;
   return true;
+  });
   }); // end tracer.span('config.migrateCredentials')
 }

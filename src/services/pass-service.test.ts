@@ -203,4 +203,48 @@ describe("PassService", () => {
     const svc = new PassService({ personalAccessToken: "pat", auditLogPath: auditPath });
     await expect(svc.listItems()).rejects.toThrow("EACCES");
   });
+
+  // ── CRED-009 — audit rows are hash-chained ───────────────────────────────
+  it("writes a verifiable prevHash/hash chain across audit rows", async () => {
+    const { createHash } = await import("crypto");
+    spawn.mockImplementation(() => {
+      const c = makeFakeChild();
+      setImmediate(() => { c.stdout.emit("data", Buffer.from("[]")); c.emit("close", 0); });
+      return c;
+    });
+    const svc = new PassService({ personalAccessToken: "pat", auditLogPath: auditPath });
+    await svc.listItems();
+    await svc.listItems();
+
+    const lines = readFileSync(auditPath, "utf-8").split("\n").filter((l) => l.trim() !== "");
+    expect(lines).toHaveLength(2);
+    const r1 = JSON.parse(lines[0]);
+    const r2 = JSON.parse(lines[1]);
+    // Genesis row chains from "".
+    expect(r1.prevHash).toBe("");
+    // Second row chains from the first row's hash.
+    expect(r2.prevHash).toBe(r1.hash);
+    // Each row's hash recomputes from prevHash + the row sans hash.
+    const recompute = (row: Record<string, unknown>) => {
+      const { hash: _h, ...base } = row;
+      return createHash("sha256").update(String(base.prevHash)).update(JSON.stringify(base)).digest("hex");
+    };
+    expect(recompute(r1)).toBe(r1.hash);
+    expect(recompute(r2)).toBe(r2.hash);
+  });
+
+  // ── CRED-013 — child cwd is pinned to homedir, not process.cwd() ─────────
+  it("spawns pass-cli with cwd pinned to the user's home directory", async () => {
+    const { homedir } = await import("os");
+    let capturedOpts: { cwd?: string } = {};
+    spawn.mockImplementation((_cli: string, _args: string[], opts: { cwd?: string }) => {
+      capturedOpts = opts;
+      const c = makeFakeChild();
+      setImmediate(() => { c.stdout.emit("data", Buffer.from("[]")); c.emit("close", 0); });
+      return c;
+    });
+    const svc = new PassService({ personalAccessToken: "pat", auditLogPath: auditPath });
+    await svc.listItems();
+    expect(capturedOpts.cwd).toBe(homedir());
+  });
 });

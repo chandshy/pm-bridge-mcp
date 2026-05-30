@@ -709,4 +709,39 @@ describe("migrateCredentials", () => {
     expect(result).toBe(true);
     expect(mockedMigrate).toHaveBeenCalledTimes(1);
   });
+
+  // ── CRED-011 — v1→v2 re-encrypt is atomic across both credential fields ──
+  it("CRED-011: does not save a half-migrated config when the second re-encrypt throws", async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const blob = { algorithm: "aes-256-gcm", v: 1 } as unknown;
+    const cfgJson = JSON.stringify({
+      configVersion: 1,
+      credentialStorage: "encrypted-file",
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "u", password: "", smtpToken: "",
+        passwordEncrypted: blob, smtpTokenEncrypted: blob,
+        bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(cfgJson as unknown as Buffer);
+
+    vi.spyOn(CredentialEncryption, "isValidEncrypted").mockReturnValue(true);
+    vi.spyOn(CredentialEncryption, "needsReencrypt").mockReturnValue(true);
+    vi.spyOn(CredentialEncryption, "decrypt").mockReturnValue("plaintext");
+    let calls = 0;
+    vi.spyOn(CredentialEncryption, "encrypt").mockImplementation(() => {
+      calls += 1;
+      if (calls >= 2) throw new Error("boom on second encrypt");
+      return { algorithm: "aes-256-gcm", v: 2 } as never;
+    });
+    const writeSpy = vi.mocked(writeFileSync);
+    writeSpy.mockClear();
+
+    const result = await migrateCredentials();
+    expect(result).toBe(false);
+    // Atomic: nothing persisted because the second field's encrypt failed.
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
 });

@@ -73,6 +73,25 @@ describe("SimpleLoginService", () => {
       const svc = new SimpleLoginService("sl-key");
       await expect(svc.listAliases()).rejects.toThrow(/500/);
     });
+
+    // ── CRED-012 — secret-shaped substrings are scrubbed from error bodies ──
+    it("redacts the configured API key if it appears in an upstream error", async () => {
+      const apiKey = "sl_super_secret_api_key_value_1234567890";
+      globalThis.fetch = mockFetch(() => ({ status: 400, body: { error: `invalid key '${apiKey}'` } })) as unknown as typeof globalThis.fetch;
+      const svc = new SimpleLoginService(apiKey);
+      const err = await svc.listAliases().catch((e: Error) => e);
+      expect((err as Error).message).not.toContain(apiKey);
+      expect((err as Error).message).toContain("[redacted]");
+    });
+
+    it("redacts opaque token-shaped substrings even when not the configured key", async () => {
+      const leaked = "abcdef0123456789ABCDEFghij";  // 26-char opaque blob
+      globalThis.fetch = mockFetch(() => ({ status: 400, body: { error: `token ${leaked} rejected` } })) as unknown as typeof globalThis.fetch;
+      const svc = new SimpleLoginService("sl-key");
+      const err = await svc.listAliases().catch((e: Error) => e);
+      expect((err as Error).message).not.toContain(leaked);
+      expect((err as Error).message).toContain("[redacted]");
+    });
   });
 
   describe("listAliases", () => {
