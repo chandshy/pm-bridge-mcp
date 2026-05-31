@@ -56,7 +56,15 @@ jobs:
         if npm view "${NAME}@${VERSION}" version --registry https://registry.npmjs.org 2>/dev/null | grep -q "${VERSION}"; then
           echo "Version ${VERSION} already published to npm — skipping"
         else
-          npm publish --provenance --access public
+          # --ignore-scripts: this job already ran typecheck/lint/test/build as
+          # explicit steps, and CI gated the commit (incl. the Greenmail E2E). A
+          # bare `npm publish` would fire the `prepublishOnly` hook
+          # (`preship:release`), whose release tier runs e2e:greenmail (Docker)
+          # and e2e:bridge — neither exists in this job, so it hangs. Skipping
+          # lifecycle scripts here is also consistent with the BUILD-011
+          # supply-chain rationale above (no untrusted script runs with the
+          # publish token in scope). dist/ is already built by the step above.
+          npm publish --provenance --access public --ignore-scripts
         fi
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -115,7 +123,10 @@ jobs:
             p.publishConfig = { registry: 'https://npm.pkg.github.com', access: 'public' };
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2));
           "
-          npm publish
+          # --ignore-scripts: same rationale as the npm job — build already ran,
+          # and a bare publish would fire prepublishOnly → preship:release (E2E)
+          # which can't run in this job.
+          npm publish --ignore-scripts
           mv /tmp/pkg.bak package.json
         fi
       env:
