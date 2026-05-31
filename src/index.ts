@@ -1876,6 +1876,22 @@ async function main() {
 
   const noTray       = process.argv.includes("--no-tray");
   const noSettingsUi = process.argv.includes("--no-settings-ui");
+  // `--settings-only` runs JUST the settings UI + tray: no MCP transport, no
+  // Bridge backends. Historically this flag was UNRECOGNISED, so the process
+  // fell through to the stdio MCP server whose lifetime is bound to stdin —
+  // launched without a live MCP client holding stdin open (autostart, nohup, a
+  // wrapper), stdin hit EOF immediately and the process shut itself down within
+  // seconds. That self-termination read as "it keeps crashing." Treating it as
+  // a real mode keeps the process alive on the settings HTTP server instead.
+  const settingsOnly = process.argv.includes("--settings-only");
+  if (settingsOnly && noSettingsUi) {
+    logger.error(
+      "--settings-only and --no-settings-ui are contradictory (there would be nothing to run). " +
+      "Pass one or the other.",
+      "MCPServer",
+    );
+    process.exit(1);
+  }
 
   // Clear log file from previous run so each session starts fresh
   try { writeFileSync(getLogFilePath(), "", { encoding: "utf8", mode: 0o600 }); } catch { /* ignore */ }
@@ -2095,6 +2111,32 @@ async function main() {
   // has the tray — skip to avoid duplicates.
   if (!noTray && !_settingsExternal) {
     _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
+  }
+
+  // ── Settings-only mode: stop here ─────────────────────────────────────────
+  // The settings UI + tray are up. We deliberately do NOT connect to Bridge,
+  // start the scheduler/IDLE loop, or attach an MCP transport — none of those
+  // belong to a standalone settings launcher, and the stdio transport's
+  // stdin-close handler is exactly what made `--settings-only` self-terminate.
+  // The settings HTTP server (and tray) keep the event loop alive; the process
+  // runs until the tray's Quit or a signal. If the settings server failed to
+  // bind there is nothing left to keep us alive, so fail loudly rather than
+  // exit silently looking like another "crash."
+  if (settingsOnly) {
+    if (!_settingsEnabled && !_settingsExternal) {
+      logger.error(
+        `Settings UI failed to bind (port ${config.settingsPort ?? 8765} may be occupied) and --settings-only was requested — ` +
+        "nothing left to run. Free the port, or set settingsPort in ~/.mailpouch.json (or the PORT env var), then retry.",
+        "MCPServer",
+      );
+      process.exit(1);
+    }
+    logger.info(
+      "Settings-only mode: settings UI + tray are running; MCP transport and Bridge backends are NOT started. " +
+      "Quit via the tray menu or Ctrl-C.",
+      "MCPServer",
+    );
+    return;
   }
 
   // ── Bridge reachability probe + optional auto-start ───────────────────────

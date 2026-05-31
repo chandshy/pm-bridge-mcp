@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.72] — 2026-05-31
+
+### Fixed — `--settings-only` self-terminated on stdin close ("it keeps crashing")
+
+- **Bug:** `mailpouch --settings-only` was an **unrecognised flag** — it was parsed nowhere, so the process fell through to the full MCP server on the stdio transport. The stdio transport binds process lifetime to `process.stdin.on("close", → gracefulShutdown("stdin-closed"))`. When launched by a wrapper/autostart/`nohup` that opens a stdin **pipe** and then closes it (or exits), `close` fired and mailpouch shut itself down within seconds — which the operator experienced as the settings UI "crashing" (and the page's backing server dying → `Failed to fetch`). Empirically confirmed: a closed stdin **pipe** triggers the exit (`code=0`); `/dev/null` stdin does not, which is why it was intermittent.
+- **Fix:** `--settings-only` is now a real mode. It starts **just** the settings UI + tray and returns — no Bridge connect, no scheduler/IDLE loop, no `StdioServerTransport`, and crucially **no stdin-close handler**. The settings HTTP server (and tray) keep the process alive until the tray's Quit or a signal. `--settings-only --no-settings-ui` is rejected as contradictory; if the settings server fails to bind in this mode the process now fails loudly (port-occupied message) rather than exiting silently.
+- **Test:** `test/e2e/scenarios/settings-only-lifecycle.e2e.test.ts` spawns the built `dist/index.js --settings-only` with a real stdin pipe, closes it after boot, and asserts the process stays alive and keeps serving `GET /api/status`. Verified to fail against the pre-fix binary and pass after.
+
 ## [3.0.71] — 2026-05-31
 
 ### Verified — `search_emails` already issues a live IMAP SEARCH (consolidated report cluster 7 / Observation O1)
