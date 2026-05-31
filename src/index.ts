@@ -1602,6 +1602,7 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
 // non-tray reasons don't pay the raster cost when they never touch it.
 import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
 import { createTray, preflightTrayBinary, trayPreconditionSkip, inheritDisplayFromParent, type TrayHandle, type TrayItem } from "./utils/tray.js";
+import { buildSettingsTrayMenu } from "./utils/tray-menu.js";
 
 // ─── Daemon: Settings Server + Tray State ────────────────────────────────────
 
@@ -1760,38 +1761,17 @@ async function _stopSettingsServerDaemon(): Promise<void> {
 }
 
 function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
-  const statusLabel   = sharedState.smtpStatus.connected ? "\u25CF Connected" : "\u25CB Disconnected";
-  const emailLabel    = config.smtp.username || "Not configured";
-  const pendingCount  = agentGrants.list({ status: "pending" }).length;
-  const activeCount   = agentGrants.list({ status: "active" }).length;
-  const tooltip = pendingCount > 0
-    ? `mailpouch · ${pendingCount} agent(s) awaiting approval`
-    : "mailpouch";
-  const items: TrayItem[] = [
-    { id: "header",  label: "mailpouch", enabled: false },
-    { id: "version", label: `v${_pkgVersion}`, enabled: false },
-    { id: "sep1",    label: "",          separator: true },
-    { id: "status",  label: statusLabel, enabled: false },
-    { id: "account", label: emailLabel,  enabled: false },
-    ...(pendingCount > 0
-      ? [{ id: "pending", label: `\u26A0 ${pendingCount} agent(s) pending`, enabled: false }]
-      : []),
-    ...(activeCount > 0
-      ? [{ id: "active",  label: `\u25CF ${activeCount} agent(s) active`,   enabled: false }]
-      : []),
-    { id: "sep2",    label: "", separator: true },
-    ...(_settingsEnabled && _settingsUrl
-      ? [{ id: "open", label: "Open Settings" }]
-      : []),
-    { id: "sep3",    label: "", separator: true },
-    {
-      id:    _settingsEnabled ? "disable" : "enable",
-      label: _settingsEnabled ? "Disable Settings UI" : "Enable Settings UI",
-    },
-    { id: "sep4",    label: "", separator: true },
-    { id: "quit",    label: "Quit" },
-  ];
-  return { items, tooltip };
+  // Pure menu construction lives in buildSettingsTrayMenu (unit-tested); this
+  // adapter just snapshots the live state it reads from.
+  return buildSettingsTrayMenu({
+    version:         _pkgVersion,
+    connected:       sharedState.smtpStatus.connected,
+    account:         config.smtp.username || "",
+    pendingCount:    agentGrants.list({ status: "pending" }).length,
+    activeCount:     agentGrants.list({ status: "active" }).length,
+    settingsEnabled: _settingsEnabled,
+    settingsUrl:     _settingsUrl,
+  });
 }
 
 /**

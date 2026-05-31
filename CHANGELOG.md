@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.66] — 2026-05-31
+
+### Changed — tray Settings-UI toggle made testable (no behavior change)
+
+- Extracted the system-tray menu construction into a pure, unit-tested `buildSettingsTrayMenu()` (`src/utils/tray-menu.ts`); `index.ts` now delegates to it. This validates the tray's enable/disable behaviour: the toggle reads **"Enable Settings UI"** when the UI is off and **"Disable Settings UI"** when it is on (stable `enable`/`disable` ids the click handler switches on), **"Open Settings" appears only when the UI is enabled with a live URL** (the UI-005/UI-007 invariant), and pending/active agent badges show only when non-zero. The tray icon is created at startup (`_initTray`, gated only by `--no-tray`). Behaviour is unchanged; this is a refactor + regression coverage.
+
 ## [3.0.65] — 2026-05-31
 
 ### Fixed — move/copy/label silently false-succeeded from non-INBOX/All Mail sources (Bug A regression)
