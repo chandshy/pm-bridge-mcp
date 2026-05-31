@@ -3306,6 +3306,20 @@ export class SimpleIMAPService {
           connectionTimeout: 30000,
         });
 
+        // imapflow extends EventEmitter. A socket 'error' emitted with NO
+        // 'error' listener throws synchronously → uncaughtException →
+        // gracefulShutdown → the whole process exits. IDLE sockets to a local
+        // Bridge reset routinely (Bridge sleep/restart/session caps), so this
+        // was a recurring "mailpouch keeps crashing". The reconnect loop below
+        // already recovers from drops via try/catch + backoff; these listeners
+        // exist only so the async socket error is handled instead of thrown.
+        this.idleClient.on('error', (err) => {
+          logger.debug('IDLE socket error (will reconnect)', 'IMAPService', err);
+        });
+        this.idleClient.on('close', () => {
+          logger.debug('IDLE socket closed (will reconnect)', 'IMAPService');
+        });
+
         await this.idleClient.connect();
         backoff = BASE_BACKOFF_MS; // connected cleanly — reset the failure backoff
         const lock = await this.idleClient.getMailboxLock('INBOX');

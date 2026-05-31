@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.72] — 2026-05-31
+
+### Fixed — IMAP IDLE socket error crashed the whole process (primary "keeps crashing" cause)
+
+- **Bug:** the background IMAP IDLE client (`runIdleLoop`, `src/services/simple-imap-service.ts`) was constructed with `'exists'`/`'expunge'` listeners but **no `'error'` listener**. `imapflow` extends `EventEmitter`, and an `EventEmitter` that emits `'error'` with no listener **throws synchronously** — which became an `uncaughtException`, and `src/index.ts` routes `uncaughtException`/`unhandledRejection` straight into `gracefulShutdown` → `process.exit`. IDLE sockets to a local Proton Bridge reset routinely (Bridge sleep/restart/session caps), so a single mid-IDLE socket reset took the entire MCP server down — the recurring crash. The main `connect()` path already attached `'error'`/`'close'` listeners; the IDLE client did not.
+- **Fix:** attach `'error'` and `'close'` listeners to the IDLE client immediately after construction (before `connect()`). The existing reconnect loop (try/catch + exponential backoff) already recovers from the drop; the listeners only ensure the async socket error is *handled* instead of thrown.
+- **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
+- **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
+
+### Changed — default settings-UI port is now 8766 (was 8765)
+
+- The default `settingsPort` moved from **8765 → 8766** across every code site (loader, schema, `index.ts`, `settings-main`, settings server, setup UI) and the docs. Installs that pin `settingsPort` in `~/.mailpouch.json` are unaffected; only the unset-default changes. This also steps the default off 8765, a port commonly taken by ad-hoc local HTTP servers.
+
+### Improved — settings UI survives an occupied port and explains itself
+
+- **Port fallback:** if the configured `settingsPort` (default 8766) is held by a *foreign* process, `_startSettingsServerDaemon` now binds the next free port (`basePort … basePort+10`) instead of retrying the same dead port 5× and then giving up for the whole session. The configured port still gets a few quick retries first (covers a mailpouch restarting on it); a fallback bind logs a clear "configured port N was occupied — bound to M instead" warning. Real-world trigger: a respawning local HTTP server permanently squatting the configured port took the UI down every session.
+- **Tray surfaces the reason:** when the settings UI can't bind at all, the tray tooltip now reads "Settings UI off: <reason>" and a disabled menu item shows it, instead of the "Open Settings" entry silently vanishing (`buildSettingsTrayMenu` gains `settingsUnavailableReason`).
+- **Friendly unreachable message:** when the page's backing server dies (stopped/restarted while the tab stayed open), tab loading now shows "The settings server is no longer reachable — mailpouch may have stopped or restarted. Restart mailpouch and reload this page." instead of the raw `TypeError: Failed to fetch`.
+
+### Fixed — `--settings-only` self-terminated on stdin close (secondary "keeps crashing" cause)
+
+- **Bug:** `mailpouch --settings-only` was an **unrecognised flag** — it was parsed nowhere, so the process fell through to the full MCP server on the stdio transport. The stdio transport binds process lifetime to `process.stdin.on("close", → gracefulShutdown("stdin-closed"))`. When launched by a wrapper/autostart/`nohup` that opens a stdin **pipe** and then closes it (or exits), `close` fired and mailpouch shut itself down within seconds — which the operator experienced as the settings UI "crashing" (and the page's backing server dying → `Failed to fetch`). Empirically confirmed: a closed stdin **pipe** triggers the exit (`code=0`); `/dev/null` stdin does not, which is why it was intermittent.
+- **Fix:** `--settings-only` is now a real mode. It starts **just** the settings UI + tray and returns — no Bridge connect, no scheduler/IDLE loop, no `StdioServerTransport`, and crucially **no stdin-close handler**. The settings HTTP server (and tray) keep the process alive until the tray's Quit or a signal. `--settings-only --no-settings-ui` is rejected as contradictory; if the settings server fails to bind in this mode the process now fails loudly (port-occupied message) rather than exiting silently.
+- **Test:** `test/e2e/scenarios/settings-only-lifecycle.e2e.test.ts` spawns the built `dist/index.js --settings-only` with a real stdin pipe, closes it after boot, and asserts the process stays alive and keeps serving `GET /api/status`. Verified to fail against the pre-fix binary and pass after.
+
 ## [3.0.71] — 2026-05-31
 
 ### Verified — `search_emails` already issues a live IMAP SEARCH (consolidated report cluster 7 / Observation O1)

@@ -364,7 +364,7 @@ export interface ServerConfig {
   credentialStorage?: "keychain" | "encrypted-file" | "config";
   /** Tuneable response-size guards — see ResponseLimits. */
   responseLimits?: ResponseLimits;
-  /** Port the settings UI server listens on (default 8765). */
+  /** Port the settings UI server listens on (default 8766). */
   settingsPort?: number;
   /**
    * Progressive tool-disclosure tier. Controls how many tools appear in the

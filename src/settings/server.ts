@@ -205,7 +205,7 @@ const _agentSetupPkgVersion = (() => {
   } catch { return "unknown"; }
 })();
 
-function buildAgentSetupJson(settingsPort = 8765) {
+function buildAgentSetupJson(settingsPort = 8766) {
   return {
     product: "mailpouch",
     version: _agentSetupPkgVersion,
@@ -340,7 +340,7 @@ function buildAgentSetupJson(settingsPort = 8765) {
   };
 }
 
-function buildAgentSetupHtml(settingsPort = 8765): string {
+function buildAgentSetupHtml(settingsPort = 8766): string {
   const data = buildAgentSetupJson(settingsPort);
   const jsonPretty = JSON.stringify(data, null, 2);
   const clients = data.clientConfig;
@@ -1949,11 +1949,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
  *             • Falls back to plain HTTP + token if openssl is absent.
  *             Use only on trusted local networks.
  *
- * @param port  TCP port to listen on (default 8765)
+ * @param port  TCP port to listen on (default 8766)
  * @param lan   Enable LAN mode (bind 0.0.0.0 + token + optional TLS)
  */
 export async function startSettingsServer(
-  port  = 8765,
+  port  = 8766,
   lan   = false,
   quiet = false,
   opts: { onRestartRequested?: () => void; onShutdownRequested?: () => void } = {},
