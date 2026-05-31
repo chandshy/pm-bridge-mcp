@@ -37,6 +37,7 @@ import {
 import { startSettingsServer } from "./settings/server.js";
 import { loadConfig } from "./config/loader.js";
 import { createTray, trayPreconditionSkip, inheritDisplayFromParent, type TrayHandle } from "./utils/tray.js";
+import { buildLauncherTrayMenu } from "./utils/tray-menu.js";
 import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
 
 const _pkgVersion = (() => {
@@ -152,21 +153,54 @@ function _onShutdownRequested(): void {
 
 // ─── Helper: persistent tray icon ────────────────────────────────────────────
 // When `mailpouch-settings` is the user's always-on background process (their
-// autostart entry), the tray icon is how they get back to the settings UI.
-// The menu is intentionally spartan — this entry point doesn't have agent
-// grants / escalation queue state to surface, unlike the MCP's embedded
-// tray. Just the three things the user actually needs:
+// autostart entry), the tray icon is how they control the settings UI:
 //
 //   mailpouch                — header label (disabled)
-//   Open Settings            — re-opens the browser at the live URL
-//   Quit                     — stops the HTTP server and exits cleanly
+//   Open Settings            — re-opens the browser at the live URL (UI on only)
+//   Enable/Disable Settings UI — toggles the HTTP server WITHOUT killing the
+//                              tray, mirroring the MCP-server tray. "Disable"
+//                              stops serving; "Enable" brings it back up.
+//   Quit                     — stops the server and exits cleanly
 //
-// Backend selection (native tray-icon vs systray2 fallback) lives in
-// utils/tray.ts; we just call createTray() and let it pick. Skips
-// silently on headless/arm64 hosts; the HTTP server still runs so
-// browser access keeps working from a different machine on the LAN.
+// Spartan vs. the MCP tray (no agent/connection state here). Backend selection
+// (native vs systray2 fallback) lives in utils/tray.ts. Skips silently on
+// headless/arm64 hosts.
 let _activeTray: TrayHandle | null = null;
-function _startTrayIcon(url: string): void {
+let _uiStop: (() => Promise<void>) | null = null; // stop fn for the running server
+let _uiEnabled = false;
+let _uiUrl = "";
+
+function _rebuildLauncherTray(): void {
+  if (!_activeTray) return;
+  try {
+    _activeTray.setMenu(buildLauncherTrayMenu({
+      version: _pkgVersion,
+      settingsEnabled: _uiEnabled,
+      settingsUrl: _uiUrl,
+    }));
+  } catch { /* tray backend may not support live updates — non-fatal */ }
+}
+
+/** Bring the HTTP server back up on the original port (tray "Enable"). */
+async function _enableUi(): Promise<void> {
+  if (_uiEnabled) return;
+  const { scheme, stop } = await startSettingsServer(port, lan, false, {
+    onRestartRequested: _onRestartRequested,
+    onShutdownRequested: _onShutdownRequested,
+  });
+  _uiStop = stop;
+  _uiUrl = `${scheme}://localhost:${port}`;
+  _uiEnabled = true;
+}
+
+/** Stop serving but keep the tray + process alive (tray "Disable"). */
+async function _disableUi(): Promise<void> {
+  if (!_uiEnabled) return;
+  try { if (_uiStop) await _uiStop(); }
+  finally { _uiStop = null; _uiUrl = ""; _uiEnabled = false; }
+}
+
+function _startTrayIcon(): void {
   if (noTray) return;
   // GUI MCP clients (Claude Desktop, VS Code) strip DISPLAY from
   // stdio-spawned children; copy it from the parent's environ on Linux
@@ -186,18 +220,19 @@ function _startTrayIcon(url: string): void {
       // scaling. Native backend ignores this.
       iconLegacyOverride: process.platform === "win32" ? makeTrayIconBytes("win32") : undefined,
       tooltip: "mailpouch — Proton Mail via Bridge",
-      items: [
-        { id: "header",   label: "mailpouch", enabled: false },
-        { id: "version",  label: `v${_pkgVersion}`, enabled: false },
-        { id: "sep1",     label: "",          separator: true },
-        { id: "open",     label: "Open Settings" },
-        { id: "sep2",     label: "",          separator: true },
-        { id: "quit",     label: "Quit" },
-      ],
+      items: buildLauncherTrayMenu({ version: _pkgVersion, settingsEnabled: _uiEnabled, settingsUrl: _uiUrl }),
       onClick: (id) => {
         switch (id) {
           case "open":
-            openBrowser(url);
+            if (_uiUrl) openBrowser(_uiUrl);
+            break;
+          case "disable":
+            _disableUi().then(_rebuildLauncherTray).catch((e) =>
+              process.stderr.write(`Disable Settings UI failed: ${e instanceof Error ? e.message : String(e)}\n`));
+            break;
+          case "enable":
+            _enableUi().then(_rebuildLauncherTray).catch((e) =>
+              process.stderr.write(`Enable Settings UI failed: ${e instanceof Error ? e.message : String(e)}\n`));
             break;
           case "quit":
             try { _activeTray?.destroy(); } catch { /* already gone */ }
@@ -222,9 +257,12 @@ switch (mode) {
     // Start server first (async), then open browser once it's listening.
     // startSettingsServer returns the actual scheme (http/https) so we open
     // the correct URL regardless of whether openssl was available.
-    startSettingsServer(port, lan, false, { onRestartRequested: _onRestartRequested, onShutdownRequested: _onShutdownRequested }).then(({ scheme }) => {
+    startSettingsServer(port, lan, false, { onRestartRequested: _onRestartRequested, onShutdownRequested: _onShutdownRequested }).then(({ scheme, stop }) => {
       const url = `${scheme}://localhost:${port}`;
       serverStarted = true;
+      _uiStop = stop;
+      _uiUrl = url;
+      _uiEnabled = true;
 
       if (!noOpen) {
         const opened = openBrowser(url);
@@ -238,8 +276,8 @@ switch (mode) {
       // Fire the tray in the background — user wanted an always-available
       // control point. Start it AFTER openBrowser so the browser opens
       // immediately even if tray init takes a moment. Fire-and-forget; the
-      // HTTP server is the process's anchor either way.
-      void _startTrayIcon(url);
+      // tray stays alive across enable/disable so it's always reachable.
+      void _startTrayIcon();
     }).catch((err: Error) => {
       process.stderr.write(`Settings server error: ${err?.message ?? err}\n`);
       process.exit(1);
