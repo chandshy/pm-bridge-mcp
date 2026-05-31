@@ -531,6 +531,61 @@ export class SimpleIMAPService {
     return found;
   }
 
+  /**
+   * Fetch the Message-ID header for a set of UIDs in the CURRENTLY-LOCKED
+   * mailbox. Returns uid → Message-ID. Used to verify, after a copy/move, that
+   * a message actually landed in the target — UIDs are per-mailbox, so
+   * Message-ID is the only stable cross-mailbox identity.
+   * MUST be called while the source mailbox is held by getMailboxLock().
+   */
+  private async fetchMessageIdsForUids(uids: string[]): Promise<Map<string, string>> {
+    const map = new Map<string, string>();
+    if (!this.client || uids.length === 0) return map;
+    for (const chunk of chunkUidsForWire(uids)) {
+      for await (const msg of this.client.fetch(chunk, { uid: true, envelope: true }, { uid: true })) {
+        const mid = msg?.envelope?.messageId;
+        if (msg && typeof msg.uid === 'number' && typeof mid === 'string' && mid) {
+          map.set(msg.uid.toString(), mid);
+        }
+      }
+    }
+    return map;
+  }
+
+  /**
+   * Return the subset of `messageIds` that are actually present in
+   * `targetFolder`, by searching `HEADER MESSAGE-ID` per id. Locks the target
+   * mailbox, so the caller must NOT hold another mailbox lock when calling.
+   *
+   * This is the honest-counts backstop: a copy/move is only counted as a
+   * success once the message is verifiably in the destination. Proton Bridge
+   * can answer COPY/MOVE from the All Mail union with OK while doing nothing
+   * (RFC-strict servers like Greenmail reject it, which is why this class of
+   * silent false-success never surfaced in CI) — verification turns that into
+   * an honest failure instead of a lie.
+   */
+  private async findMessageIdsInFolder(targetFolder: string, messageIds: string[]): Promise<Set<string>> {
+    const found = new Set<string>();
+    if (!this.client) return found;
+    const unique = [...new Set(messageIds.filter((m): m is string => typeof m === 'string' && m.length > 0))];
+    if (unique.length === 0) return found;
+    const lock = await this.client.getMailboxLock(targetFolder);
+    try {
+      for (const mid of unique) {
+        try {
+          const hits = await this.client.search({ header: { 'message-id': mid } }, { uid: true });
+          if (Array.isArray(hits) && hits.length > 0) found.add(mid);
+        } catch {
+          // a single search miss / transient error → treat as not-found for this
+          // id; the caller reports it as an unverified (failed) copy/move.
+        }
+      }
+    } finally {
+      lock.release();
+    }
+    return found;
+  }
+
   /** Validate a folder name — reject empty, whitespace-only, overly long, or
    *  names with control characters.
    *
@@ -1937,6 +1992,7 @@ export class SimpleIMAPService {
         folder = email.folder;
       }
 
+      let movedMid: string | undefined;
       const lock = await this.client.getMailboxLock(folder);
 
       try {
@@ -1945,16 +2001,30 @@ export class SimpleIMAPService {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
+        // Capture the Message-ID BEFORE the move (it removes the UID) so we can
+        // verify the message actually landed in the target.
+        movedMid = (await this.fetchMessageIdsForUids([emailId])).get(emailId);
+
         await this.client.messageMove(emailId, targetFolder, { uid: true });
 
         // Evict old cache entry — after MOVE the UID in the target folder may differ
         this.evictCacheEntry(`${folder}:${emailId}`);
-
-        logger.info(`Email ${emailId} moved from ${folder} to ${targetFolder}`, 'IMAPService');
-        return true;
       } finally {
         lock.release();
       }
+
+      // Honest counts: confirm the message is actually in the target. Bridge can
+      // answer MOVE from the All Mail union with OK while doing nothing — that
+      // must be an error, not a silent success.
+      if (movedMid) {
+        const found = await this.findMessageIdsInFolder(targetFolder, [movedMid]);
+        if (!found.has(movedMid)) {
+          throw new Error(`Move of email ${emailId} from ${folder} to ${targetFolder} was accepted but the message is not present in the target — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder.`);
+        }
+      }
+
+      logger.info(`Email ${emailId} moved from ${folder} to ${targetFolder}`, 'IMAPService');
+      return true;
     } catch (error) {
       logger.error('Failed to move email', 'IMAPService', error);
       throw error;
@@ -1996,6 +2066,7 @@ export class SimpleIMAPService {
         folder = email.folder;
       }
 
+      let copiedMid: string | undefined;
       const lock = await this.client.getMailboxLock(folder);
 
       try {
@@ -2004,12 +2075,23 @@ export class SimpleIMAPService {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
+        copiedMid = (await this.fetchMessageIdsForUids([emailId])).get(emailId);
         await this.client.messageCopy(emailId, targetFolder, { uid: true });
-        logger.info(`Email ${emailId} copied from ${folder} to ${targetFolder}`, 'IMAPService');
-        return true;
       } finally {
         lock.release();
       }
+
+      // Honest counts: confirm the copy actually landed in the target (e.g. the
+      // label mailbox). Bridge can answer COPY from the All Mail union with OK
+      // while doing nothing — that must surface as an error, not a false success.
+      if (copiedMid) {
+        const found = await this.findMessageIdsInFolder(targetFolder, [copiedMid]);
+        if (!found.has(copiedMid)) {
+          throw new Error(`Copy of email ${emailId} to ${targetFolder} was accepted but the message is not present there — likely a no-op from a union mailbox (e.g. All Mail), or the target does not exist. Pass the message's real source folder.`);
+        }
+      }
+      logger.info(`Email ${emailId} copied from ${folder} to ${targetFolder}`, 'IMAPService');
+      return true;
     } catch (error) {
       logger.error('Failed to copy email to folder', 'IMAPService', error);
       throw error;
@@ -2216,6 +2298,11 @@ export class SimpleIMAPService {
       }
     }
 
+    // Capture Message-IDs + which UIDs the MOVE verb accepted per source folder,
+    // then verify (below) the messages actually landed in the target. A move the
+    // server "accepts" from the All Mail union but doesn't perform would
+    // otherwise count as a false success.
+    const verifyJobs: Array<{ folder: string; accepted: string[]; midMap: Map<string, string> }> = [];
     for (const [folder, ids] of emailsByFolder.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
@@ -2245,17 +2332,42 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
+        // Capture Message-IDs BEFORE the move (it removes them from the source).
+        const midMap = await this.fetchMessageIdsForUids(present);
+        const accepted: string[] = [];
         await this.chunkedBatchOp(
           present,
           (uidSet) => this.client!.messageMove(uidSet, targetFolder, { uid: true }),
           (id) => this.client!.messageMove(id, targetFolder, { uid: true }),
-          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
+          (id) => { this.evictCacheEntry(`${folder}:${id}`); accepted.push(id); },
           (id, msg) => { results.failed++; results.errors.push(`Failed to move email ${id}: ${msg}`); },
           'Bulk move',
           folder,
         );
+        verifyJobs.push({ folder, accepted, midMap });
       } finally {
         lock.release();
+      }
+    }
+
+    // Verify the moved messages are actually present in the target by Message-ID.
+    for (const job of verifyJobs) {
+      if (job.accepted.length === 0) continue;
+      const mids = job.accepted.map(u => job.midMap.get(u)).filter((m): m is string => !!m);
+      let found = new Set<string>();
+      if (mids.length > 0) {
+        try { found = await this.findMessageIdsInFolder(targetFolder, mids); } catch { /* unverifiable → not-found below */ }
+      }
+      for (const uid of job.accepted) {
+        const mid = job.midMap.get(uid);
+        if (!mid) {
+          results.success++; // no Message-ID to verify against; trust the verb
+        } else if (found.has(mid)) {
+          results.success++;
+        } else {
+          results.failed++;
+          results.errors.push(`Move of UID ${uid} from ${job.folder} to ${targetFolder} was accepted but the message is not present in the target — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder.`);
+        }
       }
     }
 
@@ -2706,6 +2818,13 @@ export class SimpleIMAPService {
       }
     }
 
+    // Per source folder: pre-flight, capture Message-IDs, issue the copy. We do
+    // NOT count success here — only which UIDs the COPY verb accepted. Whether
+    // the message actually landed in the target is verified afterward (below),
+    // because Bridge can answer COPY from the All Mail union with OK while doing
+    // nothing. Verification needs to lock the target, so it can't run while the
+    // source lock is held — collect jobs and verify after the loop.
+    const verifyJobs: Array<{ accepted: string[]; midMap: Map<string, string> }> = [];
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
@@ -2735,16 +2854,44 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
+        const midMap = await this.fetchMessageIdsForUids(present);
+        const accepted: string[] = [];
         await this.chunkedBatchOp(
           present,
           (uidSet) => this.client!.messageCopy(uidSet, targetFolder, { uid: true }),
           (id) => this.client!.messageCopy(id, targetFolder, { uid: true }),
-          () => { results.success++; },
+          (id) => { accepted.push(id); },
           (id, msg) => { results.failed++; results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${msg}`); },
           `Bulk copy →${targetFolder}`,
           folder,
         );
+        verifyJobs.push({ accepted, midMap });
       } finally { lock.release(); }
+    }
+
+    // Verify the copies actually landed in the target by Message-ID. A COPY the
+    // server "accepted" but didn't perform (the silent All-Mail no-op) is now an
+    // honest failure instead of a false success.
+    for (const job of verifyJobs) {
+      if (job.accepted.length === 0) continue;
+      const mids = job.accepted.map(u => job.midMap.get(u)).filter((m): m is string => !!m);
+      let found = new Set<string>();
+      if (mids.length > 0) {
+        try { found = await this.findMessageIdsInFolder(targetFolder, mids); } catch { /* unverifiable → treated as not-found below */ }
+      }
+      for (const uid of job.accepted) {
+        const mid = job.midMap.get(uid);
+        if (!mid) {
+          // No Message-ID to verify against (rare). The verb succeeded and we
+          // can't prove otherwise — trust it rather than false-fail.
+          results.success++;
+        } else if (found.has(mid)) {
+          results.success++;
+        } else {
+          results.failed++;
+          results.errors.push(`Copy of UID ${uid} to ${targetFolder} was accepted but the message is not present there — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder, or verify the target label exists.`);
+        }
+      }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
     logger.info(`Bulk copy completed: ${results.success}/${results.failed}`, 'IMAPService');
@@ -2832,6 +2979,26 @@ export class SimpleIMAPService {
   /**
    * Create a new folder
    */
+  /**
+   * Create a mailbox if it does not already exist; no-op when it is present.
+   * Used by the label tools so "move/copy to label X" actually creates label X
+   * when missing (the COPY would otherwise target a nonexistent Labels/<name>,
+   * which Bridge may silently no-op).
+   */
+  async ensureFolderExists(folderName: string): Promise<void> {
+    this.validateFolderName(folderName);
+    if (!this.isConnected || !this.client) throw new Error('IMAP client not connected');
+    try {
+      await this.client.mailboxCreate(folderName);
+      this.clearFolderCache();
+      logger.info(`Folder created: ${folderName}`, 'IMAPService');
+    } catch (error: unknown) {
+      const rt = (error as { responseText?: string }).responseText || '';
+      if (/ALREADYEXISTS/i.test(rt) || /already exists/i.test(rt)) return;
+      throw error;
+    }
+  }
+
   async createFolder(folderName: string): Promise<boolean> {
     this.validateFolderName(folderName);
     return tracer.span('imap.createFolder', { folderName }, async () => {

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.65] — 2026-05-31
+
+### Fixed — move/copy/label silently false-succeeded from non-INBOX/All Mail sources (Bug A regression)
+
+- **`bulk_move_to_label`, `bulk_move_emails`, `move_to_label`, `move_email` counted success when the IMAP `COPY`/`MOVE` verb merely *resolved*, not when the message actually landed in the target.** The v3.0.41/IMAP-003 work added a *source*-side UID pre-flight but never verified the *target*. RFC-strict servers (Greenmail, used in CI) reject a COPY to a nonexistent mailbox, so this never surfaced in tests — but Proton Bridge answers `COPY`/`MOVE` from the **All Mail** union with `OK` while doing nothing, so a real retest reported `{success:N}` with no message moved and no label created. Reported against v3.0.64.
+- **Fix — honest counts by verification.** After the copy/move, the message is verified present in the target by **Message-ID** (the only stable cross-mailbox identity). Success is counted only for verified messages; an accepted-but-not-landed operation is now an explicit failure with an actionable error ("…accepted but the message is not present in the target — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder."). Applies to `bulkCopyToFolder`, `bulkMoveEmails`, `copyEmailToFolder`, `moveEmail`.
+- **`bulk_move_to_label` / `move_to_label` now create the `Labels/<name>` mailbox if missing** (new `ensureFolderExists`), so applying a label that isn't there creates it instead of copying into a nonexistent mailbox that Bridge silently no-ops.
+- Regression tests model a Bridge-style "verb resolves but nothing lands" no-op from an All Mail source and assert it is reported as failure, not success; plus real-copy/real-move-from-non-INBOX paths that verify landing and succeed.
+
 ## [3.0.64] — 2026-05-30
 
 ### Fixed — Info triage + final audit-ledger reconciliation (audit 2026-05-28)

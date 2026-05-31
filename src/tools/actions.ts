@@ -441,6 +441,9 @@ export const handlers: Record<string, ToolHandler> = {
     const mtlValidErr = validateLabelName(label);
     if (mtlValidErr) throw new McpError(ErrorCode.InvalidParams, mtlValidErr);
     const mtlSourceFolder = optionalSourceFolder(args.sourceFolder);
+    // Create the label mailbox if it doesn't exist — otherwise the copy targets
+    // a nonexistent Labels/<name>, which Proton Bridge can silently no-op.
+    await imapService.ensureFolderExists(`Labels/${label}`);
     await imapService.copyEmailToFolder(mtlEmailId, `Labels/${label}`, mtlSourceFolder);
     return actionOk();
   },
@@ -465,6 +468,9 @@ export const handlers: Record<string, ToolHandler> = {
     const labelFolder = `Labels/${rawLabel}`;
     const bmlSourceFolder = optionalSourceFolder(args.sourceFolder);
 
+    // Create the label mailbox if it doesn't exist — otherwise the copy targets
+    // a nonexistent Labels/<name>, which Proton Bridge can silently no-op.
+    await imapService.ensureFolderExists(labelFolder);
     const results2 = await imapService.bulkCopyToFolder(emailIds2, labelFolder, bmlSourceFolder);
     await sendProgress(emailIds2.length, emailIds2.length, `Labeled ${results2.success} of ${emailIds2.length} (${results2.failed} failed)`);
     state.analyticsCache = null;
