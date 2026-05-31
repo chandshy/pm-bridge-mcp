@@ -3283,6 +3283,16 @@ export class SimpleIMAPService {
       catch { try { (stale as unknown as { close?: () => void }).close?.(); } catch { /* already gone */ } }
     };
 
+    // Sleep in short chunks so stopIdle() (which flips idleActive) interrupts the
+    // backoff promptly even at the 5-min cap, and no long pending timer keeps the
+    // Node event loop alive during shutdown.
+    const interruptibleSleep = async (ms: number): Promise<void> => {
+      const STEP = 1000;
+      for (let waited = 0; waited < ms && this.idleActive; waited += STEP) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(STEP, ms - waited)));
+      }
+    };
+
     while (this.idleActive) {
       try {
         await reapIdleClient(); // never leak a prior socket
@@ -3326,7 +3336,7 @@ export class SimpleIMAPService {
       }
 
       if (this.idleActive) {
-        await new Promise(resolve => setTimeout(resolve, backoff));
+        await interruptibleSleep(backoff);
         backoff = Math.min(backoff * 2, MAX_BACKOFF_MS); // escalate while failing
       }
     }
