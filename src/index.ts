@@ -54,6 +54,7 @@ import { AccountManager, registerAccountManager } from "./accounts/manager.js";
 import { DesktopNotifier } from "./notifications/desktop.js";
 import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
+import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lock.js";
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain } from "./config/loader.js";
@@ -260,6 +261,8 @@ let bridgeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
 let launchedBridgePid: number | null = null;
 /** Prevents concurrent gracefulShutdown invocations (SIGINT + tray quit race, etc.). */
 let _shutdownInProgress = false;
+/** Path of the per-account singleton lock this process holds (null if none/disabled). */
+let _singletonLockPath: string | null = null;
 
 // ─── Shared mutable state ────────────────────────────────────────────────────
 // Referenced by both the tool handlers (via ToolCallContext.state) and
@@ -2008,6 +2011,37 @@ async function main() {
     logger.warn("No password configured — run 'npm run settings' to set up credentials", "MCPServer");
   }
 
+  // ── Instance singleton guard (Cluster 2, 2026-05-31 report) ───────────────
+  // The MCP is launched per client (Claude Desktop, VS Code, every
+  // `claude --continue` session). Each instance otherwise opens its OWN IMAP
+  // IDLE/auth loop against the same mailbox — a compounded connection leak.
+  // Hold a per-account PID lock; if another LIVE instance already owns it,
+  // exit 0 instead of starting a second connection. Stale locks (dead PID)
+  // are reclaimed so a legitimate restart after a clean OR crashed shutdown is
+  // never blocked. MAILPOUCH_NO_SINGLETON=1 is the escape hatch for power
+  // users running intentional multi-instance setups.
+  if (process.env.MAILPOUCH_NO_SINGLETON !== "1") {
+    try {
+      const outcome = acquireSingletonLock(config.smtp.username);
+      if (outcome.status === "held-by-live-instance") {
+        logger.info(
+          `Another mailpouch instance for this account is already running (pid ${outcome.pid}); ` +
+          `exiting so we don't open a second IMAP connection. ` +
+          `Set MAILPOUCH_NO_SINGLETON=1 to allow multiple instances.`,
+          "MCPServer",
+        );
+        process.exit(0);
+      }
+      _singletonLockPath = outcome.path;
+      if (outcome.reclaimed) {
+        logger.debug("Reclaimed a stale singleton lock from a previous (crashed) instance", "MCPServer");
+      }
+    } catch (e: unknown) {
+      // Fail-safe: a broken lock mechanism must NEVER block a legitimate start.
+      logger.debug("Singleton lock check failed; continuing without it", "MCPServer", e);
+    }
+  }
+
   // Rebuild the SMTP transporter now that credentials and cert path are loaded.
   // SMTPService is constructed at module load time (before config is read), so
   // its initial transporter has an empty password and no Bridge cert.
@@ -2025,6 +2059,37 @@ async function main() {
     logger.warn("Async registry rebuild failed (falling back to sync view)", "MCPServer", e);
   }
   smtpService.reinitialize();
+
+  // ── Settings UI: bind BEFORE any backend connectivity (Cluster 4) ─────────
+  // The bind used to be sequenced after the IMAP/SMTP connect block below.
+  // When a backend probe/verify hung (observed after 3-day uptime), the
+  // settings HTTP server NEVER bound — leaving the UI unreachable precisely
+  // when the operator needed it to fix the misconfiguration. Bind first so the
+  // UI is up whether or not Bridge is reachable. A watchdog logs every 15s
+  // while the bind is still pending, naming what it's waiting on.
+  if (!noSettingsUi) {
+    const bindWatchdog = setInterval(() => {
+      if (!_settingsEnabled) {
+        logger.warn(
+          `Settings UI not yet bound on port ${config.settingsPort ?? 8765} — still waiting on the HTTP server bind. ` +
+          `The UI should be reachable independent of Bridge connectivity; if this repeats, the port may be occupied.`,
+          "MCPServer",
+        );
+      }
+    }, 15_000);
+    bindWatchdog.unref();
+    try {
+      await _startSettingsServerDaemon();
+    } finally {
+      clearInterval(bindWatchdog);
+    }
+  }
+  // Only the process that owns the settings server gets a tray. If another MCP
+  // already holds the port, _settingsExternal is true and that process already
+  // has the tray — skip to avoid duplicates.
+  if (!noTray && !_settingsExternal) {
+    _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
+  }
 
   // ── Bridge reachability probe + optional auto-start ───────────────────────
   let [smtpReachable, imapReachable] = await Promise.all([
@@ -2195,19 +2260,9 @@ async function main() {
       });
     }
 
-    // ── Daemon: start settings HTTP server + system tray ───────────────────
-    // Both run alongside the MCP transport. stdout is now owned by the
-    // MCP protocol, so startSettingsServer is called with quiet=true.
-    // Suppressed in headless environments via --no-settings-ui / --no-tray.
-    if (!noSettingsUi) {
-      await _startSettingsServerDaemon();
-    }
-    // Only the process that owns the settings server gets a tray.
-    // If another MCP already holds the port, _settingsExternal is true
-    // and that process already has the tray — skip to avoid duplicates.
-    if (!noTray && !_settingsExternal) {
-      _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
-    }
+    // NOTE: the settings HTTP server + system tray are now started ABOVE,
+    // before the Bridge reachability probe and backend connect (Cluster 4),
+    // so the UI is reachable even when a backend hangs. Nothing to do here.
   } catch (error) {
     logger.error("Server startup failed", "MCPServer", error);
     process.exit(1);
@@ -2247,6 +2302,13 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
     // 0b. Stop settings server
     await _stopSettingsServerDaemon();
+
+    // 0c. Release the per-account singleton lock so a legitimate restart can
+    // re-acquire it immediately (no stale-lock wait needed on the happy path).
+    if (_singletonLockPath) {
+      try { releaseSingletonLock(_singletonLockPath); } catch { /* best-effort */ }
+      _singletonLockPath = null;
+    }
 
     // 1. Stop bridge watchdog
     if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
@@ -2307,6 +2369,12 @@ process.on("exit", () => {
     analyticsService.wipeData();
     smtpService.wipeCredentials();
   } catch { /* best-effort */ }
+  // Release the singleton lock even on the hard-exit timeout path, so a stale
+  // lock never outlives the process when gracefulShutdown's body didn't finish.
+  if (_singletonLockPath) {
+    try { releaseSingletonLock(_singletonLockPath); } catch { /* best-effort */ }
+    _singletonLockPath = null;
+  }
 });
 
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
