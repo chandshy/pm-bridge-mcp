@@ -103,7 +103,7 @@ export function classifyError(
     return {
       category: "auth",
       message:
-        "IMAP authentication failed. Check the mailbox credentials in Settings.",
+        "Mail server authentication failed. Check the mailbox credentials in Settings.",
     };
   }
 
@@ -117,7 +117,7 @@ export function classifyError(
   ) {
     return {
       category: "timeout",
-      message: "The IMAP operation timed out. Please retry.",
+      message: "The mail server operation timed out. Please retry.",
     };
   }
 
@@ -138,7 +138,7 @@ export function classifyError(
     return {
       category: "connection",
       message:
-        "Lost connection to the IMAP server. The connection will be retried — please try again.",
+        "Lost connection to the mail server. The connection will be retried — please try again.",
     };
   }
 

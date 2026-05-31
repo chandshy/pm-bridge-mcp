@@ -67,7 +67,7 @@ describe("classifyError", () => {
       err.name = "IMAPNotConnectedError";
       const c = classifyError(err);
       expect(c.category).toBe("connection");
-      expect(c.message).toMatch(/connection to the imap server/i);
+      expect(c.message).toMatch(/connection to the mail server/i);
     });
 
     it("classifies ECONNRESET code", () => {
