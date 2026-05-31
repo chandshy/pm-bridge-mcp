@@ -9,7 +9,7 @@ import { buildStyles } from "./styles.js";
 const _moduleDir = nodePath.dirname(fileURLToPath(import.meta.url));
 const _pkgJsonPath = nodePath.resolve(_moduleDir, "../../package.json");
 
-export function buildShellHtml(configPath: string, csrfToken: string, runningPort = 8765, cspNonce = ""): string {
+export function buildShellHtml(configPath: string, csrfToken: string, runningPort = 8766, cspNonce = ""): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
   const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
   const distIndexPath = JSON.stringify(nodePath.resolve(_moduleDir, "../index.js"));
@@ -1094,7 +1094,7 @@ ${buildStyles(cspNonce)}
     set('sl-base-url',       cn.simpleloginBaseUrl || '');
     set('pass-access-token', cn.passAccessToken    ? '••••••••' : '');
     set('pass-cli-path',     cn.passCliPath        || '');
-    set('settings-port', c.settingsPort || 8765);
+    set('settings-port', c.settingsPort || 8766);
     checkPortMismatch();
     const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
     const isDirect = (cn.smtpHost || '').includes('protonmail');
@@ -1188,7 +1188,7 @@ ${buildStyles(cspNonce)}
         },
         requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
         desktopNotificationsEnabled: !!(document.getElementById('desktop-notifications') && document.getElementById('desktop-notifications').checked),
-        settingsPort: (function(){ var p = parseInt(get('settings-port'), 10); return isNaN(p) ? 8765 : p; })(),
+        settingsPort: (function(){ var p = parseInt(get('settings-port'), 10); return isNaN(p) ? 8766 : p; })(),
       };
       const r = await fetch('/api/config', {
         method: 'POST',

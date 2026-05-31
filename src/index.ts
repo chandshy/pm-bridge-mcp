@@ -466,7 +466,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   // config snapshot — everything else is static.
   const defs = allToolDefs().map(def =>
     def.name === "request_permission_escalation"
-      ? { ...def, description: describeRequestEscalation(config.settingsPort ?? 8765) }
+      ? { ...def, description: describeRequestEscalation(config.settingsPort ?? 8766) }
       : def,
   );
   return { tools: defs.filter(t => visible.has(t.name)) };
@@ -1624,7 +1624,7 @@ import { buildSettingsTrayMenu } from "./utils/tray-menu.js";
 let _settingsStop:    (() => Promise<void>) | null = null;
 let _settingsEnabled: boolean = false;
 let _settingsUrl:     string  = "";
-// When the settings UI can't bind, this records why (e.g. "ports 8765–8775 all
+// When the settings UI can't bind, this records why (e.g. "ports 8766–8776 all
 // in use") so the tray can surface it instead of the "Open Settings" entry
 // silently vanishing. Cleared whenever the UI comes up.
 let _settingsUnavailableReason: string | undefined;
@@ -1694,7 +1694,7 @@ async function _probeExistingMailpouchUi(port: number): Promise<string | null> {
 }
 
 async function _startSettingsServerDaemon(): Promise<void> {
-  const basePort = config.settingsPort ?? 8765;
+  const basePort = config.settingsPort ?? 8766;
 
   // If a user-run `mailpouch-settings` instance is already serving on the
   // configured port, reuse it silently rather than retry-and-warn. Probes with
@@ -1985,7 +1985,7 @@ async function main() {
       config.debug              = !!cn.debug;
       config.autoStartBridge    = !!cn.autoStartBridge;
       config.bridgePath         = cn.bridgePath || undefined;
-      config.settingsPort       = fileConfig.settingsPort ?? 8765;
+      config.settingsPort       = fileConfig.settingsPort ?? 8766;
 
       // CRED-001: Pass PAT + SimpleLogin API key now keychain-routable.
       // After migrateCredentials() runs, the disk fields are blank — read
@@ -2125,7 +2125,7 @@ async function main() {
     const bindWatchdog = setInterval(() => {
       if (!_settingsEnabled) {
         logger.warn(
-          `Settings UI not yet bound on port ${config.settingsPort ?? 8765} — still waiting on the HTTP server bind. ` +
+          `Settings UI not yet bound on port ${config.settingsPort ?? 8766} — still waiting on the HTTP server bind. ` +
           `The UI should be reachable independent of Bridge connectivity; if this repeats, the port may be occupied.`,
           "MCPServer",
         );
@@ -2157,7 +2157,7 @@ async function main() {
   if (settingsOnly) {
     if (!_settingsEnabled && !_settingsExternal) {
       logger.error(
-        `Settings UI failed to bind (port ${config.settingsPort ?? 8765} may be occupied) and --settings-only was requested — ` +
+        `Settings UI failed to bind (port ${config.settingsPort ?? 8766} may be occupied) and --settings-only was requested — ` +
         "nothing left to run. Free the port, or set settingsPort in ~/.mailpouch.json (or the PORT env var), then retry.",
         "MCPServer",
       );

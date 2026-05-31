@@ -22,7 +22,7 @@ export interface TrayMenuState {
   activeCount: number;
   settingsEnabled: boolean;
   settingsUrl: string;
-  /** Why the settings UI is unavailable (e.g. "port 8765 in use"), shown in
+  /** Why the settings UI is unavailable (e.g. "port 8766 in use"), shown in
    *  the tray when settingsEnabled is false so the missing "Open Settings"
    *  entry isn't silent. Omitted when the UI is up or was disabled on purpose. */
   settingsUnavailableReason?: string;

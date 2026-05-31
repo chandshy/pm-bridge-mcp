@@ -174,9 +174,9 @@ export function buildSetupHtml(p: SetupParams): string {
         </div>
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
-          <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px"
+          <input type="number" id="settings-port" min="1" max="65535" placeholder="8766" style="width:120px"
             data-input="checkPortMismatch">
-          <div class="hint">Port the settings web UI listens on. Takes effect on the next launch. Default: 8765.</div>
+          <div class="hint">Port the settings web UI listens on. Takes effect on the next launch. Default: 8766.</div>
           <div id="port-mismatch-warn" style="display:none;margin-top:4px;font-size:12px;color:var(--warn,#f59e0b)">
             ⚠ Currently running on port ${p.runningPort}. Save and restart settings for the new port to take effect.
           </div>

@@ -53,7 +53,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
 - **5 permission presets** — read-only by default; write access requires explicit opt-in. Per-tool overrides and rate limits via the **Custom** preset.
 - **Human-gated escalation** — agents request elevated permissions, you approve via browser UI or terminal; the agent cannot approve its own requests.
-- **Browser-based settings UI** at `localhost:8765` — auto-starts with the daemon; setup wizard, live connection test, per-tool toggles, escalation approval panel, OAuth admin password.
+- **Browser-based settings UI** at `localhost:8766` — auto-starts with the daemon; setup wizard, live connection test, per-tool toggles, escalation approval panel, OAuth admin password.
 - **Native system tray icon** — always visible, clickable menu opens the settings UI or quits. Rendered via a bundled Rust (napi-rs) binding around the `tauri-apps/tray-icon` crate — the same one Tauri ships in production — so the tray behaves correctly on modern GNOME (where the legacy Go-binary library shows a generic placeholder), NSStatusBar on macOS, and Shell_NotifyIcon on Windows. Prebuilts for linux-x64/arm64, darwin-arm64, win32-x64/arm64 ship inside the main package; darwin-x64 (Intel Mac) falls back to the legacy Go backend cleanly.
 - **6 MCP prompts** — triage inbox, compose reply, daily briefing, find subscriptions, thread summary, draft in my voice.
 - **MCP Resources** — individual emails and folders addressable via `email://` and `folder://` URIs.
@@ -166,7 +166,7 @@ Run the settings server to complete first-time setup:
 
 ```bash
 npx mailpouch-settings
-# Then open http://localhost:8765
+# Then open http://localhost:8766
 ```
 
 The **6-step wizard** walks you through everything automatically:
@@ -303,7 +303,7 @@ Configuration is stored in `~/.mailpouch.json` and managed via the settings UI �
 | `MAILPOUCH_MACHINE_SECRET` | derived from host | Override the machine-binding secret used to encrypt at-rest credentials |
 | `MAILPOUCH_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
 | `MAILPOUCH_TIER` | `complete` | Tool-tier override: `core` / `extended` / `complete` |
-| `PORT` | `8765` | Override settings UI HTTP server port |
+| `PORT` | `8766` | Override settings UI HTTP server port |
 
 ---
 
@@ -389,13 +389,13 @@ The escalation system lets an agent request broader permissions without permanen
 
 ## Settings UI
 
-The settings UI starts automatically on `http://localhost:8765` whenever your MCP client runs the server. A system tray icon (purple envelope) appears in your taskbar — right-click it to open the UI, disable it temporarily, or quit.
+The settings UI starts automatically on `http://localhost:8766` whenever your MCP client runs the server. A system tray icon (purple envelope) appears in your taskbar — right-click it to open the UI, disable it temporarily, or quit.
 
 To run the settings UI standalone (useful for initial setup, headless / SSH systems, or a dedicated remote-mode host):
 
 ```bash
 npx mailpouch-settings           # auto-detects display; opens browser if available
-npx mailpouch-settings --port 9000   # custom port (default: 8765)
+npx mailpouch-settings --port 9000   # custom port (default: 8766)
 npx mailpouch-settings --lan         # bind to 0.0.0.0 (approve from phone/other device)
 npx mailpouch-settings --browser     # force browser UI even if no display detected
 npx mailpouch-settings --tui         # force interactive terminal UI

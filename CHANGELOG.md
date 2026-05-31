@@ -14,9 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
 - **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
 
+### Changed — default settings-UI port is now 8766 (was 8765)
+
+- The default `settingsPort` moved from **8765 → 8766** across every code site (loader, schema, `index.ts`, `settings-main`, settings server, setup UI) and the docs. Installs that pin `settingsPort` in `~/.mailpouch.json` are unaffected; only the unset-default changes. This also steps the default off 8765, a port commonly taken by ad-hoc local HTTP servers.
+
 ### Improved — settings UI survives an occupied port and explains itself
 
-- **Port fallback:** if the configured `settingsPort` (default 8765) is held by a *foreign* process, `_startSettingsServerDaemon` now binds the next free port (`basePort … basePort+10`) instead of retrying the same dead port 5× and then giving up for the whole session. The configured port still gets a few quick retries first (covers a mailpouch restarting on it); a fallback bind logs a clear "configured port N was occupied — bound to M instead" warning. Real-world trigger: a respawning `python3 -m http.server` permanently squatting 8765 took the UI down every session.
+- **Port fallback:** if the configured `settingsPort` (default 8766) is held by a *foreign* process, `_startSettingsServerDaemon` now binds the next free port (`basePort … basePort+10`) instead of retrying the same dead port 5× and then giving up for the whole session. The configured port still gets a few quick retries first (covers a mailpouch restarting on it); a fallback bind logs a clear "configured port N was occupied — bound to M instead" warning. Real-world trigger: a respawning local HTTP server permanently squatting the configured port took the UI down every session.
 - **Tray surfaces the reason:** when the settings UI can't bind at all, the tray tooltip now reads "Settings UI off: <reason>" and a disabled menu item shows it, instead of the "Open Settings" entry silently vanishing (`buildSettingsTrayMenu` gains `settingsUnavailableReason`).
 - **Friendly unreachable message:** when the page's backing server dies (stopped/restarted while the tab stayed open), tab loading now shows "The settings server is no longer reachable — mailpouch may have stopped or restarted. Restart mailpouch and reload this page." instead of the raw `TypeError: Failed to fetch`.
 
