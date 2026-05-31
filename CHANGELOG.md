@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.69] — 2026-05-31
+
+### Fixed — instance singleton lock (consolidated report cluster 2 follow-up)
+
+- **Multiple `claude --continue` sessions each spawned their own mailpouch MCP**, and each one opened a separate IMAP IDLE/auth loop against the *same* mailbox — a compounded version of the connection leak addressed in 3.0.68. Nothing prevented N concurrent instances from N-multiplying the Bridge session load.
+- **Fix:** on startup, after config load and before any IMAP/SMTP connectivity, each instance acquires a **per-account PID lock** under `$HOME` (`~/.mailpouch-<accounthash>.lock`). If another **live** instance for the same account already holds it (the recorded PID is verified alive), the new instance logs a clear message and **exits 0** instead of starting a second connection. **Stale locks** from crashed/killed processes (dead PID, or garbage contents) are reclaimed automatically, so a legitimate restart after a clean *or* crashed shutdown is never blocked. The lock is released on `gracefulShutdown` (and on the hard-exit path). Always on; set `MAILPOUCH_NO_SINGLETON=1` to allow intentional multi-instance setups. Fail-safe: if the lock mechanism itself errors, the instance logs and continues rather than blocking a legitimate start. New `src/utils/singleton-lock.ts` helper with unit tests (acquire-when-free, live-holder signal, stale/garbage reclaim, ownership-checked release).
+
+### Fixed — settings-UI bind race (consolidated report cluster 4)
+
+- **The settings HTTP server bind was sequenced *after* the IMAP/SMTP connectivity check in `main()`.** When a backend probe/verify hung (observed after ~3-day uptime), the settings server never bound — port stayed unbound, HTTP probes got connection-refused — leaving the UI unreachable *precisely* when the operator needed it to fix the backend misconfiguration.
+- **Fix:** the settings server (and system tray) now **bind before** the Bridge reachability probe and backend connect, so the UI is reachable independent of backend state. Added a **watchdog log line** every 15 s while the bind is still pending, naming what it is waiting on, so a stuck bind is visible in `~/.mailpouch.log`.
+
 ## [3.0.68] — 2026-05-31
 
 ### Fixed — IMAP connection leak / auth-retry storm (consolidated report cluster 2)
