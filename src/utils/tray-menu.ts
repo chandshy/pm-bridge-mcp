@@ -58,3 +58,34 @@ export function buildSettingsTrayMenu(s: TrayMenuState): { items: TrayItem[]; to
   ];
   return { items, tooltip };
 }
+
+export interface LauncherTrayState {
+  version: string;
+  settingsEnabled: boolean;
+  settingsUrl: string;
+}
+
+/**
+ * Menu for the standalone `mailpouch-settings` launcher tray. Spartan vs. the
+ * MCP tray (no agent/connection state to surface), but mirrors the same
+ * enable/disable-Settings-UI toggle and "Open Settings" gating: on the launcher
+ * "disable" stops the HTTP server while keeping the tray alive, and "enable"
+ * brings it back — so the icon stays an always-available control point.
+ */
+export function buildLauncherTrayMenu(s: LauncherTrayState): TrayItem[] {
+  return [
+    { id: "header",  label: "mailpouch", enabled: false },
+    { id: "version", label: `v${s.version}`, enabled: false },
+    { id: "sep1",    label: "", separator: true },
+    ...(s.settingsEnabled && s.settingsUrl
+      ? [{ id: "open", label: "Open Settings" }]
+      : []),
+    { id: "sep2",    label: "", separator: true },
+    {
+      id:    s.settingsEnabled ? "disable" : "enable",
+      label: s.settingsEnabled ? "Disable Settings UI" : "Enable Settings UI",
+    },
+    { id: "sep3",    label: "", separator: true },
+    { id: "quit",    label: "Quit" },
+  ];
+}

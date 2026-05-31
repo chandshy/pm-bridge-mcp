@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.67] — 2026-05-31
+
+### Added — Enable/Disable Settings UI toggle on the standalone launcher tray
+
+- The standalone `mailpouch-settings` tray now mirrors the MCP server's tray: an **"Enable Settings UI" ↔ "Disable Settings UI"** toggle, with **"Open Settings" shown only when the UI is enabled**. "Disable" stops the HTTP server while keeping the tray and process alive (so the icon stays an always-available control point); "Enable" brings the server back up on the same port. Previously the launcher tray had only Open Settings / Quit, so the only way to stop serving was to quit entirely. Menu construction is the pure, unit-tested `buildLauncherTrayMenu()` (`src/utils/tray-menu.ts`).
+
 ## [3.0.66] — 2026-05-31
 
 ### Changed — tray Settings-UI toggle made testable (no behavior change)

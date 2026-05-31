@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSettingsTrayMenu, type TrayMenuState } from "./tray-menu.js";
+import { buildSettingsTrayMenu, buildLauncherTrayMenu, type TrayMenuState } from "./tray-menu.js";
 
 const base: TrayMenuState = {
   version: "9.9.9",
@@ -74,5 +74,36 @@ describe("buildSettingsTrayMenu — Settings-UI enable/disable toggle", () => {
     expect(byId(some.items, "pending")?.label).toContain("2 agent(s) pending");
     expect(byId(some.items, "active")?.label).toContain("1 agent(s) active");
     expect(some.tooltip).toContain("2 agent(s) awaiting approval");
+  });
+});
+
+describe("buildLauncherTrayMenu — standalone mailpouch-settings tray (toggle parity)", () => {
+  it("off: 'Enable Settings UI' (id=enable), no 'Open Settings'", () => {
+    const items = buildLauncherTrayMenu({ version: "1.2.3", settingsEnabled: false, settingsUrl: "" });
+    expect(byId(items, "enable")?.label).toBe("Enable Settings UI");
+    expect(byId(items, "disable")).toBeUndefined();
+    expect(byId(items, "open")).toBeUndefined();
+    expect(byId(items, "quit")?.label).toBe("Quit");
+    expect(byId(items, "version")?.label).toBe("v1.2.3");
+  });
+
+  it("on: 'Disable Settings UI' (id=disable) + 'Open Settings'", () => {
+    const items = buildLauncherTrayMenu({ version: "1.2.3", settingsEnabled: true, settingsUrl: "http://localhost:8766" });
+    expect(byId(items, "disable")?.label).toBe("Disable Settings UI");
+    expect(byId(items, "enable")).toBeUndefined();
+    expect(byId(items, "open")?.label).toBe("Open Settings");
+  });
+
+  it("fails safe: enabled-but-urlless never offers 'Open Settings'", () => {
+    const items = buildLauncherTrayMenu({ version: "1.2.3", settingsEnabled: true, settingsUrl: "" });
+    expect(byId(items, "open")).toBeUndefined();
+    expect(byId(items, "disable")?.label).toBe("Disable Settings UI");
+  });
+
+  it("has no MCP-only items (status/account/agent badges)", () => {
+    const items = buildLauncherTrayMenu({ version: "1.2.3", settingsEnabled: true, settingsUrl: "http://x" });
+    expect(byId(items, "status")).toBeUndefined();
+    expect(byId(items, "account")).toBeUndefined();
+    expect(byId(items, "pending")).toBeUndefined();
   });
 });
