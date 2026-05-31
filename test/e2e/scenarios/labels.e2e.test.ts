@@ -61,5 +61,14 @@ describe("labels.e2e", () => {
       const subjects = result.emails.map((e) => e.subject);
       expect(subjects.length).toBeGreaterThanOrEqual(2);
     });
+
+    it("returns an actionable not-found error for a missing label (Cluster 6)", async () => {
+      const raw = await h.callRaw("get_emails_by_label", { label: "NoSuchLabel", limit: 10 });
+      const text = "message" in raw ? raw.message : raw.content?.[0]?.text ?? "";
+      // Names the resolved Labels/<name> folder; never the opaque generic string.
+      expect(text).toContain("Labels/NoSuchLabel");
+      expect(text.toLowerCase()).toContain("not found");
+      expect(text).not.toBe("An error occurred");
+    });
   });
 });

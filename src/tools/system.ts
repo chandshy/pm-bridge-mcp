@@ -9,6 +9,7 @@ import { fileURLToPath as _fileURLToPath } from "url";
 import nodePath from "path";
 import { validateTargetFolder, clampOptionalInt } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
+import { isFolderNotFoundError } from "../utils/error-classify.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
@@ -202,7 +203,16 @@ export const handlers: Record<string, ToolHandler> = {
       throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
     }
     const limit = Math.min(Math.max(1, (args.limit as number) || 100), 500);
-    const emails = await imapService.getEmails(folder, limit);
+    let emails;
+    try {
+      emails = await imapService.getEmails(folder, limit);
+    } catch (err) {
+      // Cluster 6: surface a missing folder as a precise not-found error.
+      if (isFolderNotFoundError(err)) {
+        throw new McpError(ErrorCode.InvalidParams, `Folder/label '${folder}' not found.`);
+      }
+      throw err;
+    }
     state.analyticsCache = null;
     state.analyticsCacheInflight = null;
     return ok({ success: true, folder, count: emails.length });

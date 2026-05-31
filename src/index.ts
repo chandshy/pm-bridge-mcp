@@ -56,6 +56,7 @@ import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lock.js";
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
+import { classifyError } from "./utils/error-classify.js";
 import { permissions } from "./permissions/manager.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName } from "./config/schema.js";
@@ -371,13 +372,6 @@ function safeErrorMessage(error: unknown): string {
   if (msg.includes("smtp") || msg.includes("send") || msg.includes("delivery"))
     return "Email delivery failed";
   if (
-    msg.includes("imap") ||
-    msg.includes("connect") ||
-    msg.includes("mailbox") ||
-    msg.includes("login")
-  )
-    return "IMAP operation failed";
-  if (
     msg.includes("protected folder") ||
     msg.includes("already exists") ||
     msg.includes("not empty") ||
@@ -385,7 +379,19 @@ function safeErrorMessage(error: unknown): string {
   )
     return error.message;
   if (msg.includes("at least one recipient") || msg.includes("required")) return error.message;
-  return "An error occurred";
+  // Cluster 6: classify the remaining IMAP/connection/auth/timeout failures into
+  // actionable categories instead of the opaque "IMAP operation failed" /
+  // "An error occurred". The raw error (with stack) is logged by the dispatcher.
+  const classified = classifyError(error);
+  if (classified.category !== "internal") return classified.message;
+  if (
+    msg.includes("imap") ||
+    msg.includes("connect") ||
+    msg.includes("mailbox") ||
+    msg.includes("login")
+  )
+    return "IMAP operation failed";
+  return classified.message;
 }
 
 /**
