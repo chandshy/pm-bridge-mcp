@@ -91,6 +91,15 @@ describe("reading.e2e", () => {
       );
       expect(result.emails.length).toBe(0);
     });
+
+    it("returns an actionable not-found error for a missing folder (Cluster 6)", async () => {
+      const raw = await h.callRaw("get_emails", { folder: "Folders/DoesNotExist", limit: 10 });
+      const text = "message" in raw ? raw.message : raw.content?.[0]?.text ?? "";
+      // Must name the folder and not collapse to the opaque generic string.
+      expect(text).toContain("Folders/DoesNotExist");
+      expect(text.toLowerCase()).toContain("not found");
+      expect(text).not.toBe("An error occurred");
+    });
   });
 
   describe("get_thread", () => {
@@ -131,6 +140,14 @@ describe("reading.e2e", () => {
       expect(result.success).toBe(true);
       expect(result.folder).toBe("INBOX");
       expect(result.count).toBeGreaterThanOrEqual(0);
+    });
+
+    it("returns an actionable not-found error for a missing folder (Cluster 6)", async () => {
+      const raw = await h.callRaw("sync_emails", { folder: "Folders/Nope", limit: 10 });
+      const text = "message" in raw ? raw.message : raw.content?.[0]?.text ?? "";
+      expect(text).toContain("Folders/Nope");
+      expect(text.toLowerCase()).toContain("not found");
+      expect(text).not.toBe("An error occurred");
     });
   });
 });

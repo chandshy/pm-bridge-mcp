@@ -36,6 +36,7 @@ import type { FtsIndexService } from "../services/fts-service.js";
 const _ftsRebuilding = new Set<string>();
 import type { EmailMessage, EmailFolder } from "../types/index.js";
 import { logger } from "../utils/logger.js";
+import { isFolderNotFoundError } from "../utils/error-classify.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const EMAIL_SUMMARY_SCHEMA = {
@@ -514,7 +515,17 @@ export const handlers: Record<string, ToolHandler> = {
       offset = decoded.offset;
     }
 
-    const emails = await imapService.getEmails(folder, limit, offset);
+    let emails;
+    try {
+      emails = await imapService.getEmails(folder, limit, offset);
+    } catch (err) {
+      // Cluster 6: a SELECT of a missing mailbox surfaces as an opaque imapflow
+      // rejection. Convert it to a precise, actionable not-found error.
+      if (isFolderNotFoundError(err)) {
+        throw new McpError(ErrorCode.InvalidParams, `Folder/label '${folder}' not found.`);
+      }
+      throw err;
+    }
 
     let nextCursor: string | undefined;
     if (emails.length === limit) {
@@ -725,7 +736,17 @@ export const handlers: Record<string, ToolHandler> = {
       lblOffset = decoded.offset;
     }
 
-    const lblEmails = await imapService.getEmails(lblFolder, lblLimit, lblOffset);
+    let lblEmails;
+    try {
+      lblEmails = await imapService.getEmails(lblFolder, lblLimit, lblOffset);
+    } catch (err) {
+      // Cluster 6: a missing label folder maps to a precise not-found message
+      // naming the label, rather than the opaque "An error occurred".
+      if (isFolderNotFoundError(err)) {
+        throw new McpError(ErrorCode.InvalidParams, `Folder/label '${lblFolder}' not found.`);
+      }
+      throw err;
+    }
     let lblNextCursor: string | undefined;
     if (lblEmails.length === lblLimit) {
       lblNextCursor = encodeCursor({ folder: lblFolder, offset: lblOffset + lblLimit, limit: lblLimit });

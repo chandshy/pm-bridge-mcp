@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.70] — 2026-05-31
+
+### Fixed — actionable error classification (consolidated report cluster 6)
+
+- **Many tools collapsed every failure into the opaque string `"An error occurred"`**, giving users and agents nothing to act on. In particular, `get_emails({ folder: "Labels/X" })`, `get_emails_by_label({ label: "X" })`, and `sync_emails({ folder: "Labels/X" })` against a non-existent folder/label returned the generic message instead of saying what was wrong.
+- Added a focused error-classification helper (`src/utils/error-classify.ts`) that maps a thrown error — including imapflow rejections that expose `responseText` / `responseStatus` / `code` — into stable, actionable categories: **folder/label not found**, **IMAP auth failed**, **IMAP connection lost**, **timeout**, and **internal error**. Internal stack detail is kept out of the user-facing string (still logged by the dispatcher).
+- The three cited read tools now detect a missing-mailbox SELECT rejection (imapflow `NONEXISTENT` / "Mailbox doesn't exist") and return a precise `McpError(InvalidParams)` naming the resource, e.g. `Folder/label 'Labels/X' not found.`, rather than the generic message.
+- The MCP dispatcher's `safeErrorMessage()` now routes previously-opaque IMAP/connection/auth/timeout failures through the classifier for distinguishable, actionable messages.
+
 ## [3.0.69] — 2026-05-31
 
 ### Fixed — instance singleton lock (consolidated report cluster 2 follow-up)
