@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.71] — 2026-05-31
+
+### Verified — `search_emails` already issues a live IMAP SEARCH (consolidated report cluster 7 / Observation O1)
+
+- **Investigation:** Observation O1 reported that `search_emails({folder:"INBOX", subject:"…"})` returned `count:0` for a message verifiably in INBOX (e.g. a just-sent self-mail), with the hypothesis that search scanned a stale local cache rather than issuing a live IMAP SEARCH — so freshly-arrived mail would be missed. A read of `searchEmails` → `searchSingleFolder` (`src/services/simple-imap-service.ts`) and the `search_emails` tool handler (`src/tools/reading.ts`) confirmed search is **already live**: every query runs `client.search(criteria, {uid, returnOptions:[{partial}]})` against the locked folder, and the in-memory email cache is consulted **only after** the live SEARCH returns UIDs (to avoid re-fetching bodies already held). A UID the server returns but the cache lacks is fetched directly within the held lock, so a message that arrived after the last cache fill is still found. The handler is pure validation + pass-through and does not pre-filter against any cache.
+- **Regression guard:** the honest IMAP mock (`src/services/imap-operations.test.ts`) gained a `seedMessage()` helper plus subject-aware SEARCH and source-bearing FETCH, modelling a message that exists on the (mock) server but was never inserted into the production cache. New tests assert `searchEmails` returns such a freshly-seeded message, materialises it into the cache for cheap re-serve, and returns empty when nothing matches. Because the mock's SEARCH answers from the per-folder UID table independent of the cache, a future cache-only regression (iterating the cache instead of the live result) would surface a cold-cache miss and fail these tests.
+- No production behaviour change; existing search semantics (subject/from/to/date/flag/size filters, folder scoping, the v3.0.x SEARCH-injection sanitisation and length caps) are unchanged.
+
 ## [3.0.70] — 2026-05-31
 
 ### Fixed — actionable error classification (consolidated report cluster 6)
