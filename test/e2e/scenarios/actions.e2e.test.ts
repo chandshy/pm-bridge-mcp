@@ -365,19 +365,19 @@ describe("actions.e2e", () => {
   });
 
   describe("move_to_label / bulk_move_to_label — IMAP COPY semantics", () => {
-    // Greenmail's IMAP COPY into a freshly-created mailbox occasionally races
-    // with mailpouch's IDLE-driven cache invalidation, producing "Command
-    // failed" errors. The same scenarios pass reliably on Proton Bridge.
-    // We skip them on Greenmail and cover them in bridge-only.e2e.test.ts
-    // (Phase 2).
-    it.skip("move_to_label copies (not moves) the email to Labels/{label} — bridge-only", async () => {
+    // Previously skipped as "bridge-only" on the theory that Greenmail COPY into
+    // a freshly-created label raced IDLE cache invalidation. As of v3.0.65 the
+    // label tools create Labels/{name} up front (ensureFolderExists) and verify
+    // the copy landed by Message-ID, so these run reliably on Greenmail — and
+    // un-skipping them is what closes the gap that hid the Bug-A regression.
+    it("move_to_label copies (not moves) the email to Labels/{label}", async () => {
       const uid = await h.imap.appendSeed("INBOX", PROMO_CREDIT_KARMA);
       h.json<ActionResult>(await h.call("move_to_label", { emailId: String(uid), label: "Priority" }));
       expect(await h.imap.uidExists("INBOX", uid)).toBe(true);
       expect(await h.imap.messageCount(LABEL_PRIORITY)).toBe(1);
     });
 
-    it.skip("bulk_move_to_label copies several UIDs to Labels/{label} — bridge-only", async () => {
+    it("bulk_move_to_label copies several UIDs to Labels/{label}", async () => {
       const u1 = await h.imap.appendSeed("INBOX", PROMO_CREDIT_KARMA);
       const u2 = await h.imap.appendSeed("INBOX", PROMO_RED_LOBSTER);
       const result = h.json<BulkResult>(

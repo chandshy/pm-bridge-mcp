@@ -83,6 +83,25 @@ function makeLock() {
 interface MockClientState {
   uidsByFolder: Map<string, Set<string>>;
   lockedFolder: string | null;
+  // folder + uid maps to a Message-ID (cross-mailbox identity used to verify a copy/move
+  // can be VERIFIED to have landed in the target (the v3.0.65 honest-counts fix).
+  midByFolderUid: Map<string, string>;
+  seq: number;
+  // Number of leading messageMove/messageCopy calls to throw on (fault injection
+  // for fallback tests) — exercises the chunk→per-UID fallback without replacing
+  // the default mock, so the message-landing/verification model stays intact.
+  failNext: { move: number; copy: number };
+  // When set, messageMove/messageCopy RESOLVE successfully but perform NO work
+  // (no landing in target, no source removal) — models Proton Bridge answering
+  // a COPY/MOVE from the All Mail union with OK while doing nothing. The
+  // verification layer must turn this into an honest failure, not a false success.
+  silentNoOp: { move: boolean; copy: boolean };
+}
+
+const MID_SEP = "\u0001";
+function midKeyOf(folder: string, uid: string | number): string { return `${folder}${MID_SEP}${uid}`; }
+function defaultMid(folder: string, uid: string | number): string {
+  return `<m-${folder.replace(/[^a-z0-9]/gi, "_")}-${uid}@mock>`;
 }
 
 /** Stored on the returned client object so test helpers can mutate it. */
@@ -104,7 +123,28 @@ export function seedUids(
     set = new Set();
     state.uidsByFolder.set(folder, set);
   }
-  for (const u of uids) set.add(String(u));
+  for (const u of uids) {
+    set.add(String(u));
+    const key = midKeyOf(folder, u);
+    if (!state.midByFolderUid.has(key)) state.midByFolderUid.set(key, defaultMid(folder, u));
+  }
+}
+
+/** Seed UIDs that have NO Message-ID (IMAP ENVELOPE returns NIL) — used to
+ *  prove copy/move verification falls back to the UIDPLUS COPYUID map rather
+ *  than assuming success for un-identifiable messages. */
+export function seedUidsNoMid(
+  client: Record<string, unknown>,
+  folder: string,
+  uids: Array<number | string>,
+): void {
+  const state = clientState(client);
+  let set = state.uidsByFolder.get(folder);
+  if (!set) { set = new Set(); state.uidsByFolder.set(folder, set); }
+  for (const u of uids) {
+    set.add(String(u));
+    state.midByFolderUid.delete(midKeyOf(folder, u)); // explicitly no Message-ID
+  }
 }
 
 function parseUidRange(range: unknown): string[] {
@@ -133,6 +173,24 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
   const state: MockClientState = {
     uidsByFolder: new Map(),
     lockedFolder: null,
+    midByFolderUid: new Map(),
+    seq: 900000,
+    failNext: { move: 0, copy: 0 },
+    silentNoOp: { move: false, copy: false },
+  };
+
+  // Land `uids` from the locked source into `target` under fresh UIDs, carrying
+  // each message's Message-ID across (real COPY/MOVE semantics). This is what
+  // makes the v3.0.65 verification pass for genuine copies/moves.
+  const landInTarget = (sourceFolder: string, target: string, uids: string[]): void => {
+    let tset = state.uidsByFolder.get(target);
+    if (!tset) { tset = new Set(); state.uidsByFolder.set(target, tset); }
+    for (const uid of uids) {
+      const mid = state.midByFolderUid.get(midKeyOf(sourceFolder, uid)) ?? defaultMid(sourceFolder, uid);
+      const newUid = String(++state.seq);
+      tset.add(newUid);
+      state.midByFolderUid.set(midKeyOf(target, newUid), mid);
+    }
   };
 
   const lockedFolderFetch = vi.fn().mockImplementation((range: unknown) => {
@@ -141,9 +199,26 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
     const seeded = folder ? state.uidsByFolder.get(folder) ?? new Set<string>() : new Set<string>();
     return (async function* () {
       for (const id of ids) {
-        if (seeded.has(id)) yield { uid: Number(id) };
+        if (seeded.has(id)) {
+          const mid = folder ? state.midByFolderUid.get(midKeyOf(folder, id)) : undefined;
+          yield { uid: Number(id), envelope: { messageId: mid } };
+        }
       }
     })();
+  });
+
+  // SEARCH HEADER MESSAGE-ID <mid> within the locked folder — used by the
+  // copy/move landing verification.
+  const search = vi.fn().mockImplementation(async (criteria: { header?: Record<string, string> }, _opts: unknown) => {
+    const folder = state.lockedFolder;
+    const wantMid = criteria?.header?.["message-id"];
+    if (!folder || !wantMid) return [];
+    const set = state.uidsByFolder.get(folder) ?? new Set<string>();
+    const hits: number[] = [];
+    for (const uid of set) {
+      if (state.midByFolderUid.get(midKeyOf(folder, uid)) === wantMid) hits.push(Number(uid));
+    }
+    return hits;
   });
 
   const getMailboxLock = vi.fn().mockImplementation(async (folder: string) => {
@@ -161,17 +236,29 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
   const messageFlagsRemove = vi.fn().mockImplementation(async (range: unknown, _flags: unknown, _opts: unknown) => {
     assertUidsBelongToLockedFolder(state, range, "messageFlagsRemove");
   });
-  const messageMove = vi.fn().mockImplementation(async (range: unknown, _target: unknown, _opts: unknown) => {
+  const messageMove = vi.fn().mockImplementation(async (range: unknown, target: unknown, _opts: unknown) => {
+    if (state.failNext.move > 0) { state.failNext.move--; throw new Error("batch error"); }
     assertUidsBelongToLockedFolder(state, range, "messageMove");
-    // Remove the moved UIDs from the source folder. Tests don't currently
-    // inspect the target seed set, so we don't add them there.
-    if (state.lockedFolder) {
-      const set = state.uidsByFolder.get(state.lockedFolder);
-      if (set) for (const id of parseUidRange(range)) set.delete(id);
+    const ids = parseUidRange(range);
+    // UIDPLUS COPYUID response: source uid → dest uid. An All-Mail no-op resolves
+    // OK but relocates nothing, so it returns an EMPTY uidMap.
+    if (state.silentNoOp.move) return { uidMap: new Map<number, number>() };
+    const src = state.lockedFolder;
+    if (src && typeof target === "string") landInTarget(src, target, ids);
+    if (src) {
+      const set = state.uidsByFolder.get(src);
+      if (set) for (const id of ids) set.delete(id);
     }
+    return { uidMap: new Map<number, number>(ids.map((id) => [Number(id), ++state.seq])) };
   });
-  const messageCopy = vi.fn().mockImplementation(async (range: unknown, _target: unknown, _opts: unknown) => {
+  const messageCopy = vi.fn().mockImplementation(async (range: unknown, target: unknown, _opts: unknown) => {
+    if (state.failNext.copy > 0) { state.failNext.copy--; throw new Error("batch error"); }
     assertUidsBelongToLockedFolder(state, range, "messageCopy");
+    const ids = parseUidRange(range);
+    if (state.silentNoOp.copy) return { uidMap: new Map<number, number>() };
+    const src = state.lockedFolder;
+    if (src && typeof target === "string") landInTarget(src, target, ids);
+    return { uidMap: new Map<number, number>(ids.map((id) => [Number(id), ++state.seq])) };
   });
   const messageDelete = vi.fn().mockImplementation(async (range: unknown, _opts: unknown) => {
     assertUidsBelongToLockedFolder(state, range, "messageDelete");
@@ -189,6 +276,7 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
     messageMove,
     messageCopy,
     messageDelete,
+    search,
     fetch: lockedFolderFetch,
     ...overrides,
   };
@@ -632,11 +720,8 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
   it("falls back to per-email move when batch fails", async () => {
     const svc = new SimpleIMAPService();
     // Batch move fails, per-email move succeeds
-    const client = connectSvc(svc, {
-      messageMove: vi.fn()
-        .mockRejectedValueOnce(new Error("batch error"))
-        .mockResolvedValue(undefined),
-    });
+    const client = connectSvc(svc);
+    clientState(client).failNext.move = 1; // chunk call fails → per-UID fallback
     seedUids(client, "INBOX", [82, 83]);
     (svc as any).setCacheEntry("82", makeEmail("82", "INBOX"));
     (svc as any).setCacheEntry("83", makeEmail("83", "INBOX"));
@@ -1744,11 +1829,8 @@ describe("SimpleIMAPService.setFlag non-matching UID", () => {
 describe("SimpleIMAPService.bulkMoveEmails per-email cache update", () => {
   it("skips cache eviction in per-email fallback when email not in cache", async () => {
     const svc = new SimpleIMAPService();
-    const client = connectSvc(svc, {
-      messageMove: vi.fn()
-        .mockRejectedValueOnce(new Error("batch fail")) // batch fails → per-email fallback
-        .mockResolvedValueOnce(undefined),               // per-email succeeds
-    });
+    const client = connectSvc(svc);
+    clientState(client).failNext.move = 1; // batch fails → per-email fallback
     seedUids(client, "INBOX", [198]);
     // Email "198" is NOT in cache → getEmailById is called to discover folder
     vi.spyOn(svc, "getEmailById").mockResolvedValue(makeEmail("198", "INBOX"));
@@ -2191,16 +2273,8 @@ describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
     // is covered by the 2000-UID `bulkDeleteEmails` test above and by the
     // `chunkUidsForWire` boundary tests.
     const uids = ["1", "2", "3", "4", "5"];
-    let call = 0;
-    const messageMove = vi.fn().mockImplementation(async (arg: unknown) => {
-      call += 1;
-      // First call: chunked set fails. Per-UID fallback for that chunk succeeds.
-      if (call === 1 && String(arg).includes(",")) {
-        throw new Error("BAD command line too long");
-      }
-      return undefined;
-    });
-    const client = connectSvc(svc, { messageMove });
+    const client = connectSvc(svc);
+    clientState(client).failNext.move = 1; // chunked call fails → per-UID fallback for that chunk
     seedUids(client, "INBOX", uids);
 
     vi.spyOn(svc, "getEmailById").mockImplementation(async (id) => makeEmail(id, "INBOX"));
@@ -2480,5 +2554,81 @@ describe("SimpleIMAPService.downloadAttachment size guard (PARSE-014)", () => {
     const result = await svc.downloadAttachment("2", 0);
     expect(result?.filename).toBe("ok.pdf");
     expect(result?.content).toBe(Buffer.from("hello").toString("base64"));
+  });
+});
+
+// ─── v3.0.65: honest counts — copy/move success means VERIFIED IN TARGET ──────
+// Bug A regression. Source = a non-INBOX union mailbox ("All Mail"). Before the
+// fix, success was counted when messageCopy/messageMove merely RESOLVED, so a
+// Bridge no-op from All Mail reported {success:N} while nothing landed.
+describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail source)", () => {
+  it("bulkCopyToFolder reports FAILURE when the copy resolves but nothing lands in the target", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    clientState(client).silentNoOp.copy = true; // Bridge accepts COPY from All Mail but does nothing
+    seedUids(client, "All Mail", [1, 2, 3, 4]);
+
+    const results = await svc.bulkCopyToFolder(["1", "2", "3", "4"], "Labels/Receipts", "All Mail");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(4);
+    expect(results.errors.join(" ")).toMatch(/not present|All Mail|union/i);
+  });
+
+  it("bulkCopyToFolder counts success only after verifying the message landed (real copy)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "All Mail", [1, 2]);
+
+    const results = await svc.bulkCopyToFolder(["1", "2"], "Labels/Receipts", "All Mail");
+
+    expect(results.success).toBe(2);
+    expect(results.failed).toBe(0);
+  });
+
+  it("verifies copies of messages that have NO Message-ID via the UIDPLUS COPYUID map (no false success, no false failure)", async () => {
+    // ENVELOPE can return NIL for Message-ID. Verification must not assume
+    // success for un-identifiable messages (the Copilot-flagged hole) — but a
+    // genuinely-landed copy must still succeed, proven by the COPYUID uidMap.
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUidsNoMid(client, "All Mail", [1, 2]);
+    const ok = await svc.bulkCopyToFolder(["1", "2"], "Labels/Receipts", "All Mail");
+    expect(ok.success).toBe(2); // uidMap confirms landing without a Message-ID
+    expect(ok.failed).toBe(0);
+
+    // And a no-Message-ID message whose copy no-ops (empty uidMap) is a failure,
+    // never an assumed success.
+    const svcB = new SimpleIMAPService();
+    const clientB = connectSvc(svcB);
+    clientState(clientB).silentNoOp.copy = true;
+    seedUidsNoMid(clientB, "All Mail", [5, 6]);
+    const bad = await svcB.bulkCopyToFolder(["5", "6"], "Labels/Receipts", "All Mail");
+    expect(bad.success).toBe(0);
+    expect(bad.failed).toBe(2);
+  });
+
+  it("bulkMoveEmails reports FAILURE when the move resolves but the message is absent from the target", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    clientState(client).silentNoOp.move = true; // Bridge accepts MOVE from All Mail but does nothing
+    seedUids(client, "All Mail", [10, 11, 12]);
+
+    const results = await svc.bulkMoveEmails(["10", "11", "12"], "Folders/Work", "All Mail");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(3);
+    expect(results.errors.join(" ")).toMatch(/not present|All Mail|union/i);
+  });
+
+  it("bulkMoveEmails from a non-INBOX source verifies landing and succeeds (real move)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "All Mail", [10, 11, 12]);
+
+    const results = await svc.bulkMoveEmails(["10", "11", "12"], "Folders/Work", "All Mail");
+
+    expect(results.success).toBe(3);
+    expect(results.failed).toBe(0);
   });
 });
