@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.68] — 2026-05-31
+
+### Fixed — IMAP connection leak / auth-retry storm (consolidated report cluster 2)
+
+- **`connect()` and the IDLE reconnect loop never closed the previous IMAP client before creating a new one**, so every reconnect (or half-open drop) orphaned a socket. Over a long-running process this leaked one Bridge IMAP session per reconnect; once Proton Bridge hit its per-user session cap and began rejecting auth (`454 too many login attempts`), the IDLE loop — retrying at a **flat 30 s with no backoff** — turned a single auth failure into thousands of leaked sockets and failed-auth attempts per day, eventually saturating Bridge. A reporter observed ~44,000 ESTABLISHED sockets across three orphaned instances.
+- **Fix:** `connect()` now reaps any existing client (`logout()`, falling back to `close()`) before assigning a new one. `runIdleLoop()` reaps the failed client on every iteration (so a dropped/failed connection's socket is never orphaned) and applies **exponential backoff** (30 s → cap 5 min), resetting to 30 s only after a clean connect — so a session-capped Bridge is no longer hammered. Regression test asserts a reconnect logs out the stale client before creating the new one.
+- **Note (report cluster 3, folder/label loss):** a read-only audit of every IMAP `STORE`/`COPY`/`MOVE`/`DELETE`/`mailboxDelete` call site found **no path that targets a wildcard, empty, or all-folders UID set** — all mutations are scoped to explicit, validated UIDs (empty sets short-circuit) and `delete_folder` deletes a single gated folder name. mailpouch could not have mass-unlabelled or mass-deleted folders directly; the loss correlates with the cluster-2 connection storm exhausting/corrupting Bridge, which this fix removes the trigger for.
+
 ## [3.0.67] — 2026-05-31
 
 ### Added — Enable/Disable Settings UI toggle on the standalone launcher tray
