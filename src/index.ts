@@ -1534,6 +1534,7 @@ async function killProtonBridge(): Promise<void> {
 function startBridgeWatchdog(): void {
   if (bridgeWatchdogTimer) return;
   bridgeWatchdogTimer = setInterval(async () => {
+   try {
     const [smtpOk, imapOk] = await Promise.all([
       isBridgeReachable(config.smtp.host, config.smtp.port),
       isBridgeReachable(config.imap.host, config.imap.port),
@@ -1589,6 +1590,11 @@ function startBridgeWatchdog(): void {
       );
       if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
     }
+   } catch (e: unknown) {
+     // An async error here (Promise.all reject, launchProtonBridge throw) would
+     // otherwise become an unhandledRejection → gracefulShutdown → process exit.
+     logger.warn("Bridge watchdog tick failed — will retry next interval", "MCPServer", e);
+   }
   }, 30_000).unref();
 }
 
