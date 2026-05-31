@@ -1624,6 +1624,10 @@ import { buildSettingsTrayMenu } from "./utils/tray-menu.js";
 let _settingsStop:    (() => Promise<void>) | null = null;
 let _settingsEnabled: boolean = false;
 let _settingsUrl:     string  = "";
+// When the settings UI can't bind, this records why (e.g. "ports 8765–8775 all
+// in use") so the tray can surface it instead of the "Open Settings" entry
+// silently vanishing. Cleared whenever the UI comes up.
+let _settingsUnavailableReason: string | undefined;
 /**
  * True when `_settingsUrl` points at a standalone `mailpouch-settings`
  * daemon we did NOT spawn — the port was already owned by another
@@ -1690,62 +1694,82 @@ async function _probeExistingMailpouchUi(port: number): Promise<string | null> {
 }
 
 async function _startSettingsServerDaemon(): Promise<void> {
-  const port = config.settingsPort ?? 8765;
+  const basePort = config.settingsPort ?? 8765;
 
-  // If a user-run `mailpouch-settings` instance is already serving on this
-  // port, reuse it silently rather than retry-and-warn. Probes with a short
-  // GET /api/status — any non-mailpouch listener (e.g. `python3 -m http.server`
-  // on the same port) responds with a different shape and falls through to
-  // the normal startup-then-EADDRINUSE path where the warning is accurate.
-  const existing = await _probeExistingMailpouchUi(port);
+  // If a user-run `mailpouch-settings` instance is already serving on the
+  // configured port, reuse it silently rather than retry-and-warn. Probes with
+  // a short GET /api/status — any non-mailpouch listener (e.g. a stray
+  // `python3 -m http.server`) responds with a different shape and falls through
+  // to the bind-then-fallback path below.
+  const existing = await _probeExistingMailpouchUi(basePort);
   if (existing) {
     _settingsUrl      = existing;
     _settingsEnabled  = true;
     _settingsExternal = true;
+    _settingsUnavailableReason = undefined;
     logger.info(`Reusing existing Settings UI at ${existing}`, "MCPServer");
     return;
   }
 
-  const maxAttempts = 5;
-  const retryMs     = 1000;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */, {
-        onRestartRequested: () => setImmediate(() => gracefulShutdown("update_restart")),
-        onShutdownRequested: () => setImmediate(() => gracefulShutdown("ui-shutdown").catch(() => process.exit(1))),
-      });
-      _settingsStop    = stop;
-      _settingsUrl     = `${scheme}://localhost:${port}`;
-      _settingsEnabled = true;
-      logger.info(`Settings UI started at ${_settingsUrl}`, "MCPServer");
-      return;
-    } catch (err: unknown) {
-      const isInUse = (err as NodeJS.ErrnoException).code === "EADDRINUSE";
-      if (isInUse && attempt < maxAttempts) {
-        logger.debug(`Settings UI port ${port} in use, retrying (${attempt}/${maxAttempts})…`, "MCPServer");
-        await new Promise(r => setTimeout(r, retryMs));
-      } else if (isInUse) {
-        // Exhausted retries. The probe didn't confirm a reusable mailpouch UI
-        // on this port, but that's not proof it ISN'T mailpouch — the
-        // standalone daemon in LAN mode gates /api/status on an access token
-        // (401s without it), and that's indistinguishable from "random
-        // listener". Phrase the warning honestly.
-        logger.warn(
-          `Settings UI could not bind port ${port} — another process is listening there and did not identify itself as mailpouch. ` +
-          `If it's a mailpouch-settings instance in LAN mode, this MCP will share it silently once you supply the access token. ` +
-          `Otherwise change settingsPort in ~/.mailpouch.json (or set the PORT env var) and restart to pick a free port.`,
-          "MCPServer",
-          err,
-        );
-        _markSettingsUnavailable();
+  // Bind the configured port; if it's held by a FOREIGN process (not a
+  // reusable mailpouch UI — the probe above already ruled that out), retrying
+  // the same port forever is pointless, so fall back to the next ports. The
+  // configured port still gets a couple of quick retries first to cover the
+  // transient "a mailpouch is restarting on it" window.
+  const PORT_FALLBACK_SPAN = 10;     // try basePort … basePort+10
+  const BASE_PORT_RETRIES  = 3;      // transient EADDRINUSE on the configured port
+  const retryMs            = 1000;
+  for (let offset = 0; offset <= PORT_FALLBACK_SPAN; offset++) {
+    const port = basePort + offset;
+    const retries = offset === 0 ? BASE_PORT_RETRIES : 1; // only the base port waits
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */, {
+          onRestartRequested: () => setImmediate(() => gracefulShutdown("update_restart")),
+          onShutdownRequested: () => setImmediate(() => gracefulShutdown("ui-shutdown").catch(() => process.exit(1))),
+        });
+        _settingsStop    = stop;
+        _settingsUrl     = `${scheme}://localhost:${port}`;
+        _settingsEnabled = true;
+        _settingsUnavailableReason = undefined;
+        if (offset === 0) {
+          logger.info(`Settings UI started at ${_settingsUrl}`, "MCPServer");
+        } else {
+          logger.warn(
+            `Settings UI: configured port ${basePort} was occupied by another process — bound to ${port} instead. ` +
+            `Open ${_settingsUrl}. To pin a port, set settingsPort in ~/.mailpouch.json.`,
+            "MCPServer",
+          );
+        }
         return;
-      } else {
+      } catch (err: unknown) {
+        const isInUse = (err as NodeJS.ErrnoException).code === "EADDRINUSE";
+        if (isInUse && attempt < retries) {
+          logger.debug(`Settings UI port ${port} in use, retrying (${attempt}/${retries})…`, "MCPServer");
+          await new Promise(r => setTimeout(r, retryMs));
+          continue;
+        }
+        if (isInUse) {
+          // This candidate port is taken; move on to the next one.
+          logger.debug(`Settings UI port ${port} in use; trying ${port + 1}.`, "MCPServer");
+          break;
+        }
+        // Non-EADDRINUSE failure (e.g. bad bind address) — don't keep trying.
         logger.warn("Settings UI failed to start", "MCPServer", err);
-        _markSettingsUnavailable();
+        _markSettingsUnavailable("settings server failed to start");
         return;
       }
     }
   }
+
+  // Every candidate port was occupied.
+  const span = `${basePort}–${basePort + PORT_FALLBACK_SPAN}`;
+  logger.warn(
+    `Settings UI could not bind any port in ${span} — all are in use by other processes. ` +
+    `Free one, or set settingsPort in ~/.mailpouch.json (or the PORT env var) to a free port, and restart.`,
+    "MCPServer",
+  );
+  _markSettingsUnavailable(`ports ${span} all in use`);
 }
 
 async function _stopSettingsServerDaemon(): Promise<void> {
@@ -1786,6 +1810,7 @@ function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
     activeCount:     agentGrants.list({ status: "active" }).length,
     settingsEnabled: _settingsEnabled,
     settingsUrl:     _settingsUrl,
+    settingsUnavailableReason: _settingsUnavailableReason,
   });
 }
 
@@ -1795,9 +1820,10 @@ function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
  * empty `_settingsUrl`. The `_settingsEnabled === !!_settingsUrl` invariant must
  * hold after every state change.
  */
-function _markSettingsUnavailable(): void {
+function _markSettingsUnavailable(reason?: string): void {
   _settingsEnabled = false;
   _settingsUrl     = "";
+  _settingsUnavailableReason = reason;
   _rebuildTray();
 }
 

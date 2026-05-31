@@ -302,7 +302,15 @@ ${buildStyles(cspNonce)}
         _tabLoaded.add(id);
         if (id === 'permissions') { buildCategoryUI(); if (cfg) populatePermissions(cfg); }
       } catch (e) {
-        targetEl.innerHTML = '<div class="alert alert-warn">Failed to load tab: ' + escHtml(String(e)) + '</div>';
+        // A fetch that rejects (vs. a non-2xx response, which we throw as
+        // "HTTP <code>") means the settings server is gone — the backing
+        // mailpouch process stopped or restarted while this page stayed open.
+        // Show an actionable message instead of the raw "TypeError: Failed to
+        // fetch" the browser produces.
+        var unreachable = (e instanceof TypeError) || /Failed to fetch|NetworkError|Load failed/i.test(String((e && e.message) || e));
+        targetEl.innerHTML = unreachable
+          ? '<div class="alert alert-warn">The settings server is no longer reachable — mailpouch may have stopped or restarted. Restart mailpouch and reload this page.</div>'
+          : '<div class="alert alert-warn">Failed to load tab: ' + escHtml(String(e)) + '</div>';
       } finally {
         _tabLoading.delete(id);
       }
