@@ -86,6 +86,12 @@ interface MockClientState {
   // folder + uid maps to a Message-ID (cross-mailbox identity used to verify a copy/move
   // can be VERIFIED to have landed in the target (the v3.0.65 honest-counts fix).
   midByFolderUid: Map<string, string>;
+  // folder + uid → subject, so the mock's SEARCH can match a `subject:` criterion
+  // (the live-search-freshness model for v3.0.71 / cluster 7 / O1).
+  subjectByFolderUid: Map<string, string>;
+  // folder + uid → raw RFC822 source, so searchSingleFolder's fetch+simpleParser
+  // path can resolve a freshly-seeded message that was never put in the email cache.
+  sourceByFolderUid: Map<string, string>;
   seq: number;
   // Number of leading messageMove/messageCopy calls to throw on (fault injection
   // for fallback tests) — exercises the chunk→per-UID fallback without replacing
@@ -147,6 +153,39 @@ export function seedUidsNoMid(
   }
 }
 
+/**
+ * Seed a fully-materialised message into a folder's UID table: subject + raw
+ * RFC822 source, so a live IMAP SEARCH (subject criterion) and the subsequent
+ * fetch+parse can resolve it WITHOUT the email ever having been in the local
+ * cache. This models freshly-arrived INBOX mail (cluster 7 / O1, v3.0.71).
+ */
+export function seedMessage(
+  client: Record<string, unknown>,
+  folder: string,
+  uid: number | string,
+  fields: { subject: string; from?: string; to?: string; date?: Date },
+): void {
+  const state = clientState(client);
+  let set = state.uidsByFolder.get(folder);
+  if (!set) { set = new Set(); state.uidsByFolder.set(folder, set); }
+  set.add(String(uid));
+  const key = midKeyOf(folder, uid);
+  if (!state.midByFolderUid.has(key)) state.midByFolderUid.set(key, defaultMid(folder, uid));
+  state.subjectByFolderUid.set(key, fields.subject);
+  const from = fields.from ?? "sender@example.com";
+  const to = fields.to ?? "recipient@example.com";
+  const date = (fields.date ?? new Date()).toUTCString();
+  const source =
+    `Message-ID: ${state.midByFolderUid.get(key)}\r\n` +
+    `From: ${from}\r\n` +
+    `To: ${to}\r\n` +
+    `Subject: ${fields.subject}\r\n` +
+    `Date: ${date}\r\n` +
+    `Content-Type: text/plain\r\n\r\n` +
+    `body of ${fields.subject}\r\n`;
+  state.sourceByFolderUid.set(key, source);
+}
+
 function parseUidRange(range: unknown): string[] {
   return String(range)
     .split(",")
@@ -174,6 +213,8 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
     uidsByFolder: new Map(),
     lockedFolder: null,
     midByFolderUid: new Map(),
+    subjectByFolderUid: new Map(),
+    sourceByFolderUid: new Map(),
     seq: 900000,
     failNext: { move: 0, copy: 0 },
     silentNoOp: { move: false, copy: false },
@@ -200,26 +241,54 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
     return (async function* () {
       for (const id of ids) {
         if (seeded.has(id)) {
-          const mid = folder ? state.midByFolderUid.get(midKeyOf(folder, id)) : undefined;
-          yield { uid: Number(id), envelope: { messageId: mid } };
+          const key = folder ? midKeyOf(folder, id) : "";
+          const mid = folder ? state.midByFolderUid.get(key) : undefined;
+          // When a full RFC822 source was seeded (seedMessage), expose it so the
+          // searchSingleFolder fetch+simpleParser path can materialise a message
+          // that was never in the local cache (live-search freshness).
+          const source = folder ? state.sourceByFolderUid.get(key) : undefined;
+          yield {
+            uid: Number(id),
+            envelope: { messageId: mid },
+            ...(source !== undefined
+              ? { source: Buffer.from(source, "utf8"), flags: new Set<string>(), bodyStructure: {} }
+              : {}),
+          };
         }
       }
     })();
   });
 
-  // SEARCH HEADER MESSAGE-ID <mid> within the locked folder — used by the
-  // copy/move landing verification.
-  const search = vi.fn().mockImplementation(async (criteria: { header?: Record<string, string> }, _opts: unknown) => {
-    const folder = state.lockedFolder;
-    const wantMid = criteria?.header?.["message-id"];
-    if (!folder || !wantMid) return [];
-    const set = state.uidsByFolder.get(folder) ?? new Set<string>();
-    const hits: number[] = [];
-    for (const uid of set) {
-      if (state.midByFolderUid.get(midKeyOf(folder, uid)) === wantMid) hits.push(Number(uid));
-    }
-    return hits;
-  });
+  // Live IMAP SEARCH over the locked folder's seeded messages.
+  //   • SEARCH HEADER MESSAGE-ID <mid> — copy/move landing verification.
+  //   • SEARCH SUBJECT <substr> — search_emails freshness (cluster 7 / O1).
+  // Returns matching UIDs straight from the per-folder tables; nothing here
+  // consults the production email cache, so a freshly-seeded message that was
+  // never cached is still found — exactly the live-search guarantee under test.
+  const search = vi.fn().mockImplementation(
+    async (criteria: { header?: Record<string, string>; subject?: string }, _opts: unknown) => {
+      const folder = state.lockedFolder;
+      if (!folder) return [];
+      const set = state.uidsByFolder.get(folder) ?? new Set<string>();
+      const wantMid = criteria?.header?.["message-id"];
+      const wantSubject = criteria?.subject;
+      const hits: number[] = [];
+      for (const uid of set) {
+        if (wantMid !== undefined) {
+          if (state.midByFolderUid.get(midKeyOf(folder, uid)) === wantMid) hits.push(Number(uid));
+          continue;
+        }
+        if (wantSubject !== undefined) {
+          const subj = state.subjectByFolderUid.get(midKeyOf(folder, uid)) ?? "";
+          if (subj.toLowerCase().includes(wantSubject.toLowerCase())) hits.push(Number(uid));
+          continue;
+        }
+        // No supported criterion → match nothing (the production code always
+        // passes at least one filter in the tests below).
+      }
+      return hits;
+    },
+  );
 
   const getMailboxLock = vi.fn().mockImplementation(async (folder: string) => {
     state.lockedFolder = folder;
@@ -2630,5 +2699,63 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
 
     expect(results.success).toBe(3);
     expect(results.failed).toBe(0);
+  });
+});
+
+// ─── searchEmails freshness — live IMAP SEARCH, not a cache scan ──────────────
+// Cluster 7 / Observation O1 (consolidated report 2026-05-31, shipped v3.0.71):
+//   `search_emails({folder:"INBOX", subject:"…"})` returned count:0 for a
+//   message verifiably in INBOX (e.g. a just-sent self-mail). The hypothesis was
+//   that search scanned a stale in-memory cache instead of issuing a live IMAP
+//   SEARCH, so mail that arrived after the last cache fill was invisible.
+//
+// These tests pin the live-search guarantee: a message seeded ONLY on the
+// (mock) server — never inserted into the production email cache — must still be
+// returned by searchEmails. If a future refactor reintroduced a cache-only scan,
+// `getCacheEntry` would miss the freshly-seeded UID and the assertion below would
+// fail, catching the regression.
+describe("SimpleIMAPService.searchEmails freshness (cluster 7 / O1, v3.0.71)", () => {
+  it("finds a freshly-arrived INBOX message that was never in the cache", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+
+    // Message exists on the server only — no prior getEmails/cache fill.
+    seedMessage(client, "INBOX", 4242, { subject: "Hello from a fresh self-mail" });
+    // Prove the cache really is cold for this UID.
+    expect((svc as any).getCacheEntry("4242", "INBOX")).toBeUndefined();
+
+    const results = await svc.searchEmails({ folder: "INBOX", subject: "fresh self-mail" });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe("4242");
+    expect(results[0].subject).toBe("Hello from a fresh self-mail");
+    expect(results[0].folder).toBe("INBOX");
+    // The live SEARCH was issued against the locked folder with the subject filter.
+    expect(client.search).toHaveBeenCalled();
+    const searchCriteria = (client.search as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(searchCriteria.subject).toBe("fresh self-mail");
+  });
+
+  it("populates the cache from the live fetch so a re-search hits the cache", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedMessage(client, "INBOX", 4243, { subject: "Indexed after first fetch" });
+
+    await svc.searchEmails({ folder: "INBOX", subject: "Indexed after first" });
+    // First search materialised the message into the cache for cheap re-serve.
+    expect((svc as any).getCacheEntry("4243", "INBOX")?.subject).toBe("Indexed after first fetch");
+
+    const again = await svc.searchEmails({ folder: "INBOX", subject: "Indexed after first" });
+    expect(again).toHaveLength(1);
+    expect(again[0].id).toBe("4243");
+  });
+
+  it("returns empty when no seeded message matches the live SEARCH", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedMessage(client, "INBOX", 4244, { subject: "Quarterly report" });
+
+    const results = await svc.searchEmails({ folder: "INBOX", subject: "no such subject" });
+    expect(results).toHaveLength(0);
   });
 });
