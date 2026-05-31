@@ -13,24 +13,29 @@ import {
 // HOME instead of the real ~/.mailpouch-*.lock.
 describe("singleton-lock", () => {
   const ENV = "MAILPOUCH_LOCK_PATH";
-  const HOME = "HOME";
+  // os.homedir() (which homeFile uses) reads HOME on POSIX but USERPROFILE on
+  // Windows — override BOTH so the temp dir is "home" on every platform.
+  const HOME_VARS = ["HOME", "USERPROFILE"] as const;
   const origEnv = process.env[ENV];
-  const origHome = process.env[HOME];
+  const origHome: Record<string, string | undefined> = {};
+  for (const v of HOME_VARS) origHome[v] = process.env[v];
   let dir: string;
   let lockFile: string;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "mp-lock-"));
-    // homeFile validates against homedir(); point HOME at our temp dir so the
-    // override is considered "inside HOME".
-    process.env[HOME] = dir;
+    // Point homedir() at our temp dir (HOME on POSIX, USERPROFILE on Windows)
+    // so homeFile considers the MAILPOUCH_LOCK_PATH override "inside HOME".
+    for (const v of HOME_VARS) process.env[v] = dir;
     lockFile = join(dir, "test.lock");
     process.env[ENV] = lockFile;
   });
 
   afterEach(() => {
     if (origEnv === undefined) delete process.env[ENV]; else process.env[ENV] = origEnv;
-    if (origHome === undefined) delete process.env[HOME]; else process.env[HOME] = origHome;
+    for (const v of HOME_VARS) {
+      if (origHome[v] === undefined) delete process.env[v]; else process.env[v] = origHome[v];
+    }
     rmSync(dir, { recursive: true, force: true });
   });
 
