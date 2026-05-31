@@ -130,6 +130,23 @@ export function seedUids(
   }
 }
 
+/** Seed UIDs that have NO Message-ID (IMAP ENVELOPE returns NIL) — used to
+ *  prove copy/move verification falls back to the UIDPLUS COPYUID map rather
+ *  than assuming success for un-identifiable messages. */
+export function seedUidsNoMid(
+  client: Record<string, unknown>,
+  folder: string,
+  uids: Array<number | string>,
+): void {
+  const state = clientState(client);
+  let set = state.uidsByFolder.get(folder);
+  if (!set) { set = new Set(); state.uidsByFolder.set(folder, set); }
+  for (const u of uids) {
+    set.add(String(u));
+    state.midByFolderUid.delete(midKeyOf(folder, u)); // explicitly no Message-ID
+  }
+}
+
 function parseUidRange(range: unknown): string[] {
   return String(range)
     .split(",")
@@ -222,22 +239,26 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
   const messageMove = vi.fn().mockImplementation(async (range: unknown, target: unknown, _opts: unknown) => {
     if (state.failNext.move > 0) { state.failNext.move--; throw new Error("batch error"); }
     assertUidsBelongToLockedFolder(state, range, "messageMove");
-    if (state.silentNoOp.move) return; // resolves OK but does nothing (Bridge All-Mail no-op)
-    const src = state.lockedFolder;
     const ids = parseUidRange(range);
+    // UIDPLUS COPYUID response: source uid → dest uid. An All-Mail no-op resolves
+    // OK but relocates nothing, so it returns an EMPTY uidMap.
+    if (state.silentNoOp.move) return { uidMap: new Map<number, number>() };
+    const src = state.lockedFolder;
     if (src && typeof target === "string") landInTarget(src, target, ids);
-    // Remove the moved UIDs from the source folder.
     if (src) {
       const set = state.uidsByFolder.get(src);
       if (set) for (const id of ids) set.delete(id);
     }
+    return { uidMap: new Map<number, number>(ids.map((id) => [Number(id), ++state.seq])) };
   });
   const messageCopy = vi.fn().mockImplementation(async (range: unknown, target: unknown, _opts: unknown) => {
     if (state.failNext.copy > 0) { state.failNext.copy--; throw new Error("batch error"); }
     assertUidsBelongToLockedFolder(state, range, "messageCopy");
-    if (state.silentNoOp.copy) return; // resolves OK but does nothing (Bridge All-Mail no-op)
+    const ids = parseUidRange(range);
+    if (state.silentNoOp.copy) return { uidMap: new Map<number, number>() };
     const src = state.lockedFolder;
-    if (src && typeof target === "string") landInTarget(src, target, parseUidRange(range));
+    if (src && typeof target === "string") landInTarget(src, target, ids);
+    return { uidMap: new Map<number, number>(ids.map((id) => [Number(id), ++state.seq])) };
   });
   const messageDelete = vi.fn().mockImplementation(async (range: unknown, _opts: unknown) => {
     assertUidsBelongToLockedFolder(state, range, "messageDelete");
@@ -2563,6 +2584,28 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
 
     expect(results.success).toBe(2);
     expect(results.failed).toBe(0);
+  });
+
+  it("verifies copies of messages that have NO Message-ID via the UIDPLUS COPYUID map (no false success, no false failure)", async () => {
+    // ENVELOPE can return NIL for Message-ID. Verification must not assume
+    // success for un-identifiable messages (the Copilot-flagged hole) — but a
+    // genuinely-landed copy must still succeed, proven by the COPYUID uidMap.
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUidsNoMid(client, "All Mail", [1, 2]);
+    const ok = await svc.bulkCopyToFolder(["1", "2"], "Labels/Receipts", "All Mail");
+    expect(ok.success).toBe(2); // uidMap confirms landing without a Message-ID
+    expect(ok.failed).toBe(0);
+
+    // And a no-Message-ID message whose copy no-ops (empty uidMap) is a failure,
+    // never an assumed success.
+    const svcB = new SimpleIMAPService();
+    const clientB = connectSvc(svcB);
+    clientState(clientB).silentNoOp.copy = true;
+    seedUidsNoMid(clientB, "All Mail", [5, 6]);
+    const bad = await svcB.bulkCopyToFolder(["5", "6"], "Labels/Receipts", "All Mail");
+    expect(bad.success).toBe(0);
+    expect(bad.failed).toBe(2);
   });
 
   it("bulkMoveEmails reports FAILURE when the move resolves but the message is absent from the target", async () => {
