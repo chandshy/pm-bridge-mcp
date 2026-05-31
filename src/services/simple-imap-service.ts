@@ -745,6 +745,19 @@ export class SimpleIMAPService {
       // localhost (Bridge uses STARTTLS on 1143) and true for non-localhost connections.
       const useSecure = secure !== undefined ? secure : !isLocalhost;
 
+      // Cluster-2 connection leak: tear down any existing client BEFORE we
+      // replace the reference. A reconnect() (or a re-connect after a half-open
+      // drop) used to overwrite `this.client` and orphan the previous socket —
+      // over a long-running process that leaks one FD per reconnect, eventually
+      // exhausting Bridge's per-user IMAP session limit.
+      if (this.client) {
+        const stale = this.client;
+        this.client = null;
+        this.isConnected = false;
+        try { await stale.logout(); }
+        catch { try { (stale as unknown as { close?: () => void }).close?.(); } catch { /* already gone */ } }
+      }
+
       this.client = new ImapFlow({
         host,
         port,
@@ -3252,8 +3265,27 @@ export class SimpleIMAPService {
       tlsOptions = { minVersion: 'TLSv1.2' };
     }
 
+    // Cluster-2 connection leak: a failed connect()/idle() must NOT leave its
+    // socket dangling for the next iteration to overwrite. Always reap the
+    // previous idle client before creating a new one, and back off
+    // exponentially on repeated failures so a session-capped Bridge (which
+    // answers "454 too many login attempts") isn't hammered every 30s — which
+    // previously turned one auth failure into thousands of leaked sockets/day.
+    const BASE_BACKOFF_MS = 30_000;
+    const MAX_BACKOFF_MS = 5 * 60_000;
+    let backoff = BASE_BACKOFF_MS;
+
+    const reapIdleClient = async (): Promise<void> => {
+      if (!this.idleClient) return;
+      const stale = this.idleClient;
+      this.idleClient = null;
+      try { await stale.logout(); }
+      catch { try { (stale as unknown as { close?: () => void }).close?.(); } catch { /* already gone */ } }
+    };
+
     while (this.idleActive) {
       try {
+        await reapIdleClient(); // never leak a prior socket
         this.idleClient = new ImapFlow({
           host: cfg.host,
           port: cfg.port,
@@ -3265,6 +3297,7 @@ export class SimpleIMAPService {
         });
 
         await this.idleClient.connect();
+        backoff = BASE_BACKOFF_MS; // connected cleanly — reset the failure backoff
         const lock = await this.idleClient.getMailboxLock('INBOX');
 
         try {
@@ -3287,17 +3320,18 @@ export class SimpleIMAPService {
           lock.release();
         }
       } catch (err) {
-        logger.debug('IDLE connection dropped, will retry in 30s', 'IMAPService', err);
+        // Close the failed client so its socket is reaped, not orphaned.
+        await reapIdleClient();
+        logger.debug(`IDLE connection dropped, will retry in ${Math.round(backoff / 1000)}s`, 'IMAPService', err);
       }
 
       if (this.idleActive) {
-        // Wait 30s before reconnecting
-        await new Promise(resolve => setTimeout(resolve, 30_000));
+        await new Promise(resolve => setTimeout(resolve, backoff));
+        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS); // escalate while failing
       }
     }
 
-    try { this.idleClient?.logout().catch(() => {}); } catch {}
-    this.idleClient = null;
+    await reapIdleClient();
   }
 
   /** Stop the background IDLE connection. */

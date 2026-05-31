@@ -62,6 +62,24 @@ describe("SimpleIMAPService.connect() bridgeCertPath handling", () => {
     expect((svc as any).isConnected).toBe(true);
   });
 
+  it("Cluster-2 leak: a reconnect tears down the previous client before creating a new one", async () => {
+    statSync.mockReturnValue({ isDirectory: () => false });
+    readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
+    const { ImapFlow } = await import("imapflow");
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    const svc = new SimpleIMAPService();
+    await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+    const first = ctor.mock.results[0].value as { logout: ReturnType<typeof vi.fn> };
+    expect(first.logout).not.toHaveBeenCalled(); // first connect: nothing to reap
+
+    // Reconnecting must logout() the stale client so its socket isn't orphaned.
+    await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+    expect(first.logout).toHaveBeenCalledTimes(1);
+    expect(ctor.mock.results.length).toBe(2); // a fresh client was created after reaping
+  });
+
   it("resolves cert.pem inside a directory when statSync says it is a directory (lines 317-319)", async () => {
     statSync.mockReturnValue({ isDirectory: () => true });
     readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
